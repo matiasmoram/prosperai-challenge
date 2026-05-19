@@ -36,3 +36,6 @@ htmlcov/
 # Misc
 *.log
 .cache/
+
+# Reference solutions (not part of own submission)
+other solutions/
