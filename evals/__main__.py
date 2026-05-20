@@ -1,5 +1,5 @@
 """CLI: ``python -m evals [--only NAME] [--tag TAG] [--json OUT.json]
-[--baseline PREV.json] [--concurrency N] [-v]``.
+[--baseline PREV.json] [--concurrency N] [--mock-llm] [-v]``.
 
 Exits non-zero if any scenario fails OR if --baseline is supplied and at
 least one scenario that previously passed now fails (regression).
@@ -9,6 +9,12 @@ Perf wave 2 #3: ``--concurrency N`` (default 4) runs scenarios under an
 owns an isolated SQLite engine (see ``evals/runner._isolated_engine``),
 so there's no shared mutable state between concurrent branches.
 Set ``--concurrency 1`` for serial debug.
+
+``--mock-llm`` swaps the real dispatcher LLM, persona simulator, and judge
+for deterministic canned versions in ``evals/mock_llm.py``. This lets the
+runner harness be exercised on a clean checkout (CI, fresh fork) without
+``OPENAI_API_KEY``. Some adversarial scenarios are intentionally minimal
+in mock mode; see ``evals/mock_llm.py`` for the per-scenario scripts.
 """
 
 from __future__ import annotations
@@ -20,8 +26,6 @@ import os
 import sys
 from collections import defaultdict
 from pathlib import Path
-
-from openai import AsyncOpenAI
 
 from evals.runner import run_scenario
 from evals.scenarios import SCENARIOS
@@ -38,19 +42,28 @@ def _select(args: argparse.Namespace) -> list[Scenario]:
     return out
 
 
-async def _run_all(scenarios: list[Scenario], *, concurrency: int) -> list[ScenarioResult]:
+async def _run_all(
+    scenarios: list[Scenario], *, concurrency: int, mock: bool = False
+) -> list[ScenarioResult]:
     """Run all selected scenarios with at most ``concurrency`` in flight.
 
     Each scenario builds its own SQLite engine + FastAPI app, so the only
     shared resources between branches are the AsyncOpenAI client (which
     httpx already serialises safely) and the semaphore itself.
+
+    When ``mock=True`` we skip building an ``AsyncOpenAI`` client entirely
+    so the CLI works without ``OPENAI_API_KEY``.
     """
-    client = AsyncOpenAI()
     sem = asyncio.Semaphore(max(1, concurrency))
+    client = None
+    if not mock:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI()
 
     async def _bounded(s: Scenario) -> ScenarioResult:
         async with sem:
-            return await run_scenario(s, openai_client=client)
+            return await run_scenario(s, openai_client=client, mock=mock)
 
     return await asyncio.gather(*[_bounded(s) for s in scenarios])
 
@@ -129,6 +142,15 @@ def main() -> int:
         default=4,
         help="Max scenarios in flight (default 4). Use 1 for serial debug.",
     )
+    parser.add_argument(
+        "--mock-llm",
+        action="store_true",
+        help=(
+            "Use the deterministic canned LLM in evals/mock_llm.py instead of "
+            "OpenAI. Skips the OPENAI_API_KEY requirement; useful on a clean "
+            "checkout / CI without secrets."
+        ),
+    )
     parser.add_argument("-v", action="store_true")
     args = parser.parse_args()
 
@@ -136,8 +158,8 @@ def main() -> int:
         print("ERROR: --concurrency must be >= 1", file=sys.stderr)
         return 2
 
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("ERROR: OPENAI_API_KEY not set", file=sys.stderr)
+    if not args.mock_llm and not os.environ.get("OPENAI_API_KEY"):
+        print("ERROR: OPENAI_API_KEY not set (use --mock-llm to skip)", file=sys.stderr)
         return 2
 
     scenarios = _select(args)
@@ -145,7 +167,7 @@ def main() -> int:
         print("no scenarios selected", file=sys.stderr)
         return 2
 
-    results = asyncio.run(_run_all(scenarios, concurrency=args.concurrency))
+    results = asyncio.run(_run_all(scenarios, concurrency=args.concurrency, mock=args.mock_llm))
     print(_summary(results))
     _print_aggregate_latency(results)
 

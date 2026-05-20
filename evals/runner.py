@@ -27,6 +27,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from evals.judge import judge_transcript
+from evals.mock_llm import MockDispatcherLLM, MockPersonaLLM, mock_judge_transcript
 from evals.sim import PersonaSimulator
 from evals.types import Scenario, ScenarioResult
 from prosper.dispatcher import Dispatcher
@@ -142,7 +143,23 @@ def _evaluate_state(
     return (not reasons), reasons
 
 
-async def run_scenario(scenario: Scenario, *, openai_client: Any) -> ScenarioResult:
+async def run_scenario(
+    scenario: Scenario,
+    *,
+    openai_client: Any = None,
+    mock: bool = False,
+) -> ScenarioResult:
+    """Run a single scenario end-to-end.
+
+    Args:
+        scenario: the Scenario to drive.
+        openai_client: an ``AsyncOpenAI`` instance, required when ``mock=False``.
+        mock: when True, swap in deterministic canned LLMs (no API key needed).
+            Used by ``python -m evals --mock-llm`` and the fast unit-test
+            harness in ``evals/test_scripted.py::test_scenario_mock``.
+    """
+    if not mock and openai_client is None:
+        raise ValueError("openai_client is required when mock=False")
     started = time.perf_counter()
     with _isolated_engine() as engine:
         with Session(engine) as setup_session:
@@ -156,12 +173,21 @@ async def run_scenario(scenario: Scenario, *, openai_client: Any) -> ScenarioRes
             }
         app = create_app(engine=engine)
         ehr = EHRClient.for_asgi_app(app)
-        dispatcher = Dispatcher(
-            llm=OpenAILLMAdapter(client=openai_client, model="gpt-4o-mini"),
-            ehr_client=ehr,
-        )
+        if mock:
+            mock_llm = MockDispatcherLLM(scenario.name)
+            dispatcher = Dispatcher(llm=mock_llm, ehr_client=ehr)
+            mock_llm.attach(dispatcher)
+        else:
+            dispatcher = Dispatcher(
+                llm=OpenAILLMAdapter(client=openai_client, model="gpt-4o-mini"),
+                ehr_client=ehr,
+            )
         async with ehr:
-            sim = PersonaSimulator(client=openai_client, persona=scenario.persona)
+            sim: Any
+            if mock:
+                sim = MockPersonaLLM(scenario.name)
+            else:
+                sim = PersonaSimulator(client=openai_client, persona=scenario.persona)
             bot_text = await dispatcher.start()
             turns = 0
             while dispatcher.state is not State.END and turns < scenario.max_turns:
@@ -184,11 +210,17 @@ async def run_scenario(scenario: Scenario, *, openai_client: Any) -> ScenarioRes
             terminal_state=dispatcher.state,
             deltas=deltas,
         )
-        judge_pass, justification = await judge_transcript(
-            client=openai_client,
-            transcript=dispatcher.transcript,
-            criteria=scenario.judge_criteria,
-        )
+        if mock:
+            judge_pass, justification = await mock_judge_transcript(
+                transcript=dispatcher.transcript,
+                criteria=scenario.judge_criteria,
+            )
+        else:
+            judge_pass, justification = await judge_transcript(
+                client=openai_client,
+                transcript=dispatcher.transcript,
+                criteria=scenario.judge_criteria,
+            )
         timing = dispatcher.timing.summary()
         cached_tokens = dispatcher.cached_prompt_tokens_total
         prompt_tokens = dispatcher.prompt_tokens_total
