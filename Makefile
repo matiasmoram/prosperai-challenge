@@ -1,4 +1,4 @@
-.PHONY: install seed ehr bot dev test eval eval-baseline lint type bench verify pre-commit clean
+.PHONY: install seed ehr bot dev test eval eval-baseline lint type bench verify status pre-commit clean
 
 install:
 	uv sync
@@ -33,6 +33,9 @@ type:
 
 bench:
 	uv run python scripts/bench.py --rounds 10
+
+status:
+	uv run python scripts/status.py
 
 # One-shot pre-submit gate: everything CI runs, locally. Use this before
 # pushing or opening a PR. Stops on first failure.
