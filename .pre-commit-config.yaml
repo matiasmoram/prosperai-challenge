@@ -7,6 +7,12 @@ repos:
       - id: ruff-format
   - repo: local
     hooks:
+      - id: mypy
+        name: mypy --strict (src/prosper)
+        entry: uv run mypy src/prosper
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
       - id: pytest-unit
         name: pytest (unit tests only)
         entry: uv run pytest tests/ -q

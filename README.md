@@ -10,12 +10,14 @@ Full design + decision trail in [`SOLUTION.md`](./SOLUTION.md).
 - Python 3.10+
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 - API keys for ElevenLabs and OpenAI
+- `make` (Linux/macOS). On Windows, use the **uv-direct commands** column
+  in the table below — they are exactly what the `make` targets run.
 
 ## Setup
 ```bash
 cp env.example .env       # add ELEVENLABS_API_KEY and OPENAI_API_KEY
-make install              # uv sync
-make seed                 # populate SQLite with providers + slots + demo patients
+make install              # or: uv sync
+make seed                 # or: uv run python scripts/seed.py
 ```
 
 ## Run
@@ -28,12 +30,41 @@ Open `http://localhost:7860`, click **Connect**, talk to the agent.
 
 Or with Docker: `docker-compose up`.
 
-## Test
-```bash
-make test                 # unit tests (no external services)
-make eval                 # scripted scenario evals (needs OPENAI_API_KEY)
-make lint                 # ruff lint + format check
-```
+## All commands
+
+| `make` target    | uv-direct equivalent (works on Windows)                                          | Purpose                                                          |
+|------------------|----------------------------------------------------------------------------------|------------------------------------------------------------------|
+| `install`        | `uv sync`                                                                        | Install deps from `uv.lock`                                      |
+| `seed`           | `uv run python scripts/seed.py`                                                  | Populate SQLite (3 providers, 14 days of slots, 2 demo patients) |
+| `ehr`            | `uv run uvicorn prosper.ehr.api:app --host 0.0.0.0 --port 8000 --reload`         | FastAPI EHR + Swagger `/docs` on `:8000`                         |
+| `bot`            | `uv run bot.py`                                                                  | Pipecat browser client on `:7860`                                |
+| `test`           | `uv run pytest tests/ -v`                                                        | Unit tests (no external services)                                |
+| `eval`           | `uv run pytest evals/test_scripted.py -v`                                        | Scripted scenarios via pytest (needs `OPENAI_API_KEY`)           |
+| `eval-baseline`  | `uv run python -m evals --json evals/results/current.json --baseline evals/results/baseline.json` | CLI eval with regression diff against a snapshot                 |
+| `lint`           | `uv run ruff check src/ tests/ evals/` then `uv run ruff format --check ...`     | Ruff lint + format check                                         |
+| `type`           | `uv run mypy src/prosper`                                                        | mypy on the package                                              |
+| `pre-commit`     | `uv run pre-commit run --all-files`                                              | Run the full pre-commit suite                                    |
+| `clean`          | `rm -rf data/ .pytest_cache/ .mypy_cache/ .ruff_cache/ evals/results/`           | Reset local caches and DB                                        |
+
+### Eval CLI exit codes (`python -m evals` and `make eval-baseline`)
+
+| Code | Meaning                                                                          |
+|------|----------------------------------------------------------------------------------|
+| `0`  | All selected scenarios passed (state + judge).                                   |
+| `1`  | At least one scenario failed.                                                    |
+| `2`  | Bad invocation (no `OPENAI_API_KEY` set, or no scenarios matched the filter).    |
+| `3`  | `--baseline` regression: a scenario that previously passed now fails.            |
+
+## Environment variables (`env.example`)
+
+| Var                          | Default                       | Purpose                                                                                  |
+|------------------------------|-------------------------------|------------------------------------------------------------------------------------------|
+| `ELEVENLABS_API_KEY`         | _required_                    | ElevenLabs STT (Realtime) + TTS (Flash v2.5).                                            |
+| `OPENAI_API_KEY`             | _required for bot + eval_     | OpenAI Chat Completions for the dispatcher LLM and the eval judge.                       |
+| `PROSPER_EHR_URL`            | `http://127.0.0.1:8000`       | Where the bot reaches the EHR. Override in Docker / split-host setups.                   |
+| `PROSPER_DB_URL`             | `sqlite:///data/ehr.db`       | SQLAlchemy DSN. Swap to Postgres without code changes.                                   |
+| `PROSPER_BOT_MODEL`          | `gpt-4o-mini`                 | Primary LLM for the dispatcher.                                                          |
+| `PROSPER_BOT_FALLBACK_MODEL` | _unset_ (e.g. `gpt-4o`)       | Optional secondary model — tried once if the primary exhausts its retry budget.          |
 
 ## Project layout
 ```
@@ -42,8 +73,12 @@ src/prosper/ehr/         # FastAPI EHR (models, repository, api, schemas, db)
 src/prosper/observability/   # TimingCollector
 evals/                   # Scenario dataclasses, runner, judge, persona sim, CLI
 tests/                   # unit tests (EHR + dispatcher + tool handlers)
+docs/adr/                # Architecture Decision Records (3 short ADRs)
+docs/architecture.md     # ASCII process + FSM diagrams
+docs/interview-notes.md  # candidate prep — also doubles as decision evidence
 docs/superpowers/        # design specs + implementation plan
 scripts/seed.py          # one-shot DB seeding
+scripts/bench.py         # re-runnable EHR-endpoint micro-bench
 ```
 
 ## Notable

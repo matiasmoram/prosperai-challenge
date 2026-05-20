@@ -14,6 +14,7 @@ For each Scenario:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import tempfile
@@ -39,23 +40,21 @@ from prosper.llm import OpenAILLMAdapter
 
 @contextmanager
 def _isolated_db_env() -> Iterator[str]:
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    tmp.close()
+    fd, tmp_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
     prior = os.environ.get("PROSPER_DB_URL")
-    os.environ["PROSPER_DB_URL"] = f"sqlite:///{tmp.name}"
+    os.environ["PROSPER_DB_URL"] = f"sqlite:///{tmp_path}"
     try:
         get_engine(reset=True)
         init_db()
-        yield tmp.name
+        yield tmp_path
     finally:
         if prior is None:
             os.environ.pop("PROSPER_DB_URL", None)
         else:
             os.environ["PROSPER_DB_URL"] = prior
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
 
 
 def _count_patients(session: Session) -> int:

@@ -13,7 +13,7 @@ the dispatcher translates these into ``Result[Ok, Err]`` values.
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Self
+from typing import Any, Self, cast
 
 import httpx
 from fastapi import FastAPI
@@ -81,21 +81,24 @@ class EHRClient:
         phone: str,
         email: str | None = None,
     ) -> dict[str, Any]:
-        return await self._request(
-            "POST",
-            "/patients",
-            json={
-                "first_name": first_name,
-                "last_name": last_name,
-                "dob": dob.isoformat(),
-                "phone": phone,
-                "email": email,
-            },
+        return cast(
+            "dict[str, Any]",
+            await self._request(
+                "POST",
+                "/patients",
+                json={
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "dob": dob.isoformat(),
+                    "phone": phone,
+                    "email": email,
+                },
+            ),
         )
 
     async def find_patients_by_phone(self, phone: str) -> list[dict[str, Any]]:
         body = await self._request("GET", "/patients/by-phone", params={"phone": phone})
-        return body["patients"]
+        return cast("list[dict[str, Any]]", body["patients"])
 
     async def find_patients_by_name_dob(
         self,
@@ -108,11 +111,11 @@ class EHRClient:
             "/patients/by-name-dob",
             params={"name": name, "dob": dob.isoformat(), "min_similarity": min_similarity},
         )
-        return body["patients"]
+        return cast("list[dict[str, Any]]", body["patients"])
 
     async def get_upcoming_appointments(self, patient_id: str) -> list[dict[str, Any]]:
         body = await self._request("GET", f"/patients/{patient_id}/appointments")
-        return body["appointments"]
+        return cast("list[dict[str, Any]]", body["appointments"])
 
     async def list_availability(
         self,
@@ -124,7 +127,7 @@ class EHRClient:
         if provider_id is not None:
             params["provider_id"] = provider_id
         body = await self._request("GET", "/availability", params=params)
-        return body["slots"]
+        return cast("list[dict[str, Any]]", body["slots"])
 
     async def create_appointment(
         self,
@@ -133,10 +136,13 @@ class EHRClient:
         slot_id: str,
         notes: str | None = None,
     ) -> dict[str, Any]:
-        return await self._request(
-            "POST",
-            "/appointments",
-            json={"patient_id": patient_id, "slot_id": slot_id, "notes": notes},
+        return cast(
+            "dict[str, Any]",
+            await self._request(
+                "POST",
+                "/appointments",
+                json={"patient_id": patient_id, "slot_id": slot_id, "notes": notes},
+            ),
         )
 
     async def cancel_appointment(
@@ -145,8 +151,11 @@ class EHRClient:
         appointment_id: str,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        return await self._request(
-            "POST",
-            f"/appointments/{appointment_id}/cancel",
-            json={"reason": reason},
+        return cast(
+            "dict[str, Any]",
+            await self._request(
+                "POST",
+                f"/appointments/{appointment_id}/cancel",
+                json={"reason": reason},
+            ),
         )

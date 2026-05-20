@@ -13,6 +13,7 @@ whitelist in ``flows.py`` references them by name.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import date
 from typing import Any
 
@@ -20,6 +21,8 @@ from dateutil import parser as dateparser
 
 from prosper.ehr_client import EHRClient, EHRHTTPError
 from prosper.result import Err, Ok, Result
+
+ToolHandler = Callable[..., Awaitable[Result[dict[str, Any]]]]
 
 
 def _parse_dob(raw: str) -> Result[date]:
@@ -311,7 +314,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
-HANDLERS = {
+HANDLERS: dict[str, ToolHandler] = {
     "find_patient_by_phone": find_patient_by_phone_handler,
     "find_patient_by_name_dob": find_patient_by_name_dob_handler,
     "create_patient": create_patient_handler,

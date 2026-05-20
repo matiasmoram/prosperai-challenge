@@ -188,12 +188,8 @@ def test_list_availability_excludes_past_slots(session: Session) -> None:
     today = datetime.now(timezone.utc).date()
     past = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=1)
     future = datetime.now(timezone.utc) + timedelta(hours=2)
-    past_slot = Slot(
-        provider=provider, start_at=past, end_at=past + timedelta(minutes=30)
-    )
-    future_slot = Slot(
-        provider=provider, start_at=future, end_at=future + timedelta(minutes=30)
-    )
+    past_slot = Slot(provider=provider, start_at=past, end_at=past + timedelta(minutes=30))
+    future_slot = Slot(provider=provider, start_at=future, end_at=future + timedelta(minutes=30))
     session.add_all([past_slot, future_slot])
     session.commit()
     available = repo.list_available_slots(session, date_=today)

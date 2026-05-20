@@ -65,7 +65,13 @@ class OpenAILLMAdapter:
         self._retry_wait_initial = retry_wait_initial
         self._retry_wait_max = retry_wait_max
 
-    async def generate(self, *, state: str, history: list[dict], tools: list[dict]) -> LLMReply:
+    async def generate(
+        self,
+        *,
+        state: str,  # noqa: ARG002 — part of LLMClientProtocol; mock adapters in tests inspect it
+        history: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> LLMReply:
         try:
             return await self._call_with_retry(self._model, history, tools)
         except _RETRYABLE as primary_exc:
@@ -81,7 +87,7 @@ class OpenAILLMAdapter:
             return await self._call_with_retry(self._fallback_model, history, tools)
 
     async def _call_with_retry(
-        self, model: str, history: list[dict], tools: list[dict]
+        self, model: str, history: list[dict[str, Any]], tools: list[dict[str, Any]]
     ) -> LLMReply:
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(self._max_attempts),
@@ -95,7 +101,9 @@ class OpenAILLMAdapter:
                 return await self._single_call(model, history, tools)
         raise RuntimeError("unreachable — AsyncRetrying always returns or raises")
 
-    async def _single_call(self, model: str, history: list[dict], tools: list[dict]) -> LLMReply:
+    async def _single_call(
+        self, model: str, history: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> LLMReply:
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": history,

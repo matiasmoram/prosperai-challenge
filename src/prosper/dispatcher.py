@@ -277,7 +277,7 @@ class Dispatcher:
                     "phone": result.value["phone"],
                 }
         else:
-            assert is_err(result)
+            assert is_err(result)  # noqa: S101 — TypeGuard narrowing for the type checker
             self.transcript.append(
                 {
                     "kind": "tool_err",

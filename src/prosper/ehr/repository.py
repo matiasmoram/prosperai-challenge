@@ -114,7 +114,7 @@ def list_available_slots(
     # Audit A1: never offer a slot whose start_at is already in the past.
     cutoff = max(day_start, datetime.now(timezone.utc))
     # Single-query LEFT-OUTER-JOIN against scheduled appointments — drops the
-    # previous N+1 (588 slot rows × 588 sub-selects = ~115ms on this dataset)
+    # previous N+1 (588 slot rows x 588 sub-selects = ~115ms on this dataset)
     # to a single index scan (~3ms).
     booked_subq = (
         select(Appointment.slot_id)

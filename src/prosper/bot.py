@@ -128,7 +128,8 @@ class DispatcherProcessor(FrameProcessor):
             # don't poison the next TTFT sample.
             try:
                 reply = await self._dispatcher.handle_user_turn(user_text)
-            except Exception as e:  # last-resort guard for live calls; mid-pipeline crash would kill the WebRTC session
+            # last-resort guard for live calls; mid-pipeline crash would kill the WebRTC session
+            except Exception as e:
                 logger.exception("dispatcher.handle_user_turn raised: {}", e)
                 reply = (
                     "Sorry, I missed that — could you say it again?"

@@ -22,7 +22,7 @@ async def test_placeholder(scenario) -> None:  # pragma: no cover
     pass
 
 
-def pytest_generate_tests(metafunc) -> None:  # noqa: D401
+def pytest_generate_tests(metafunc) -> None:
     """Collect scenarios lazily so importing the module without OpenAI
     works for plain ``pytest --collect-only``.
     """

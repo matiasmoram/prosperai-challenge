@@ -34,11 +34,16 @@ dev = [
 line-length = 100
 
 [tool.ruff.lint]
-select = ["I", "E", "F", "W", "B", "UP"]
+select = ["I", "E", "F", "W", "B", "UP", "ARG", "SIM", "RET", "RUF", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/prosper/ehr/api.py" = ["B008"]  # FastAPI dependency-injection pattern
 "src/prosper/result.py" = ["UP007"]  # TypeVar with X | Y requires PEP 695 in 3.12+
+"src/prosper/ehr/db.py" = ["S101"]  # assert used as None-narrowing for `_SessionLocal`
+"src/prosper/ehr_client.py" = ["S101"]  # assert narrows Optional[AsyncClient] inside `_c()`
+"src/prosper/prompts.py" = ["RUF001"]  # en-dash is intentional in user-facing voice copy
+"tests/*" = ["S101", "ARG"]  # pytest uses `assert`; mock callbacks accept unused fixture params
+"evals/*" = ["S101", "ARG"]  # eval scenarios use `assert`; setup-lambdas have fixed signatures
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
