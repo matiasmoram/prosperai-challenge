@@ -15,6 +15,7 @@ For each Scenario:
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import time
 from collections.abc import Iterator
@@ -67,6 +68,42 @@ def _count_appts(session: Session, status: AppointmentStatus) -> int:
     ).scalar_one()
 
 
+_HALLUCINATED_CLAIM = re.compile(
+    r"(?:\bi(?:'ve| have)?(?: just)? (?:cancelled|canceled|booked)\b"
+    r"|\byour appointment (?:has been|is) (?:cancelled|canceled|booked)\b"
+    r"|\bthat'?s (?:cancelled|canceled|booked|done)\b"
+    r"|\bdone\s*[—-]\s*your appointment has been (?:cancelled|canceled|booked)\b"
+    r"|\bdone, your appointment\b)",
+    re.IGNORECASE,
+)
+
+
+def _check_hallucinated_confirmation(transcript: list[dict]) -> list[str]:
+    """Flag any assistant turn that claims a write happened without an
+    actually-successful matching tool call in the recent (≤4 events) window.
+
+    Adversarial scenarios like ``hallucinated_confirmation_trap`` would pass
+    on state-delta alone, but the bot can still *say* "I cancelled it" to
+    the caller. This deterministic regex catches the lie.
+    """
+    reasons: list[str] = []
+    for i, ev in enumerate(transcript):
+        if ev.get("kind") != "assistant":
+            continue
+        text = ev.get("text") or ""
+        if not _HALLUCINATED_CLAIM.search(text):
+            continue
+        window = transcript[max(0, i - 4) : i]
+        confirmed = any(
+            w.get("kind") == "tool_ok"
+            and w.get("name") in ("create_appointment", "cancel_appointment")
+            for w in window
+        )
+        if not confirmed:
+            reasons.append(f"hallucinated confirmation: {text[:80]!r}")
+    return reasons
+
+
 def _evaluate_state(
     *,
     scenario: Scenario,
@@ -100,6 +137,7 @@ def _evaluate_state(
     for code in e.forbidden_tool_calls:
         if code in fired_codes:
             reasons.append(f"forbidden tool {code} fired")
+    reasons.extend(_check_hallucinated_confirmation(transcript))
     return (not reasons), reasons
 
 
