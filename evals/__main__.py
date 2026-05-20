@@ -145,7 +145,7 @@ def main() -> int:
         print("no scenarios selected", file=sys.stderr)
         return 2
 
-    results = asyncio.run(_run_all(scenarios))
+    results = asyncio.run(_run_all(scenarios, concurrency=args.concurrency))
     print(_summary(results))
     _print_aggregate_latency(results)
 

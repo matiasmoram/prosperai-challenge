@@ -256,55 +256,31 @@ Shipped tactics:
   pushed before each LLM turn that lives in a tool-calling state, so the
   caller hears acknowledgement immediately rather than dead air.
 
-A representative table from a sample eval run looks like this (replace
-with your local numbers after `make eval-baseline`):
+EHR endpoint micro-bench (`make bench` → `scripts/bench.py`,
+10 rounds, against `make ehr` on local NVMe):
 
 ```
-phase                                count    p50ms    p95ms    maxms
-llm                                     42      820     1450     1980
-tool:find_patient_by_phone               6       18       42       55
-tool:list_availability_slots             6       21       38       49
-tool:create_appointment                  4       33       58       62
-tool:cancel_appointment                  2       28       35       35
-tool:get_upcoming_appointments           3       22       30       30
+endpoint           min   p50   p95   max
+health             1.8   2.1   2.7   2.9
+availability       8.8   9.7  10.7  11.2
+by-phone (hit)     4.2   4.5   5.2   5.3
+by-phone (miss)    4.1   4.6   4.9   5.7
+by-name-dob        4.5   5.3   5.6   6.6
 ```
 
-What surprised us:
-- The LLM dominates by an order of magnitude. In-process EHR calls
-  through `httpx.ASGITransport` are sub-50 ms; even via a real local
-  socket they stay sub-100 ms.
-- The stable `CLINIC_PERSONA` preamble measurably reduces per-turn cost
-  on repeated states — OpenAI's prompt cache fires from the second turn
-  onward (we have not surfaced the `cached_tokens` count in v1, but the
-  shape of `llm` p50 vs first-turn cost confirms the pattern).
+Full snapshot history in `docs/bench-results.md` (pre-N+1-fix
+`/availability` was 115 ms — single LEFT-OUTER-JOIN dropped it to
+~10 ms; SQLite WAL further halves p50 under concurrent writes).
 
-The `TimingCollector` emits one JSON line per span (`{evt:"span", phase,
-state, duration_ms}`) to stdout, plus a summary at session end. The eval
-CLI aggregates p50 across all scenarios.
-
-## Real transcripts
-
-Capturing real transcripts requires a running ElevenLabs+OpenAI session.
-Run `make ehr` + `make bot`, open `http://localhost:7860`, talk to the
-agent end-to-end, and copy the dispatcher's `USER:` / `BOT[state]:` log
-lines into the placeholders below. Both a happy run and a recovery run
-are worth pasting in.
-
-### Successful new-patient booking
-
-```
-[Paste captured session log here — the dispatcher logs every turn as
- "USER: …" and "BOT[STATE]: …" lines, plus tool_ok / tool_err / transition
- events. Both `make bot` stdout and the structured JSON span lines work.]
-```
-
-### Recovery from misheard DOB
-
-```
-[Paste a second run here — preferably a recovery scenario (e.g. DOB
- mispronounced and then corrected) so the failure-and-recovery surface
- is visible.]
-```
+What this means at the call level:
+- The LLM dominates by an order of magnitude. EHR calls (via either
+  `httpx.ASGITransport` in evals or a real local socket in prod) stay
+  sub-15 ms; a single LLM turn is 800-2000 ms.
+- The stable `CLINIC_PERSONA` preamble crosses OpenAI's 1024-token
+  prompt-cache threshold; `cached_prompt_tokens` is now surfaced per
+  turn (`LLMUsage.cached_prompt_tokens` in the transcript, totals in
+  `Dispatcher.cached_prompt_tokens_total`) so the eval runner can report
+  `cache=XX%` per scenario.
 
 ## Dev-log
 
@@ -340,15 +316,17 @@ are worth pasting in.
   post-check in the runner — that single ~30-line addition makes the 5
   adversarial scenarios actually meaningful.
 
-## Intentional cuts (deferred to future work)
+## Intentional cuts (still deferred)
 
 | Cut | Why |
 |---|---|
-| No auth / HIPAA encryption | Demo scope; SQLite is dev-only. Documented upgrade path is Postgres + a managed token service. |
-| No multi-provider **STT/TTS** fallback | Pipecat has no first-class ServiceSwitcher (issue #4139); meanwhile we ship LLM retry+fallback as the higher-value reliability win. |
-| No proactive prefetch on STT partials | Brittle on partial-text changes; instrumentation now in place to see where real pain is before adding. |
-| No `mypy --strict` gate in pre-commit / CI | Strict-clean coverage isn't there yet; documented as next quality gate in CLAUDE.md. |
-| No availability cache | 30-line `dict` TTL cache would shave the 21 ms `list_availability_slots` cost — far below the LLM-dominated budget, so deferred. |
+| No auth / HIPAA encryption at rest | Demo scope; SQLite is dev-only. Documented upgrade path is Postgres + a managed token service. PII redaction in log sinks (above) covers the most-likely leak surface in the meantime. |
+| No multi-provider **STT/TTS** fallback | Pipecat has no first-class `ServiceSwitcher` (issue [#4139](https://github.com/pipecat-ai/pipecat/issues/4139)); meanwhile we ship LLM retry+fallback as the higher-value reliability win. |
+| No streaming TTS (flush-after-each-clause) | Biggest remaining perceived-latency win, but needs a custom Pipecat processor — out of scope for the submission window. |
+| No OpenRouter / generic LLM gateway | Would simplify the fallback story to a single env-var swap and unlock 100+ models. We keep provider-direct so OpenAI's prompt-cache discount still applies. |
+| No real audio smoke test (TTS → STT loop) | Current skeleton (`evals/audio_smoke/`) just asserts the dispatcher module imports; a real audio round-trip would need recorded WAV fixtures + ElevenLabs credits in CI. |
+| No proactive prefetch on STT partials | Brittle on partial-text changes; instrumentation is in place (`ttft` phase) so we can see where real pain is before adding. |
+| No `AvailabilityCache` | A 30-line `dict` TTL cache would shave the ~10 ms `list_availability_slots` cost — far below the LLM-dominated budget, so deferred. |
 | No pre-recorded "everything is on fire" TTS fallback | Would need a checked-in WAV + regex phone capture; deferred behind the LLM retry layer that handles 99% of provider blips. |
 
 ## Future work (in priority order)
@@ -358,17 +336,15 @@ are worth pasting in.
 2. **Streaming TTS** via ElevenLabs flush-after-each-clause — biggest
    remaining perceived-latency win.
 3. **OpenRouter as LLM gateway** — would simplify the fallback story to
-   a single env-var swap and unlock 100+ models. We currently keep
-   provider-direct so the prompt-cache discount still applies.
-4. **Audio smoke tests with a real TTS→STT loop** — current skeleton
+   a single env-var swap and unlock 100+ models.
+4. **Audio smoke tests with a real TTS → STT loop** — current skeleton
    just asserts the dispatcher module imports.
-5. **`mypy --strict` in pre-commit / CI.**
-6. **Continuous production eval (5–10% sampling)** — 2026 production
+5. **Continuous production eval (5–10% sampling)** — 2026 production
    pattern; would sample live transcripts to the LLM judge for drift
    detection.
-7. **Pre-recorded "everything is on fire" TTS fallback** — for the
+6. **Pre-recorded "everything is on fire" TTS fallback** — for the
    double-failure case where retry + fallback both exhaust.
-8. **`AvailabilityCache`** with 60 s TTL in `repository.py`.
+7. **`AvailabilityCache`** with 60 s TTL in `repository.py`.
 
 ## File map (where to look for what)
 
@@ -379,9 +355,17 @@ are worth pasting in.
 - `src/prosper/tools.py` — tool handlers + OpenAI schemas + `HANDLERS` map
 - `src/prosper/llm.py` — `OpenAILLMAdapter` (implements `LLMClientProtocol`)
 - `src/prosper/observability/timing.py` — `TimingCollector` + JSON span logs
-- `src/prosper/bot.py` — Pipecat pipeline wiring + `DispatcherProcessor`
+- `src/prosper/observability/redact.py` — `redact_pii` + `mask_name` for log lines
+- `src/prosper/bot.py` — Pipecat pipeline wiring + `DispatcherProcessor` + SSRF guard + env fail-fast
 - `evals/` — `Scenario`/`StateExpectation` types, persona simulator,
   judge, runner, scenarios, pytest entrypoint, CLI
+- `scripts/bench.py` — re-runnable EHR-endpoint micro-bench (`make bench`)
+- `docs/adr/` — three short Architecture Decision Records
+- `docs/architecture.md` — ASCII process + FSM diagrams
+- `docs/bench-results.md` — pinned bench snapshots, oldest → newest
+- `docs/interview-notes.md` — candidate prep + decision evidence
+- `docs/research/` — codebase-audit, security-audit, prod-readiness,
+  reliability, eval-depth, latency-advanced, perf-wave2 research notes
 - `docs/superpowers/specs/2026-05-19-prosper-challenge-design.md` —
   full deliberation trail (LLM council verdict per decision)
 - `docs/superpowers/specs/2026-05-19-other-solutions-best-ideas.md` —
