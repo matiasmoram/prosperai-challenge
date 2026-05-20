@@ -43,7 +43,13 @@ class LLMReply:
 
 
 class LLMClientProtocol(Protocol):
-    async def generate(self, *, state: str, history: list[dict], tools: list[dict]) -> LLMReply: ...
+    async def generate(
+        self,
+        *,
+        state: str,
+        history: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> LLMReply: ...
 
 
 @dataclass
@@ -59,9 +65,9 @@ class LLMUsage:
 class SessionMemory:
     """Cross-state data the LLM accumulates within a call."""
 
-    identified_patient: dict | None = None
-    last_slots: list[dict] = field(default_factory=list)
-    last_upcoming_appointments: list[dict] = field(default_factory=list)
+    identified_patient: dict[str, Any] | None = None
+    last_slots: list[dict[str, Any]] = field(default_factory=list)
+    last_upcoming_appointments: list[dict[str, Any]] = field(default_factory=list)
 
 
 _AFFIRM = re.compile(
@@ -92,16 +98,14 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
         if not appts:
             return "no upcoming appointments"
         return "upcoming: " + "; ".join(
-            f"#{i + 1} {a['start_at']} with {a['provider_name']}"
-            for i, a in enumerate(appts)
+            f"#{i + 1} {a['start_at']} with {a['provider_name']}" for i, a in enumerate(appts)
         )
     if name in ("find_patient_by_phone", "find_patient_by_name_dob"):
         patients = value.get("patients", [])
         if not patients:
             return "no patient found"
         return "matched patients: " + "; ".join(
-            f"{p['first_name']} {p['last_name']} (DOB {p['dob']})"
-            for p in patients[:3]
+            f"{p['first_name']} {p['last_name']} (DOB {p['dob']})" for p in patients[:3]
         )
     if name == "create_patient":
         return (
@@ -109,9 +113,7 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
             f"(phone {value['phone']})"
         )
     if name == "create_appointment":
-        return (
-            f"booked {value['start_at']} with {value['provider_name']}"
-        )
+        return f"booked {value['start_at']} with {value['provider_name']}"
     if name == "cancel_appointment":
         return "appointment cancelled"
     return "ok"
@@ -123,8 +125,8 @@ class Dispatcher:
         self._ehr = ehr_client
         self.state: State = State.GREETING
         self.memory = SessionMemory()
-        self.history: list[dict] = []
-        self.transcript: list[dict] = []
+        self.history: list[dict[str, Any]] = []
+        self.transcript: list[dict[str, Any]] = []
         self.timing = TimingCollector()
         self.cached_prompt_tokens_total: int = 0
         self.prompt_tokens_total: int = 0
@@ -190,7 +192,7 @@ class Dispatcher:
                 break
         return reply.text
 
-    async def _execute_tool(self, call: ToolCall) -> Result[dict]:
+    async def _execute_tool(self, call: ToolCall) -> Result[dict[str, Any]]:
         handler = HANDLERS[call.name]
         args = dict(call.arguments)
         # Test convenience: __use_first_slot__ pulls the slot id we just listed.
@@ -227,10 +229,7 @@ class Dispatcher:
             if patient_id is not None and known_patient and patient_id != known_patient:
                 return Err(
                     code="patient_id_mismatch",
-                    message=(
-                        f"patient_id {patient_id!r} != identified patient "
-                        f"{known_patient!r}"
-                    ),
+                    message=(f"patient_id {patient_id!r} != identified patient {known_patient!r}"),
                     retryable=False,
                 )
         elif name == "cancel_appointment":
@@ -248,7 +247,7 @@ class Dispatcher:
                 )
         return None
 
-    def _record_tool_result(self, name: str, result: Result[dict]) -> None:
+    def _record_tool_result(self, name: str, result: Result[dict[str, Any]]) -> None:
         if is_ok(result):
             self.transcript.append({"kind": "tool_ok", "name": name, "value": result.value})
             # Audit A3: redact raw UUIDs from the string the LLM sees. The
@@ -306,7 +305,7 @@ class Dispatcher:
             elif _BOOK_INTENT.search(user_text):
                 self._transition("wants_book")
 
-    def _maybe_transition_from_tool(self, tool_name: str, result: Result[dict]) -> None:
+    def _maybe_transition_from_tool(self, tool_name: str, result: Result[dict[str, Any]]) -> None:
         if self.state is State.IDENTIFY_PATIENT and tool_name in (
             "find_patient_by_phone",
             "find_patient_by_name_dob",
@@ -333,7 +332,7 @@ class Dispatcher:
         elif self.state is State.CONFIRM_BOOK and tool_name == "create_appointment":
             if is_ok(result):
                 self._transition("booked")
-        elif self.state is State.CONFIRM_CANCEL and tool_name == "cancel_appointment":
+        elif self.state is State.CONFIRM_CANCEL and tool_name == "cancel_appointment":  # noqa: SIM102 — keep parallel structure with sibling branches above
             if is_ok(result):
                 self._transition("cancelled")
 
@@ -346,9 +345,22 @@ class Dispatcher:
         )
         self.state = dst
 
-    def _messages_for_llm(self) -> list[dict]:
+    # Sliding-window cap on the message history sent to the LLM. Long calls
+    # (50+ turns) would otherwise grow the prompt linearly and blow up the
+    # token budget + cost + TTFT. Persona + per-state task_message are
+    # always sent (they live outside `history`), and SessionMemory carries
+    # the structured facts the FSM needs (identified_patient, last_slots,
+    # last_upcoming_appointments), so dropping the oldest raw turns is safe:
+    # the bot still has the salient state. Cap is generous (40 messages ≈
+    # 20 turns) — typical calls finish in <10 turns.
+    _HISTORY_WINDOW = 40
+
+    def _messages_for_llm(self) -> list[dict[str, Any]]:
+        hist = self.history
+        if len(hist) > self._HISTORY_WINDOW:
+            hist = hist[-self._HISTORY_WINDOW :]
         return [
             {"role": "system", "content": CLINIC_PERSONA},
             {"role": "system", "content": TASK_MESSAGES[self.state.value]},
-            *self.history,
+            *hist,
         ]

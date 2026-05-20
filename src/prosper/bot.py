@@ -53,7 +53,10 @@ _TOOL_FIRING_STATES = {
     State.REGISTER_PATIENT,
 }
 
-load_dotenv(override=True)
+# override=False (best practice 2026): externally-set env wins over .env.
+# Container / CI / systemd unit env vars should be authoritative. .env is a
+# dev convenience only.
+load_dotenv(override=False)
 
 
 # NOTE on pipecat aggregation_timeout (web research finding, 2026):
@@ -118,7 +121,18 @@ class DispatcherProcessor(FrameProcessor):
             # hears acknowledgement immediately rather than dead air.
             if self._dispatcher.state in _TOOL_FIRING_STATES:
                 await self.push_frame(TTSSpeakFrame("One moment."))
-            reply = await self._dispatcher.handle_user_turn(user_text)
+            # Wrap dispatcher in try/except: a stray exception (LLM 5xx after
+            # all retries exhausted, EHR timeout, JSON parse error, etc.) must
+            # NOT crash the Pipecat pipeline mid-call. Speak a recovery line
+            # and let the caller try again. We keep _stt_end_ts reset so we
+            # don't poison the next TTFT sample.
+            try:
+                reply = await self._dispatcher.handle_user_turn(user_text)
+            except Exception as e:  # last-resort guard for live calls; mid-pipeline crash would kill the WebRTC session
+                logger.exception("dispatcher.handle_user_turn raised: {}", e)
+                reply = (
+                    "Sorry, I missed that — could you say it again?"
+                )
             if self._stt_end_ts is not None:
                 ttft_ms = (time.perf_counter() - self._stt_end_ts) * 1000
                 self._dispatcher.timing.record(
@@ -190,35 +204,53 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
     )
 
     dispatcher = _build_dispatcher()
-    await dispatcher._ehr.__aenter__()  # noqa: SLF001 — bot owns this client for the call
-    dispatcher_processor = DispatcherProcessor(dispatcher)
+    # Own the EHR httpx client via async-with so it's released even if the
+    # browser drops mid-call and on_client_disconnected never fires (e.g.
+    # process killed by SIGTERM, transport crash, exception during pipeline
+    # startup). Previously __aexit__ ran only inside the disconnect handler
+    # → guaranteed leak on abrupt termination and on every connect-time
+    # failure.
+    async with dispatcher._ehr:  # bot owns this httpx client's lifecycle for the call
+        dispatcher_processor = DispatcherProcessor(dispatcher)
 
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            dispatcher_processor,
-            tts,
-            transport.output(),
-        ]
-    )
-    task = PipelineTask(
-        pipeline,
-        params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
-    )
+        pipeline = Pipeline(
+            [
+                transport.input(),
+                stt,
+                dispatcher_processor,
+                tts,
+                transport.output(),
+            ]
+        )
+        task = PipelineTask(
+            pipeline,
+            params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+        )
 
-    @transport.event_handler("on_client_connected")
-    async def on_client_connected(transport, client):  # type: ignore[no-untyped-def]
-        logger.info("client connected")
+        @transport.event_handler("on_client_connected")
+        async def on_client_connected(_transport, _client):  # type: ignore[no-untyped-def]
+            logger.info("client connected")
 
-    @transport.event_handler("on_client_disconnected")
-    async def on_client_disconnected(transport, client):  # type: ignore[no-untyped-def]
-        logger.info("client disconnected; latency summary:\n{}", dispatcher.timing.format_table())
-        await dispatcher._ehr.__aexit__(None, None, None)  # noqa: SLF001
-        await task.cancel()
+        @transport.event_handler("on_client_disconnected")
+        async def on_client_disconnected(_transport, _client):  # type: ignore[no-untyped-def]
+            logger.info(
+                "client disconnected; latency summary:\n{}",
+                dispatcher.timing.format_table(),
+            )
+            # Cancel the pipeline so runner.run() returns and we exit the
+            # async-with cleanly. The EHR client is closed by the surrounding
+            # context manager — NOT here — so SIGTERM mid-call still cleans up.
+            await task.cancel()
 
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-    await runner.run(task)
+        runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
+        try:
+            await runner.run(task)
+        finally:
+            # Belt + suspenders: if runner.run raised before the disconnect
+            # handler had a chance to cancel the task, cancel it now so any
+            # in-flight EHR/LLM calls drain before httpx closes the client.
+            if not task.has_finished():
+                await task.cancel()
 
 
 async def bot(runner_args: RunnerArguments) -> None:
