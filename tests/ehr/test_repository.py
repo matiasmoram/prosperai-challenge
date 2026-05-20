@@ -253,6 +253,29 @@ def test_list_availability_excludes_slot_at_or_after_midnight_next_day(
     )
 
 
+def test_list_availability_includes_slot_exactly_at_day_start(session: Session) -> None:
+    """Mutation: ``Slot.start_at >= cutoff`` → ``> cutoff``.
+
+    For a future day the cutoff is ``max(day_start, now) == day_start``. A slot
+    whose start_at is exactly midnight (== day_start) must be returned. This
+    pins the inclusive lower boundary.
+    """
+    provider = _seed_provider(session)
+    target_day = (datetime.now(timezone.utc) + timedelta(days=3)).date()
+    day_start = datetime.combine(target_day, datetime.min.time(), tzinfo=timezone.utc)
+    edge_slot = Slot(
+        provider=provider,
+        start_at=day_start,
+        end_at=day_start + timedelta(minutes=30),
+    )
+    session.add(edge_slot)
+    session.commit()
+    available = repo.list_available_slots(session, date_=target_day)
+    assert edge_slot.id in {s.id for s in available}, (
+        "slot starting exactly at day_start (00:00 UTC) must be included"
+    )
+
+
 def test_find_patient_by_name_dob_includes_exact_threshold(session: Session) -> None:
     """Mutation: ``sim >= min_similarity`` → ``sim > min_similarity``.
 

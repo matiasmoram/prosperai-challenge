@@ -175,6 +175,49 @@ def test_validate_against_memory_skips_for_read_tools(ehr_client: EHRClient) -> 
     assert d._validate_against_memory("find_patient_by_phone", {"phone": "anything"}) is None
 
 
+# Mutation-survivor regressions: the ``X is not None and X not in known`` guard
+# in _validate_against_memory survives an inversion to ``X is None or X not in
+# known`` if no test exercises the case where the id is absent from args. Pin
+# both halves of the AND.
+
+
+def test_validate_against_memory_allows_missing_slot_id(ehr_client: EHRClient) -> None:
+    """Mutation: ``slot_id is not None and ...`` → ``slot_id is None or ...``.
+
+    When ``slot_id`` is absent from args the guard MUST pass (it has nothing to
+    validate against memory). The original short-circuits; the mutant would
+    incorrectly Err on every call missing slot_id.
+    """
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(last_slots=[{"slot_id": "slot-1"}])
+    # No slot_id in args at all — should not raise hallucinated_slot_id.
+    assert d._validate_against_memory("create_appointment", {"patient_id": "p1"}) is None
+
+
+def test_validate_against_memory_allows_missing_appointment_id(ehr_client: EHRClient) -> None:
+    """Mutation: ``appt_id is not None and ...`` → ``appt_id is None or ...``."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(last_upcoming_appointments=[{"id": "real-appt"}])
+    assert d._validate_against_memory("cancel_appointment", {"reason": "test"}) is None
+
+
+def test_validate_against_memory_allows_known_slot_id(ehr_client: EHRClient) -> None:
+    """Pin the inclusive 'known slot' branch — the guard must NOT Err when
+    slot_id is in last_slots, no matter how the boolean is flipped."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(
+        identified_patient={"id": "patient-A"},
+        last_slots=[{"slot_id": "slot-known"}],
+    )
+    err = d._validate_against_memory(
+        "create_appointment", {"slot_id": "slot-known", "patient_id": "patient-A"}
+    )
+    assert err is None
+
+
 # ---------------------------------------------------------------------------
 # _record_tool_result — Err path
 # ---------------------------------------------------------------------------
