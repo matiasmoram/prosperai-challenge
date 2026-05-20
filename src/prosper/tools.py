@@ -24,12 +24,33 @@ from prosper.result import Err, Ok, Result
 
 ToolHandler = Callable[..., Awaitable[Result[dict[str, Any]]]]
 
+# Defensive bounds for any parsed date used downstream — DOBs and availability
+# query dates alike. Catches obviously-wrong values (year 9999 typos, dateutil
+# fuzzy-parser inventing 1990 from a stray digit) before they hit the DB.
+_MIN_PARSED_YEAR = 1900
+_MAX_PARSED_YEAR = 2100
+
 
 def _parse_dob(raw: str) -> Result[date]:
+    # `fuzzy=True` previously made the parser silently extract a year from
+    # arbitrary text ("hello 1990" → 1990-05-20). For both DOB and date-of-
+    # service we want strict parsing; ambiguous input should fail loudly so the
+    # LLM re-asks the user.
+    if not isinstance(raw, str) or not raw.strip():
+        return Err(code="dob_unparseable", message=f"empty date input: {raw!r}", retryable=True)
     try:
-        parsed = dateparser.parse(raw, dayfirst=False, fuzzy=True).date()
-    except (ValueError, TypeError, AttributeError) as e:
+        parsed = dateparser.parse(raw, dayfirst=False, fuzzy=False).date()
+    except (ValueError, TypeError, AttributeError, OverflowError) as e:
         return Err(code="dob_unparseable", message=f"could not parse '{raw}': {e}", retryable=True)
+    if not (_MIN_PARSED_YEAR <= parsed.year <= _MAX_PARSED_YEAR):
+        return Err(
+            code="dob_unparseable",
+            message=(
+                f"year {parsed.year} out of supported range "
+                f"[{_MIN_PARSED_YEAR}, {_MAX_PARSED_YEAR}]"
+            ),
+            retryable=True,
+        )
     return Ok(value=parsed)
 
 
@@ -214,8 +235,9 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                     "dob": {
                         "type": "string",
                         "description": (
-                            "Any spoken or written form, e.g. 'April third "
-                            "nineteen ninety-two' or '1992-04-03'."
+                            "ISO 8601 date (YYYY-MM-DD) or unambiguous written "
+                            "form (e.g. '1992-04-03', 'April 3 1992'). Strict "
+                            "parsing: convert spoken forms before calling."
                         ),
                     },
                 },
@@ -253,7 +275,10 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "properties": {
                     "date": {
                         "type": "string",
-                        "description": "YYYY-MM-DD or spoken date.",
+                        "description": (
+                            "YYYY-MM-DD (preferred) or unambiguous written "
+                            "date. Convert spoken forms before calling."
+                        ),
                     },
                     "provider_id": {"type": "string"},
                 },

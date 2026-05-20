@@ -2,6 +2,18 @@
 
 Designed for short-lived sessions (one call). The dispatcher calls
 ``record`` after each LLM/tool/EHR span and ``format_table`` at session end.
+
+Each span emits a structured JSON log line:
+
+    {"evt":"span","phase":"llm","state":"GREETING","duration_ms":12.3,
+     "session_id":"<uuid>","turn_id":3}
+
+``session_id`` / ``turn_id`` are optional — when absent the keys are
+omitted so older grep recipes keep working. They are populated by the
+dispatcher (which knows the per-call uuid + auto-incrementing turn
+counter) before forwarding the call to :meth:`TimingCollector.record`.
+The bot's ``DispatcherProcessor`` also passes them when emitting TTFT
+spans so every line on stderr is joinable on (session_id, turn_id).
 """
 
 from __future__ import annotations
@@ -26,22 +38,37 @@ class TimingCollector:
     def __init__(self) -> None:
         self._spans: dict[str, list[float]] = defaultdict(list)
 
-    def record(self, *, phase: str, duration_ms: float, state: str) -> None:
+    def record(
+        self,
+        *,
+        phase: str,
+        duration_ms: float,
+        state: str,
+        session_id: str | None = None,
+        turn_id: int | None = None,
+    ) -> None:
         self._spans[phase].append(duration_ms)
-        print(
-            json.dumps(
-                {
-                    "evt": "span",
-                    "phase": phase,
-                    "state": state,
-                    "duration_ms": round(duration_ms, 2),
-                }
-            ),
-            flush=True,
-        )
+        payload: dict[str, object] = {
+            "evt": "span",
+            "phase": phase,
+            "state": state,
+            "duration_ms": round(duration_ms, 2),
+        }
+        if session_id is not None:
+            payload["session_id"] = session_id
+        if turn_id is not None:
+            payload["turn_id"] = turn_id
+        print(json.dumps(payload), flush=True)
 
     @asynccontextmanager
-    async def measure(self, *, phase: str, state: str) -> AsyncIterator[None]:
+    async def measure(
+        self,
+        *,
+        phase: str,
+        state: str,
+        session_id: str | None = None,
+        turn_id: int | None = None,
+    ) -> AsyncIterator[None]:
         start = time.perf_counter()
         try:
             yield
@@ -50,6 +77,8 @@ class TimingCollector:
                 phase=phase,
                 duration_ms=(time.perf_counter() - start) * 1000,
                 state=state,
+                session_id=session_id,
+                turn_id=turn_id,
             )
 
     def summary(self) -> dict[str, dict[str, float]]:

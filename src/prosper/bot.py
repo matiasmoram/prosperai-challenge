@@ -197,6 +197,8 @@ class DispatcherProcessor(FrameProcessor):
                     phase="ttft",
                     duration_ms=ttft_ms,
                     state=self._dispatcher.state.value,
+                    session_id=self._dispatcher.session_id,
+                    turn_id=self._dispatcher.turn_id,
                 )
                 self._stt_end_ts = None
             logger.info("BOT[{}]: {}", self._dispatcher.state.value, redact_pii(reply))
@@ -287,12 +289,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(_transport, _client):  # type: ignore[no-untyped-def]
-            logger.info("client connected")
+            # Bind the per-call session id into loguru so every logger.info()
+            # below carries it without us having to thread it explicitly.
+            logger.configure(extra={"session_id": dispatcher.session_id})
+            logger.info("client connected session_id={}", dispatcher.session_id)
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(_transport, _client):  # type: ignore[no-untyped-def]
             logger.info(
-                "client disconnected; latency summary:\n{}",
+                "client disconnected session_id={}; latency summary:\n{}",
+                dispatcher.session_id,
                 dispatcher.timing.format_table(),
             )
             # Cancel the pipeline so runner.run() returns and we exit the

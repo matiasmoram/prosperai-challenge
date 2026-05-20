@@ -307,3 +307,47 @@ async def test_create_appointment_unknown_slot_returns_patient_or_slot_not_found
         )
     assert is_err(r)
     assert r.code == "patient_or_slot_not_found"
+
+
+# ---------------------------------------------------------------------------
+# Bug-fuzz regression: _parse_dob must NOT silently mine a year out of text.
+# Previously `fuzzy=True` returned (today's m/d + 1990) for "hello 1990" and
+# similar — a data-corruption bug since the LLM forwards user phrases verbatim.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "garbage",
+    [
+        "hello 1990",
+        "book me may",
+        "April third 1992",  # 'third' is non-numeric → ambiguous → must reject
+        "today",
+        "yesterday",
+        "year zero",
+        "I was born sometime in 1985 I think",
+    ],
+)
+def test_parse_dob_rejects_fuzzy_yearmining(garbage: str) -> None:
+    r = _parse_dob(garbage)
+    assert is_err(r), f"_parse_dob silently accepted {garbage!r}"
+    assert r.code == "dob_unparseable"
+
+
+@pytest.mark.parametrize("out_of_range", ["1700-01-01", "3000-01-01", "0050-06-01"])
+def test_parse_dob_rejects_out_of_range_years(out_of_range: str) -> None:
+    r = _parse_dob(out_of_range)
+    assert is_err(r)
+    assert r.code == "dob_unparseable"
+
+
+def test_parse_dob_rejects_empty_and_whitespace() -> None:
+    for raw in ("", "   ", "\t\n"):
+        r = _parse_dob(raw)
+        assert is_err(r), f"empty input {raw!r} should fail"
+
+
+def test_parse_dob_still_accepts_well_formed_dates() -> None:
+    for raw in ("1990-12-10", "April 3 1992", "Apr 3, 1992", "12/10/1990"):
+        r = _parse_dob(raw)
+        assert not is_err(r), f"strict parse rejected well-formed {raw!r}"

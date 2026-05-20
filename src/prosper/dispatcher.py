@@ -17,7 +17,9 @@ read.
 
 from __future__ import annotations
 
+import inspect
 import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -120,7 +122,13 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
 
 
 class Dispatcher:
-    def __init__(self, *, llm: LLMClientProtocol, ehr_client: EHRClient) -> None:
+    def __init__(
+        self,
+        *,
+        llm: LLMClientProtocol,
+        ehr_client: EHRClient,
+        session_id: str | None = None,
+    ) -> None:
         self._llm = llm
         self._ehr = ehr_client
         self.state: State = State.GREETING
@@ -130,13 +138,26 @@ class Dispatcher:
         self.timing = TimingCollector()
         self.cached_prompt_tokens_total: int = 0
         self.prompt_tokens_total: int = 0
-        self._user_turn_start_ts: float | None = None  # for TTFT in DispatcherProcessor
+        # Observability: one UUID per call, plus auto-increment per user turn.
+        # Threaded into every span log + every X-Request-Id header so a
+        # reviewer can grep both the bot stderr and the EHR access log for
+        # the same id when an error fires.
+        self.session_id: str = session_id or str(uuid.uuid4())
+        self.turn_id: int = 0
+        # Propagate the session id into the EHR client so its X-Request-Id
+        # header includes it on every httpx call.
+        self._ehr.set_session_id(self.session_id)
 
     async def start(self) -> str:
         """Run the GREETING state's opening turn (no user input yet)."""
         return await self._llm_turn()
 
     async def handle_user_turn(self, user_text: str) -> str:
+        self.turn_id += 1
+        # Push the per-turn request-id prefix into the EHR client so the
+        # X-Request-Id header on every tool's HTTP call is greppable
+        # alongside the dispatcher's span logs.
+        self._ehr.set_turn_id(self.turn_id)
         self.history.append({"role": "user", "content": user_text})
         self.transcript.append({"kind": "user", "text": user_text})
         self._maybe_transition_from_user_text(user_text)
@@ -147,7 +168,12 @@ class Dispatcher:
         msgs = self._messages_for_llm()
         reply = LLMReply(text="")
         for _ in range(4):
-            async with self.timing.measure(phase="llm", state=self.state.value):
+            async with self.timing.measure(
+                phase="llm",
+                state=self.state.value,
+                session_id=self.session_id,
+                turn_id=self.turn_id,
+            ):
                 reply = await self._llm.generate(state=self.state.value, history=msgs, tools=tools)
             if reply.usage is not None:
                 self.cached_prompt_tokens_total += reply.usage.cached_prompt_tokens
@@ -201,14 +227,38 @@ class Dispatcher:
             args["patient_id"] = (self.memory.identified_patient or {}).get("id") or args.get(
                 "patient_id"
             )
+        # Defensive: drop any kwargs the handler doesn't accept. An LLM occasionally
+        # invents extra fields (`mystery_field=42`); without this filter the
+        # `handler(**args)` raises TypeError and crashes the whole turn.
+        args = self._filter_handler_kwargs(handler, args)
         # Audit A4: prevent the LLM from booking/cancelling against a hallucinated
         # id that didn't come from a tool result this session. Cheap defence-in-depth
         # on top of the EHR's own validation.
         guard_err = self._validate_against_memory(call.name, args)
         if guard_err is not None:
             return guard_err
-        async with self.timing.measure(phase=f"tool:{call.name}", state=self.state.value):
+        async with self.timing.measure(
+            phase=f"tool:{call.name}",
+            state=self.state.value,
+            session_id=self.session_id,
+            turn_id=self.turn_id,
+        ):
             return await handler(self._ehr, **args)
+
+    @staticmethod
+    def _filter_handler_kwargs(handler: Any, args: dict[str, Any]) -> dict[str, Any]:
+        sig = inspect.signature(handler)
+        params = sig.parameters
+        # If the handler explicitly accepts **kwargs, no filtering needed.
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return args
+        allowed = {
+            name
+            for name, p in params.items()
+            if p.kind
+            in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        }
+        return {k: v for k, v in args.items() if k in allowed}
 
     def _validate_against_memory(self, name: str, args: dict[str, Any]) -> Err | None:
         if name == "create_appointment":

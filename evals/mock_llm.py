@@ -81,10 +81,6 @@ def _tool(_tool_name: str, **kwargs: object) -> LLMReply:
     return LLMReply(text="", tool_calls=[ToolCall(name=_tool_name, arguments=dict(kwargs))])
 
 
-def _say_and_tool(text: str, _tool_name: str, **kwargs: object) -> LLMReply:
-    return LLMReply(text=text, tool_calls=[ToolCall(name=_tool_name, arguments=dict(kwargs))])
-
-
 # ---------------------------------------------------------------------------
 # Per-scenario bot scripts (sequence of LLMReply objects)
 # ---------------------------------------------------------------------------

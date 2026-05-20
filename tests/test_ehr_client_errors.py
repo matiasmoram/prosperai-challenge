@@ -62,3 +62,38 @@ async def test_client_assertion_fires_without_async_with() -> None:
     c = EHRClient.for_http("http://ehr-test")
     with pytest.raises(AssertionError):
         c._c()
+
+
+async def test_request_id_header_is_session_turn_seq() -> None:
+    """Every outbound EHR call carries X-Request-Id = <session>-<turn>-<n>.
+    Contract: the seq counter resets on each new turn so ids stay readable,
+    and the header is omitted entirely when no session id has been set
+    (e.g. tests that build an EHRClient directly without a Dispatcher)."""
+    captured: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.headers.get("x-request-id"))
+        return httpx.Response(200, json={"patients": []})
+
+    client = _client_with_mock_transport(handler)
+    client.set_session_id("sess-XYZ")
+    client.set_turn_id(3)
+    async with client:
+        await client.find_patients_by_phone("2025550100")
+        await client.find_patients_by_phone("2025550100")
+        client.set_turn_id(4)
+        await client.find_patients_by_phone("2025550100")
+    assert captured == ["sess-XYZ-3-1", "sess-XYZ-3-2", "sess-XYZ-4-1"]
+
+
+async def test_request_id_header_absent_when_session_not_set() -> None:
+    captured: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.headers.get("x-request-id"))
+        return httpx.Response(200, json={"patients": []})
+
+    client = _client_with_mock_transport(handler)
+    async with client:
+        await client.find_patients_by_phone("2025550100")
+    assert captured == [None]

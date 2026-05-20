@@ -106,6 +106,32 @@ async def test_dispatcher_rejects_hallucinated_slot_id(ehr_client: EHRClient) ->
     assert any(e["code"] == "hallucinated_slot_id" for e in errs)
 
 
+async def test_dispatcher_assigns_session_id_and_bumps_turn_id(
+    ehr_client: EHRClient,
+) -> None:
+    """One UUID per call; turn_id auto-increments on each user turn so
+    every span log is joinable to the EHR's X-Request-Id."""
+    canned = CannedLLM(
+        [
+            LLMReply(text="hi", tool_calls=[]),
+            LLMReply(text="ok", tool_calls=[]),
+            LLMReply(text="bye", tool_calls=[]),
+        ]
+    )
+    async with ehr_client:
+        d = Dispatcher(llm=canned, ehr_client=ehr_client)
+        assert isinstance(d.session_id, str) and len(d.session_id) >= 32
+        assert d.turn_id == 0
+        # The dispatcher pushes its session id into the EHR client so every
+        # outbound httpx call carries X-Request-Id = <session>-<turn>-<n>.
+        assert ehr_client._session_id == d.session_id
+        await d.start()
+        await d.handle_user_turn("hello")
+        assert d.turn_id == 1
+        await d.handle_user_turn("yes")
+        assert d.turn_id == 2
+
+
 async def test_dispatcher_rejects_tool_not_in_whitelist(ehr_client: EHRClient) -> None:
     canned = CannedLLM(
         [

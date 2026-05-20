@@ -36,6 +36,29 @@ class EHRClient:
         self._transport = transport
         self._base_url = base_url
         self._client: httpx.AsyncClient | None = None
+        # Observability: per-call session UUID + per-turn integer, plus a
+        # monotonically increasing call counter scoped to (session, turn).
+        # Combined into an "X-Request-Id: <session>-<turn>-<n>" header on
+        # every outbound request so the EHR access log lines up with the
+        # bot's per-span JSON logs.
+        self._session_id: str | None = None
+        self._turn_id: int = 0
+        self._call_seq: int = 0
+
+    def set_session_id(self, session_id: str) -> None:
+        self._session_id = session_id
+
+    def set_turn_id(self, turn_id: int) -> None:
+        # Reset the per-call sequence so the request-id stays human-readable:
+        # <session>-<turn>-1, -2, -3 within a single user turn.
+        self._turn_id = turn_id
+        self._call_seq = 0
+
+    def _next_request_id(self) -> str | None:
+        if self._session_id is None:
+            return None
+        self._call_seq += 1
+        return f"{self._session_id}-{self._turn_id}-{self._call_seq}"
 
     @classmethod
     def for_asgi_app(cls, app: FastAPI) -> Self:
@@ -61,6 +84,11 @@ class EHRClient:
         return self._client
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        req_id = self._next_request_id()
+        if req_id is not None:
+            headers = dict(kwargs.pop("headers", {}) or {})
+            headers.setdefault("X-Request-Id", req_id)
+            kwargs["headers"] = headers
         r = await self._c().request(method, path, **kwargs)
         if r.status_code >= 400:
             try:

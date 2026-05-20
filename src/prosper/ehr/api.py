@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterator
 from datetime import date as date_t
 
-from fastapi import Depends, FastAPI, HTTPException, Query
-from sqlalchemy import Engine
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from loguru import logger
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
+from starlette.responses import PlainTextResponse
 
 from prosper.ehr import repository as repo
 from prosper.ehr.db import (
@@ -16,7 +19,7 @@ from prosper.ehr.db import (
     init_db,
     make_session_factory,
 )
-from prosper.ehr.models import Appointment, Patient, Slot
+from prosper.ehr.models import Appointment, AppointmentStatus, Patient, Slot
 from prosper.ehr.schemas import (
     AppointmentCancel,
     AppointmentCreate,
@@ -98,6 +101,25 @@ def create_app(engine: Engine | None = None) -> FastAPI:
     else:
         get_engine()
         init_db()
+
+    # Per-app request counters fed by the middleware below; surfaced via
+    # the /metrics endpoint. Counter is path-scoped so /metrics can break
+    # down "what's getting hit": e.g. http_requests_total{path="/patients"}.
+    app.state.request_counts = Counter()
+
+    @app.middleware("http")
+    async def _request_id_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+        # Bot sends ``X-Request-Id: <session>-<turn>-<n>``; mint one when
+        # absent so any direct curl / TestClient call is still greppable.
+        req_id = request.headers.get("x-request-id") or "anon"
+        app.state.request_counts[request.url.path] += 1
+        # Bind the id into loguru so every log line emitted inside this
+        # request handler carries the same field — that's the join key
+        # against the bot's per-span JSON logs.
+        with logger.contextualize(request_id=req_id, path=request.url.path):
+            response = await call_next(request)
+        response.headers["X-Request-Id"] = req_id
+        return response
 
     @app.post("/patients", response_model=PatientOut, status_code=201)
     def create_patient(
@@ -213,6 +235,45 @@ def create_app(engine: Engine | None = None) -> FastAPI:
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    def metrics(session: Session = Depends(session_dep)) -> str:
+        """Hand-rolled Prometheus text exposition. ~20 lines, no extra deps."""
+        patient_total = session.scalar(select(func.count()).select_from(Patient)) or 0
+        slot_total = session.scalar(select(func.count()).select_from(Slot)) or 0
+        appt_scheduled = (
+            session.scalar(
+                select(func.count())
+                .select_from(Appointment)
+                .where(Appointment.status == AppointmentStatus.SCHEDULED)
+            )
+            or 0
+        )
+        appt_cancelled = (
+            session.scalar(
+                select(func.count())
+                .select_from(Appointment)
+                .where(Appointment.status == AppointmentStatus.CANCELLED)
+            )
+            or 0
+        )
+        lines = [
+            "# HELP ehr_patients_total Patient rows in the EHR.",
+            "# TYPE ehr_patients_total gauge",
+            f"ehr_patients_total {patient_total}",
+            "# HELP ehr_slots_total Slot rows in the EHR.",
+            "# TYPE ehr_slots_total gauge",
+            f"ehr_slots_total {slot_total}",
+            "# HELP ehr_appointments_total Appointment rows by status.",
+            "# TYPE ehr_appointments_total gauge",
+            f'ehr_appointments_total{{status="scheduled"}} {appt_scheduled}',
+            f'ehr_appointments_total{{status="cancelled"}} {appt_cancelled}',
+            "# HELP http_requests_total HTTP requests served, by path.",
+            "# TYPE http_requests_total counter",
+        ]
+        for path, count in sorted(app.state.request_counts.items()):
+            lines.append(f'http_requests_total{{path="{path}"}} {count}')
+        return "\n".join(lines) + "\n"
 
     return app
 

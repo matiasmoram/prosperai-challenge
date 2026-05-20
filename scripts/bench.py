@@ -15,7 +15,7 @@ import argparse
 import asyncio
 import statistics
 import time
-from datetime import UTC, date, timedelta
+from datetime import date, timedelta
 
 import httpx
 

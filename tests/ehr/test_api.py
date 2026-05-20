@@ -147,3 +147,36 @@ def test_get_patient_appointments(client: TestClient) -> None:
     r = client.get(f"/patients/{p['id']}/appointments")
     assert r.status_code == 200
     assert len(r.json()["appointments"]) == 1
+
+
+def test_metrics_endpoint_exposes_counts_in_prom_text_format(client: TestClient) -> None:
+    """/metrics is a hand-rolled Prometheus text endpoint — no extra deps."""
+    client.post(
+        "/patients",
+        json={
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "dob": "1990-12-10",
+            "phone": "2025550100",
+        },
+    )
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    body = r.text
+    # Required series names (gauges + counter).
+    assert "ehr_patients_total 1" in body
+    assert "ehr_slots_total 3" in body  # 3 seeded by the fixture
+    assert 'ehr_appointments_total{status="scheduled"} 0' in body
+    assert 'ehr_appointments_total{status="cancelled"} 0' in body
+    # /metrics itself is counted (this is the first hit).
+    assert 'http_requests_total{path="/metrics"} 1' in body
+    # Prom text format requires HELP + TYPE comment lines.
+    assert "# HELP ehr_patients_total" in body
+    assert "# TYPE ehr_patients_total gauge" in body
+
+
+def test_x_request_id_is_echoed_in_response_headers(client: TestClient) -> None:
+    """Bot sends X-Request-Id; EHR echoes it so grep lines up on both sides."""
+    r = client.get("/health", headers={"X-Request-Id": "sess-abc-1-1"})
+    assert r.status_code == 200
+    assert r.headers["X-Request-Id"] == "sess-abc-1-1"

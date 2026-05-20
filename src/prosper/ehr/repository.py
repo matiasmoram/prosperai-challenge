@@ -35,19 +35,37 @@ class AppointmentNotFoundError(Exception):
 
 
 def normalize_name(raw: str) -> str:
-    """Lowercase, strip honorifics, collapse whitespace, drop diacritics."""
+    """Lowercase, strip honorifics, collapse whitespace, drop diacritics.
+
+    If the NFKD+ASCII pass drops every character (e.g. pure-Arabic or pure-CJK
+    names), fall back to the raw lowercased string with bidi/format marks
+    removed — keeps the original Unicode codepoints so two distinct non-ASCII
+    names don't both collapse to ``""`` and collide in the index.
+    """
     decomposed = unicodedata.normalize("NFKD", raw)
     ascii_only = decomposed.encode("ascii", "ignore").decode("ascii")
     lowered = ascii_only.lower()
     tokens = [
         t for t in re.split(r"\s+", lowered.strip()) if t and t.rstrip(".") not in _HONORIFICS
     ]
-    return " ".join(tokens)
+    if tokens:
+        return " ".join(tokens)
+    # Fallback for non-Latin scripts: strip bidi/format chars, lowercase, collapse ws.
+    stripped = "".join(ch for ch in raw if unicodedata.category(ch) != "Cf")
+    return " ".join(stripped.lower().split())
 
 
 def normalize_phone(raw: str) -> str:
-    """E.164-ish normalisation. Strips non-digits, prefixes +1 for 10-digit US numbers."""
+    """E.164-ish normalisation. Strips non-digits, prefixes +1 for 10-digit US numbers.
+
+    For obviously-empty input (no digits at all), returns ``""`` so the API
+    layer's ``min_length=7`` check rejects it before it can be persisted. We
+    do not over-validate here (still accept short/odd numbers — international
+    formats vary) but we never return a bare ``"+"`` either.
+    """
     digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return ""
     if len(digits) == 10:
         return "+1" + digits
     if len(digits) == 11 and digits.startswith("1"):
@@ -184,6 +202,11 @@ def cancel_appointment(
     appt = session.get(Appointment, appointment_id)
     if appt is None:
         raise AppointmentNotFoundError(appointment_id)
+    # Idempotent: cancelling an already-cancelled appointment is a no-op.
+    # Previously the second cancel would overwrite ``cancelled_at`` and append
+    # a second "[cancel] ..." note — corrupting the audit trail.
+    if appt.status == AppointmentStatus.CANCELLED:
+        return appt
     appt.status = AppointmentStatus.CANCELLED
     appt.cancelled_at = datetime.now(timezone.utc)
     if reason:

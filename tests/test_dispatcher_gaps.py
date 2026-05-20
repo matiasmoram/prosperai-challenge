@@ -508,3 +508,49 @@ def test_messages_for_llm_caps_history_window(ehr_client: EHRClient) -> None:
     # The first kept history entry should be turn 60 (the last 40 of 0..99)
     assert msgs[2]["content"] == "turn 60"
     assert msgs[-1]["content"] == "turn 99"
+
+
+# ---------------------------------------------------------------------------
+# Bug-fuzz regression: dispatcher must NOT crash if the LLM emits an extra
+# unknown kwarg on a tool call (e.g. ``mystery_field=42``). Previously this
+# raised ``TypeError: ... got an unexpected keyword argument`` from the
+# handler invocation, killing the whole turn.
+# ---------------------------------------------------------------------------
+
+
+async def test_execute_tool_strips_unknown_kwargs(ehr_client: EHRClient) -> None:
+    canned = CannedLLM([])
+    async with ehr_client:
+        d = Dispatcher(llm=canned, ehr_client=ehr_client)
+        d.state = State.CONFIRM_BOOK
+        # Seed memory so the hallucinated-id guard passes.
+        d.memory.last_slots = [{"slot_id": "abc"}]
+        d.memory.identified_patient = {"id": "pid-1"}
+        call = ToolCall(
+            name="create_appointment",
+            arguments={
+                "slot_id": "abc",
+                "patient_id": "pid-1",
+                "mystery_field": 42,
+                "another_bad_one": "x",
+            },
+        )
+        # Must not raise; returns an Err (patient/slot not found because the
+        # ids are fake) — the point is the handler invocation itself survives.
+        result = await d._execute_tool(call)
+    assert result.kind == "err"
+    # The dispatcher's hallucination guard fires first ("abc" is in known_slots
+    # but the fake ids never reach the EHR cleanly); accept any Err code so the
+    # test stays focused on the kwarg-filter behaviour.
+
+
+async def test_end_state_blocks_user_text_transitions(ehr_client: EHRClient) -> None:
+    """Once the FSM reaches END, no user_text should escape it (no transitions)."""
+    canned = CannedLLM([])
+    async with ehr_client:
+        d = Dispatcher(llm=canned, ehr_client=ehr_client)
+        d.state = State.END
+        d._maybe_transition_from_user_text("yes I want to book another")
+        d._maybe_transition_from_user_text("cancel that")
+        d._maybe_transition_from_user_text("hello?")
+    assert d.state is State.END

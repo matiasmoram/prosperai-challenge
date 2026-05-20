@@ -19,7 +19,6 @@ from typing import Any
 from loguru import logger
 from openai import (
     APIConnectionError,
-    APIError,
     APITimeoutError,
     InternalServerError,
     RateLimitError,
@@ -112,12 +111,10 @@ class OpenAILLMAdapter:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        try:
-            resp = await self._client.chat.completions.create(**kwargs)
-        except APIError as e:
-            # Coerce non-retryable APIError children into the right bucket;
-            # tenacity will only retry the _RETRYABLE subset.
-            raise e
+        # APIError children outside `_RETRYABLE` (auth, bad-request, etc.) will
+        # propagate naturally — tenacity's `retry_if_exception_type` filters
+        # for the retryable subset only.
+        resp = await self._client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         msg = choice.message
         text = msg.content or ""
