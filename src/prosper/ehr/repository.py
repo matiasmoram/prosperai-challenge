@@ -31,7 +31,7 @@ class SlotTakenError(Exception):
 
 
 class AppointmentNotFoundError(Exception):
-    pass
+    """Raised when ``appointment_id`` matches no row in the appointments table."""
 
 
 def normalize_name(raw: str) -> str:
@@ -76,6 +76,7 @@ def normalize_phone(raw: str) -> str:
 
 
 def find_patient_by_phone(session: Session, phone: str) -> list[Patient]:
+    """Exact-match lookup on the normalised phone column. Empty list if none."""
     normalized = normalize_phone(phone)
     return list(session.execute(select(Patient).where(Patient.phone == normalized)).scalars())
 
@@ -87,6 +88,12 @@ def find_patient_by_name_dob(
     *,
     min_similarity: float = 0.85,
 ) -> list[tuple[Patient, float]]:
+    """Fuzzy-match candidates with matching DOB, sorted by similarity desc.
+
+    Filters out any candidate whose token-sort ratio against ``name`` is below
+    ``min_similarity``. Returns ``(patient, score)`` tuples so callers can
+    show or threshold on confidence.
+    """
     target = normalize_name(name)
     same_dob = list(session.execute(select(Patient).where(Patient.dob == dob)).scalars())
     scored: list[tuple[Patient, float]] = []
@@ -107,6 +114,7 @@ def create_patient(
     phone: str,
     email: str | None = None,
 ) -> Patient:
+    """Insert a Patient row with normalised name + phone. Caller handles uniqueness."""
     p = Patient(
         first_name=first_name.strip(),
         last_name=last_name.strip(),
@@ -128,6 +136,11 @@ def list_available_slots(
     date_: date,
     provider_id: str | None = None,
 ) -> list[Slot]:
+    """Slots on ``date_`` that are unblocked, unbooked, and not in the past.
+
+    Optionally filtered to a single ``provider_id``. Returns rows ordered by
+    ``start_at`` ascending.
+    """
     day_start = datetime.combine(date_, time.min, tzinfo=timezone.utc)
     day_end = day_start + timedelta(days=1)
     # Audit A1: never offer a slot whose start_at is already in the past.
@@ -199,6 +212,12 @@ def cancel_appointment(
     appointment_id: str,
     reason: str | None = None,
 ) -> Appointment:
+    """Mark a scheduled appointment as cancelled (idempotent). Appends ``reason`` to notes.
+
+    Raises ``AppointmentNotFoundError`` if no row matches ``appointment_id``.
+    Cancelling an already-cancelled appointment is a no-op (preserves the
+    original ``cancelled_at`` + ``[cancel]`` audit trail).
+    """
     appt = session.get(Appointment, appointment_id)
     if appt is None:
         raise AppointmentNotFoundError(appointment_id)
@@ -216,6 +235,7 @@ def cancel_appointment(
 
 
 def get_upcoming_appointments(session: Session, *, patient_id: str) -> list[Appointment]:
+    """Future scheduled appointments for ``patient_id``, ordered by start time."""
     now = datetime.now(timezone.utc)
     stmt = (
         select(Appointment)

@@ -591,7 +591,6 @@ class MockDispatcherLLM(LLMClientProtocol):
     """Plays back a canned ``LLMReply`` script for one scenario."""
 
     def __init__(self, scenario_name: str) -> None:
-        self._name = scenario_name
         self._dispatcher: Dispatcher | None = None
         if scenario_name not in _BOT_SCRIPTS:
             raise KeyError(f"no mock LLM script for scenario {scenario_name!r}")

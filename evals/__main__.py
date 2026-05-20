@@ -53,6 +53,14 @@ async def _run_all(
 
     When ``mock=True`` we skip building an ``AsyncOpenAI`` client entirely
     so the CLI works without ``OPENAI_API_KEY``.
+
+    Exception handling: ``asyncio.gather`` without ``return_exceptions=True``
+    would surface the first exception immediately and silently leak the
+    remaining in-flight scenarios (they keep running, hit OpenAI, then their
+    results are discarded). We instead surface every scenario — crashes
+    become a failed ``ScenarioResult`` with the traceback in
+    ``state_reasons`` so reviewers see exactly which scenarios blew up
+    without losing the runs that completed.
     """
     sem = asyncio.Semaphore(max(1, concurrency))
     client = None
@@ -65,7 +73,27 @@ async def _run_all(
         async with sem:
             return await run_scenario(s, openai_client=client, mock=mock)
 
-    return await asyncio.gather(*[_bounded(s) for s in scenarios])
+    raw = await asyncio.gather(
+        *[_bounded(s) for s in scenarios], return_exceptions=True
+    )
+    results: list[ScenarioResult] = []
+    for scenario, item in zip(scenarios, raw, strict=True):
+        if isinstance(item, BaseException):
+            results.append(
+                ScenarioResult(
+                    name=scenario.name,
+                    state_pass=False,
+                    state_reasons=[f"scenario crashed: {type(item).__name__}: {item}"],
+                    judge_pass=False,
+                    judge_justification="not evaluated (scenario crashed)",
+                    turns=0,
+                    duration_ms=0.0,
+                    transcript=[],
+                )
+            )
+        else:
+            results.append(item)
+    return results
 
 
 def _summary(results: list[ScenarioResult]) -> str:

@@ -46,6 +46,16 @@ class EHRClient:
         self._call_seq: int = 0
 
     def set_session_id(self, session_id: str) -> None:
+        # Concurrency note: ``_session_id`` / ``_turn_id`` / ``_call_seq`` are
+        # request-scoped mutable state. The current architecture is one
+        # ``EHRClient`` per ``Dispatcher`` per WebRTC call (see
+        # ``bot._build_dispatcher``), and Pipecat serialises frames through
+        # ``DispatcherProcessor`` sequentially (single ``__input_queue``), so
+        # there is no concurrent access today. If a future change ever shares
+        # one client across sessions (e.g. a pool of dispatchers), the
+        # request-id sequence would race and X-Request-Id headers would
+        # collide. Move the state into a ``contextvars.ContextVar`` or pass
+        # it through ``_request`` kwargs before that refactor lands.
         self._session_id = session_id
 
     def set_turn_id(self, turn_id: int) -> None:

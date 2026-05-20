@@ -324,3 +324,14 @@ def test_parse_dob_still_accepts_well_formed_dates() -> None:
     for raw in ("1990-12-10", "April 3 1992", "Apr 3, 1992", "12/10/1990"):
         r = _parse_dob(raw)
         assert not is_err(r), f"strict parse rejected well-formed {raw!r}"
+
+
+# Mutation-survivor regression: line-coverage misses inclusive vs exclusive
+# range boundaries. ``[1900, 2100]`` must accept the exact endpoints.
+def test_parse_dob_accepts_inclusive_year_endpoints() -> None:
+    """Mutation: ``year <= _MAX_PARSED_YEAR`` → ``year < _MAX_PARSED_YEAR``."""
+    for raw in ("1900-01-01", "2100-12-31"):
+        r = _parse_dob(raw)
+        assert not is_err(r), (
+            f"_parse_dob must accept boundary year {raw!r} (range is inclusive)"
+        )

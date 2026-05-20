@@ -216,6 +216,19 @@ class Dispatcher:
             tools = [TOOL_SCHEMAS[name] for name in sorted(ALLOWED_TOOLS[self.state])]
             if self.state is State.END:
                 break
+        else:
+            # Loop exhausted (4 iterations) without ever hitting
+            # `not reply.tool_calls` and without reaching END. Typically a
+            # misbehaving model stuck in a tool-call loop. If the final reply
+            # has no spoken text, the caller would hear silence and the call
+            # would stall. Inject a graceful recovery line so the next user
+            # turn can drive the conversation forward, and record the event
+            # in the transcript so eval reviewers can spot it.
+            if not reply.text:
+                self.transcript.append(
+                    {"kind": "llm_loop_exhausted", "state": self.state.value}
+                )
+                reply = LLMReply(text="Sorry, I'm having trouble — could you repeat that?")
         return reply.text
 
     async def _execute_tool(self, call: ToolCall) -> Result[dict[str, Any]]:

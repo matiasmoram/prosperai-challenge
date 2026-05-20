@@ -46,6 +46,9 @@ class OpenAILLMAdapter:
     def __init__(
         self,
         *,
+        # ``client`` is ``AsyncOpenAI`` in prod and MagicMock/AsyncMock in
+        # unit tests; duck-typed on ``.chat.completions.create(**kwargs)``.
+        # Kept as ``Any`` so test doubles don't need to subclass AsyncOpenAI.
         client: Any,
         model: str = "gpt-4o-mini",
         temperature: float = 0.4,
