@@ -1,4 +1,4 @@
-.PHONY: install seed ehr bot dev test eval eval-baseline lint type pre-commit clean
+.PHONY: install seed ehr bot dev test eval eval-baseline lint type bench pre-commit clean
 
 install:
 	uv sync
@@ -30,6 +30,9 @@ lint:
 
 type:
 	uv run mypy src/prosper
+
+bench:
+	uv run python scripts/bench.py --rounds 10
 
 pre-commit:
 	uv run pre-commit run --all-files
