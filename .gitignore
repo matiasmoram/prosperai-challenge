@@ -39,3 +39,12 @@ htmlcov/
 
 # Reference solutions (not part of own submission)
 other solutions/
+
+# Prosper local state
+data/
+*.db
+*.db-journal
+.ruff_cache/
+
+# Eval artifacts
+evals/results/
