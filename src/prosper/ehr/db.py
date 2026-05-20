@@ -1,8 +1,14 @@
 """Engine + session factory.
 
-Engine URL is taken from ``PROSPER_DB_URL`` (default: file-backed
-``data/ehr.db``). ``get_engine(reset=True)`` rebuilds a fresh engine — used
-by tests so each fixture gets isolated state.
+Two construction modes:
+
+- ``make_engine(url)`` / ``make_session_factory(engine)`` — explicit, no
+  globals. Each caller owns its own engine. Used by the parallel eval
+  runner so concurrent scenarios get fully isolated databases.
+- ``get_engine(reset=True)`` / ``get_session()`` / ``init_db()`` — legacy
+  module-level singleton. URL comes from ``PROSPER_DB_URL`` (default:
+  file-backed ``data/ehr.db``). Still used by ``scripts/seed.py``, unit
+  tests, and the FastAPI module-level ``app = create_app()`` fallback.
 """
 
 from __future__ import annotations
@@ -14,6 +20,15 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from prosper.ehr.models import Base
+
+__all__ = [
+    "Base",
+    "get_engine",
+    "get_session",
+    "init_db",
+    "make_engine",
+    "make_session_factory",
+]
 
 _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
@@ -43,36 +58,58 @@ def _enable_sqlite_wal(dbapi_connection: object, _: object) -> None:
     cursor.close()
 
 
+def make_engine(url: str | None = None) -> Engine:
+    """Build a fresh ``Engine`` for the given URL (no globals touched).
+
+    Perf wave 2 #3: enables parallel eval scenarios — each scenario owns
+    its own SQLite file + engine, so the module-level singleton can't get
+    clobbered between concurrent ``asyncio.gather`` branches.
+    """
+    resolved = url if url is not None else _resolve_url()
+    engine = create_engine(
+        resolved,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    if engine.url.drivername.startswith("sqlite"):
+        event.listen(engine, "connect", _enable_sqlite_wal)
+    return engine
+
+
+def make_session_factory(engine: Engine) -> sessionmaker[Session]:
+    """Build a Session factory for the given engine.
+
+    ``expire_on_commit=False`` lets the FastAPI layer keep using ORM
+    objects (e.g. ``appt.slot.provider.name``) after commit without
+    forcing a re-SELECT. Combined with dropped ``session.refresh(p)``
+    calls in repository.py this saves ~1.4 ms per write turn.
+    """
+    return sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+        future=True,
+    )
+
+
 def get_engine(*, reset: bool = False) -> Engine:
+    """Return the process-wide engine, building it on first use.
+
+    Legacy singleton used by seed scripts and unit tests that monkeypatch
+    ``PROSPER_DB_URL``. New code (parallel eval runner) should use
+    :func:`make_engine` instead.
+    """
     global _engine, _SessionLocal
     if _engine is None or reset:
-        _engine = create_engine(
-            _resolve_url(),
-            future=True,
-            connect_args={"check_same_thread": False},
-        )
-        # Apply WAL pragmas to every new SQLite connection (file-backed only;
-        # in-memory engines used by tests are not file-locked and skip these
-        # silently when the pragma is harmless).
-        if _engine.url.drivername.startswith("sqlite"):
-            event.listen(_engine, "connect", _enable_sqlite_wal)
-        # Perf wave 2 #4: expire_on_commit=False lets the FastAPI layer keep
-        # using ORM objects (e.g. ``appt.slot.provider.name`` for the JSON
-        # response) after commit without forcing a re-SELECT. Combined with
-        # the dropped ``session.refresh(p)`` calls in repository.py this
-        # saves ~1.4 ms per write turn.
-        _SessionLocal = sessionmaker(
-            bind=_engine,
-            autoflush=False,
-            autocommit=False,
-            expire_on_commit=False,
-            future=True,
-        )
+        _engine = make_engine()
+        _SessionLocal = make_session_factory(_engine)
     return _engine
 
 
-def init_db() -> None:
-    Base.metadata.create_all(get_engine())
+def init_db(engine: Engine | None = None) -> None:
+    """Create all tables on the given engine (or the singleton if None)."""
+    Base.metadata.create_all(engine if engine is not None else get_engine())
 
 
 def get_session() -> Session:

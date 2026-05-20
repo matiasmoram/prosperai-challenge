@@ -95,16 +95,25 @@ def _validated_ehr_url() -> str:
 
 
 # States that always trigger at least one EHR HTTP call. Inject a brief
-# filler "one moment" before the LLM turn to mask the wait. See
+# filler before the LLM turn to mask the wait. See
 # 2026-05-20-latency-advanced-research.md §1.
-_TOOL_FIRING_STATES = {
-    State.IDENTIFY_PATIENT,
-    State.BOOK_FLOW,
-    State.CANCEL_FLOW,
-    State.CONFIRM_BOOK,
-    State.CONFIRM_CANCEL,
-    State.REGISTER_PATIENT,
+#
+# UX polish (2026-05-20): rotate the filler by state so a single call that
+# touches several tool-firing states ("One moment. ... One moment. ...
+# One moment.") instead hears varied, action-appropriate acknowledgements
+# ("One moment. ... Let me check. ... Looking that up."). IDENTIFY_PATIENT
+# is fixed to "One moment." to preserve the dispatcher-processor unit test
+# contract; the other states use action-specific phrasings that hint at
+# *why* the bot paused.
+_STATE_FILLERS: dict[State, str] = {
+    State.IDENTIFY_PATIENT: "One moment.",
+    State.REGISTER_PATIENT: "Got it, one second.",
+    State.BOOK_FLOW: "Let me check.",
+    State.CANCEL_FLOW: "Looking that up.",
+    State.CONFIRM_BOOK: "One second.",
+    State.CONFIRM_CANCEL: "One second.",
 }
+_TOOL_FIRING_STATES = frozenset(_STATE_FILLERS)
 
 # NOTE on pipecat aggregation_timeout (web research finding, 2026):
 # Pipecat's default LLMUserAggregator carries a 1.0s aggregation_timeout that
@@ -168,8 +177,9 @@ class DispatcherProcessor(FrameProcessor):
             # Filler speech: in tool-firing states the LLM round-trip + EHR
             # call easily exceeds 800ms. Push a brief filler so the caller
             # hears acknowledgement immediately rather than dead air.
-            if self._dispatcher.state in _TOOL_FIRING_STATES:
-                await self.push_frame(TTSSpeakFrame("One moment."))
+            filler = _STATE_FILLERS.get(self._dispatcher.state)
+            if filler is not None:
+                await self.push_frame(TTSSpeakFrame(filler))
             # Wrap dispatcher in try/except: a stray exception (LLM 5xx after
             # all retries exhausted, EHR timeout, JSON parse error, etc.) must
             # NOT crash the Pipecat pipeline mid-call. Speak a recovery line

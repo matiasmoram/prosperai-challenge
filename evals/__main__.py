@@ -1,8 +1,14 @@
 """CLI: ``python -m evals [--only NAME] [--tag TAG] [--json OUT.json]
-[--baseline PREV.json] [-v]``.
+[--baseline PREV.json] [--concurrency N] [-v]``.
 
 Exits non-zero if any scenario fails OR if --baseline is supplied and at
 least one scenario that previously passed now fails (regression).
+
+Perf wave 2 #3: ``--concurrency N`` (default 4) runs scenarios under an
+``asyncio.Semaphore`` so up to N LLM round-trips overlap. Each scenario
+owns an isolated SQLite engine (see ``evals/runner._isolated_engine``),
+so there's no shared mutable state between concurrent branches.
+Set ``--concurrency 1`` for serial debug.
 """
 
 from __future__ import annotations
@@ -32,13 +38,21 @@ def _select(args: argparse.Namespace) -> list[Scenario]:
     return out
 
 
-async def _run_all(scenarios: list[Scenario]) -> list[ScenarioResult]:
+async def _run_all(scenarios: list[Scenario], *, concurrency: int) -> list[ScenarioResult]:
+    """Run all selected scenarios with at most ``concurrency`` in flight.
+
+    Each scenario builds its own SQLite engine + FastAPI app, so the only
+    shared resources between branches are the AsyncOpenAI client (which
+    httpx already serialises safely) and the semaphore itself.
+    """
     client = AsyncOpenAI()
-    results: list[ScenarioResult] = []
-    for s in scenarios:
-        result = await run_scenario(s, openai_client=client)
-        results.append(result)
-    return results
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _bounded(s: Scenario) -> ScenarioResult:
+        async with sem:
+            return await run_scenario(s, openai_client=client)
+
+    return await asyncio.gather(*[_bounded(s) for s in scenarios])
 
 
 def _summary(results: list[ScenarioResult]) -> str:
@@ -109,8 +123,18 @@ def main() -> int:
     parser.add_argument("--tag", action="append")
     parser.add_argument("--json")
     parser.add_argument("--baseline")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=4,
+        help="Max scenarios in flight (default 4). Use 1 for serial debug.",
+    )
     parser.add_argument("-v", action="store_true")
     args = parser.parse_args()
+
+    if args.concurrency < 1:
+        print("ERROR: --concurrency must be >= 1", file=sys.stderr)
+        return 2
 
     if not os.environ.get("OPENAI_API_KEY"):
         print("ERROR: OPENAI_API_KEY not set", file=sys.stderr)

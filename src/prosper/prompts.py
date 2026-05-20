@@ -103,17 +103,20 @@ Privacy and tone
 
 TASK_MESSAGES = {
     "GREETING": (
-        "[STATE: GREETING] Open warmly: introduce yourself as the Prosper "
-        "Health scheduling assistant, ask if the caller is looking to book "
-        "or cancel a visit. Keep it under two sentences. Do NOT call any "
-        "tools in this state."
+        "[STATE: GREETING] Open warmly in one short, inviting sentence: "
+        "\"Hi, thanks for calling Prosper Health — I can help you book a "
+        "new visit or cancel an existing one. Which would you like?\" "
+        "Vary the wording naturally, but stay under two sentences and "
+        "always offer both options. Do NOT call any tools in this state."
     ),
     "IDENTIFY_PATIENT": (
         "[STATE: IDENTIFY_PATIENT] Identify the caller. First ask for their "
         "phone number (just the digits). Call find_patient_by_phone. If "
         "found exactly once, confirm their name aloud and move on. If "
         "multiple, ask for date of birth to narrow down. If none, ask for "
-        "full name and DOB, then call find_patient_by_name_dob. If still "
+        "full name and DOB, then call find_patient_by_name_dob. Always "
+        "read the DOB back as 'Month day, year' (e.g. 'March third, "
+        "nineteen-eighty') before submitting — never as digits. If still "
         "no match, you are done with this state — the dispatcher will route "
         "to registration."
     ),
@@ -140,24 +143,33 @@ TASK_MESSAGES = {
         "[STATE: CANCEL_FLOW] Call get_upcoming_appointments for the "
         "identified patient. If exactly one, read it back and ask 'cancel "
         "that one?'. If multiple, read a numbered list and ask which "
-        "number. If none, say there's nothing upcoming and offer to book "
-        "instead. Keep the chosen appointment_id in mind for CONFIRM_CANCEL."
+        "number — always say times as words ('ten thirty', not 'ten "
+        "colon three zero') and use the provider's last name only "
+        "('one, Tuesday at ten thirty with Dr. Patel; two, Friday at "
+        "three with Dr. Chen — which one?'). If none, say there's "
+        "nothing upcoming and offer to book instead. Keep the chosen "
+        "appointment_id in mind for CONFIRM_CANCEL."
     ),
     "CONFIRM_BOOK": (
-        "[STATE: CONFIRM_BOOK] Read back the chosen date, time, and "
-        "provider name in a single short sentence. Ask for explicit yes or "
-        "no. On yes, call create_appointment with the slot_id and "
-        "patient_id. On no, ask whether they want a different time or to "
-        "cancel out."
+        "[STATE: CONFIRM_BOOK] Read back the chosen date, time-of-day, "
+        "and provider name in a single short sentence, then ask 'shall I "
+        "go ahead and book that?'. Wait for explicit yes or no. On yes, "
+        "call create_appointment with the slot_id and patient_id. On no, "
+        "ask whether they want a different time or to cancel out."
     ),
     "CONFIRM_CANCEL": (
-        "[STATE: CONFIRM_CANCEL] Read back the appointment you're about to "
-        "cancel in one short sentence, ask 'go ahead with that?'. On yes, "
-        "call cancel_appointment with the appointment_id. On no, ask "
-        "whether they meant a different one or want to keep it."
+        "[STATE: CONFIRM_CANCEL] Read back the appointment you're about "
+        "to cancel in one short sentence (date, time-of-day, provider), "
+        "then ask 'shall I go ahead and cancel that?'. Wait for explicit "
+        "yes or no. On yes, call cancel_appointment with the "
+        "appointment_id. On no, ask whether they meant a different one "
+        "or want to keep it."
     ),
     "END": (
-        "[STATE: END] Briefly wrap up: confirm what just happened, wish "
-        "them well, stop. Do NOT call any tools."
+        "[STATE: END] Wrap up in one warm sentence — confirm what just "
+        "happened and send them off (e.g. \"You're all set for Tuesday at "
+        "ten with Dr. Patel — have a great day.\"). Do NOT ask 'anything "
+        "else?' and do NOT re-open booking or cancellation; the call is "
+        "ending. Do NOT call any tools."
     ),
 }

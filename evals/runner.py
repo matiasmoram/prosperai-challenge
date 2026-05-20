@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from evals.judge import judge_transcript
@@ -31,7 +31,7 @@ from evals.sim import PersonaSimulator
 from evals.types import Scenario, ScenarioResult
 from prosper.dispatcher import Dispatcher
 from prosper.ehr.api import create_app
-from prosper.ehr.db import get_engine, init_db
+from prosper.ehr.db import init_db, make_engine
 from prosper.ehr.models import Appointment, AppointmentStatus, Patient
 from prosper.ehr_client import EHRClient
 from prosper.flows import State
@@ -39,20 +39,22 @@ from prosper.llm import OpenAILLMAdapter
 
 
 @contextmanager
-def _isolated_db_env() -> Iterator[str]:
+def _isolated_engine() -> Iterator[Engine]:
+    """Build a fresh SQLite engine on a private tempfile, yield it, cleanup.
+
+    No global state is mutated — safe to call concurrently from multiple
+    asyncio tasks. The eval runner calls ``create_app(engine)`` with this
+    engine so the FastAPI app, repo writes, and snapshot reads all use the
+    same isolated database.
+    """
     fd, tmp_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    prior = os.environ.get("PROSPER_DB_URL")
-    os.environ["PROSPER_DB_URL"] = f"sqlite:///{tmp_path}"
+    engine = make_engine(f"sqlite:///{tmp_path}")
+    init_db(engine)
     try:
-        get_engine(reset=True)
-        init_db()
-        yield tmp_path
+        yield engine
     finally:
-        if prior is None:
-            os.environ.pop("PROSPER_DB_URL", None)
-        else:
-            os.environ["PROSPER_DB_URL"] = prior
+        engine.dispose()
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
 
@@ -142,17 +144,17 @@ def _evaluate_state(
 
 async def run_scenario(scenario: Scenario, *, openai_client: Any) -> ScenarioResult:
     started = time.perf_counter()
-    with _isolated_db_env():
-        with Session(get_engine()) as setup_session:
+    with _isolated_engine() as engine:
+        with Session(engine) as setup_session:
             scenario.setup(setup_session)
             setup_session.commit()
-        with Session(get_engine()) as snap:
+        with Session(engine) as snap:
             before = {
                 "patient": _count_patients(snap),
                 "active": _count_appts(snap, AppointmentStatus.SCHEDULED),
                 "cancelled": _count_appts(snap, AppointmentStatus.CANCELLED),
             }
-        app = create_app()
+        app = create_app(engine=engine)
         ehr = EHRClient.for_asgi_app(app)
         dispatcher = Dispatcher(
             llm=OpenAILLMAdapter(client=openai_client, model="gpt-4o-mini"),
@@ -169,7 +171,7 @@ async def run_scenario(scenario: Scenario, *, openai_client: Any) -> ScenarioRes
                     break
                 bot_text = await dispatcher.handle_user_turn(user_text)
                 turns += 1
-        with Session(get_engine()) as snap:
+        with Session(engine) as snap:
             after = {
                 "patient": _count_patients(snap),
                 "active": _count_appts(snap, AppointmentStatus.SCHEDULED),

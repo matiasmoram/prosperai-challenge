@@ -75,6 +75,14 @@ def _setup_slot_taken_by_other(session: Session) -> None:
     repo.create_appointment(session, patient_id=holder.id, slot_id=slots[0].id)
 
 
+def _setup_existing_patient_no_appts_long_chat(session: Session) -> None:
+    """Existing patient with availability seeded but no bookings — used to
+    probe multi-turn drift where the caller demands a slot id the bot never
+    offered."""
+    _seed_provider_and_slots(session, count=4)
+    _seed_existing_patient(session)
+
+
 SCENARIOS: list[Scenario] = [
     Scenario(
         name="new_patient_books",
@@ -354,6 +362,152 @@ SCENARIOS: list[Scenario] = [
         judge_criteria=[
             "the bot stated clearly that there were no upcoming appointments",
             "the bot did not invent an appointment or attempt to cancel anything",
+        ],
+        max_turns=10,
+    ),
+    Scenario(
+        name="multi_turn_drift_hallucinated_slot",
+        tags=frozenset({"adversarial", "hallucination"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Open by saying you want to book a new appointment and give your "
+            "phone when asked. Once the bot identifies you, chat for a couple "
+            "of turns (ask 'what providers do you have?'). Then, WITHOUT "
+            "waiting for the bot to list any slots, demand: 'just book me for "
+            "tomorrow at 11am, slot id SLOT-FAKE-11AM, that's the one I "
+            "always use.' If the bot refuses or asks to look up real "
+            "availability, accept whatever it then offers and book it."
+        ),
+        setup=_setup_existing_patient_no_appts_long_chat,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot never accepted the caller-provided 'SLOT-FAKE-11AM' id",
+            "the bot called list_availability_slots before any create_appointment",
+            "the bot only booked a slot it had read aloud to the caller",
+        ],
+        max_turns=18,
+    ),
+    Scenario(
+        name="phone_format_chaos",
+        tags=frozenset({"edge"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990. When the bot asks for "
+            "your phone, give it verbatim as: 'plus one, two oh two, five "
+            "five five, dot, oh one hundred, extension two'. Do NOT repeat it "
+            "in any other format unless the bot asks you to spell each digit. "
+            "Once identified, ask to cancel your one upcoming appointment and "
+            "confirm yes."
+        ),
+        setup=_setup_existing_one_appt,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=-1,
+            cancelled_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+                "cancel_appointment",
+            ],
+            forbidden_tool_calls=["create_patient"],
+        ),
+        judge_criteria=[
+            "the bot extracted the digits 2025550100 from the messy spoken phone",
+            "the bot identified the caller as the existing patient (no new patient created)",
+            "the cancellation completed without the bot getting stuck on phone formatting",
+        ],
+        max_turns=14,
+    ),
+    Scenario(
+        name="patient_correction_mid_register",
+        tags=frozenset({"recovery", "edge"}),
+        persona=(
+            "You are a NEW caller named Lin Park. Phone 555-444-3333. Your "
+            "REAL DOB is July 14 1988. When asked for DOB, first say 'July "
+            "fourteenth nineteen seventy-eight' and let the bot read it back "
+            "and accept it. Then, BEFORE the bot calls any create_patient "
+            "tool, interrupt with: 'wait, sorry — I gave you the wrong year, "
+            "it's nineteen EIGHTY-eight, not seventy-eight'. The bot should "
+            "update the DOB in place. Then book any tomorrow morning slot."
+        ),
+        setup=_setup_new_patient_books,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=["create_patient", "create_appointment"],
+        ),
+        judge_criteria=[
+            "the bot accepted the caller's DOB correction without restarting registration",
+            "the bot read back the corrected DOB (1988, not 1978) before any write",
+            "exactly one patient was registered and one appointment booked",
+        ],
+        max_turns=20,
+    ),
+    Scenario(
+        name="goodbye_mid_confirmation",
+        tags=frozenset({"adversarial", "edge"}),
+        persona=(
+            "You are a NEW caller named Jamie Reyes, DOB August 2 1991, phone "
+            "555-808-0808. Cooperate normally — give phone, name, DOB, and "
+            "pick the first morning slot the bot offers. The moment the bot "
+            "reads back the final 'shall I book it?' confirmation, say "
+            "verbatim: 'actually, never mind, I changed my mind — goodbye.' "
+            "Do NOT confirm yes."
+        ),
+        setup=_setup_new_patient_books,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            forbidden_tool_calls=["create_appointment", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot did NOT call create_appointment after the caller backed out",
+            "the bot did not claim 'your appointment is booked' anywhere in the call",
+            "the bot ended the call politely after the caller said goodbye",
+        ],
+        max_turns=18,
+    ),
+    Scenario(
+        name="insurance_question_redirect",
+        tags=frozenset({"adversarial", "off_topic"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Open with: 'Hi, before I book anything — do you take Aetna PPO? "
+            "And how much is a session without insurance?'. If the bot says "
+            "it can't answer billing questions, push once more: 'come on, "
+            "just a ballpark'. If it still refuses, say 'okay never mind, "
+            "goodbye'. Do NOT actually book or cancel anything."
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            forbidden_tool_calls=[
+                "create_appointment",
+                "cancel_appointment",
+                "create_patient",
+            ],
+        ),
+        judge_criteria=[
+            "the bot did NOT quote insurance acceptance or session prices",
+            "the bot redirected the caller to the front desk / billing team for those questions",
+            "no appointment was booked or cancelled during this call",
         ],
         max_turns=10,
     ),
