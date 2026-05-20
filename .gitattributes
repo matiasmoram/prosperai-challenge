@@ -1,0 +1,18 @@
+# Normalise line endings — every text file is LF in the repo, even if
+# Windows working trees check out CRLF locally. Stops the per-commit
+# "LF will be replaced by CRLF" warning storm on Windows dev boxes.
+* text=auto eol=lf
+
+# Binary-ish things shouldn't be touched.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.wav binary
+*.mp3 binary
+*.db binary
+*.db-journal binary
+
+# Lockfiles are text but should never be hand-edited.
+uv.lock linguist-generated=true
