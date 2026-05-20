@@ -8,11 +8,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class PatientCreate(BaseModel):
-    first_name: str = Field(min_length=1)
-    last_name: str = Field(min_length=1)
+    # Max lengths track the ORM column widths in models.py + a defensive cap
+    # on phone/email so a malicious POST can't dump a multi-MB string into
+    # the DB. SQLite would happily accept it; the DB columns truncate but
+    # the request body is parsed entirely into memory before the cap fires.
+    first_name: str = Field(min_length=1, max_length=80)
+    last_name: str = Field(min_length=1, max_length=80)
     dob: date
-    phone: str = Field(min_length=7)
-    email: str | None = None
+    phone: str = Field(min_length=7, max_length=32)
+    email: str | None = Field(default=None, max_length=200)
 
 
 class PatientOut(BaseModel):
@@ -51,13 +55,13 @@ class SlotList(BaseModel):
 
 
 class AppointmentCreate(BaseModel):
-    patient_id: str
-    slot_id: str
-    notes: str | None = None
+    patient_id: str = Field(min_length=1, max_length=36)
+    slot_id: str = Field(min_length=1, max_length=36)
+    notes: str | None = Field(default=None, max_length=500)
 
 
 class AppointmentCancel(BaseModel):
-    reason: str | None = None
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class AppointmentOut(BaseModel):

@@ -13,6 +13,7 @@ import os
 import sys
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 # Perf wave 2 #5: load .env + fail-fast on missing credentials BEFORE the
 # 17s pipecat import cascade. A misconfigured boot used to print "Bot
@@ -66,6 +67,32 @@ from prosper.dispatcher import Dispatcher
 from prosper.ehr_client import EHRClient
 from prosper.flows import State
 from prosper.llm import OpenAILLMAdapter
+from prosper.observability.redact import redact_pii
+
+_ALLOWED_EHR_SCHEMES = {"http", "https"}
+
+
+def _validated_ehr_url() -> str:
+    """Resolve + sanity-check the EHR base URL from env.
+
+    SSRF guard: anyone who controls .env (compromised CI, sloppy deploy)
+    could repoint the bot at e.g. http://169.254.169.254/latest/meta-data
+    (cloud metadata) or an internal admin endpoint, then phish the LLM into
+    triggering tool calls that exfiltrate the response. We don't let that
+    happen — only http/https are accepted, the URL must parse, and the
+    hostname must be present. Hostname allowlisting beyond this is left to
+    the deploy environment (network policy / egress firewall).
+    """
+    raw = os.environ.get("PROSPER_EHR_URL", "http://127.0.0.1:8000")
+    parsed = urlparse(raw)
+    if parsed.scheme not in _ALLOWED_EHR_SCHEMES:
+        raise SystemExit(
+            f"PROSPER_EHR_URL scheme must be one of {_ALLOWED_EHR_SCHEMES}, got {parsed.scheme!r}"
+        )
+    if not parsed.hostname:
+        raise SystemExit(f"PROSPER_EHR_URL is missing a hostname: {raw!r}")
+    return raw
+
 
 # States that always trigger at least one EHR HTTP call. Inject a brief
 # filler "one moment" before the LLM turn to mask the wait. See
@@ -135,7 +162,9 @@ class DispatcherProcessor(FrameProcessor):
                 await self.push_frame(frame, direction)
                 return
             self._stt_end_ts = time.perf_counter()
-            logger.info("USER: {}", user_text)
+            # HIPAA-adjacent: redact phone / DOB / email from log sinks. The
+            # dispatcher still sees the raw text — only the log line is masked.
+            logger.info("USER: {}", redact_pii(user_text))
             # Filler speech: in tool-firing states the LLM round-trip + EHR
             # call easily exceeds 800ms. Push a brief filler so the caller
             # hears acknowledgement immediately rather than dead air.
@@ -151,9 +180,7 @@ class DispatcherProcessor(FrameProcessor):
             # last-resort guard for live calls; mid-pipeline crash would kill the WebRTC session
             except Exception as e:
                 logger.exception("dispatcher.handle_user_turn raised: {}", e)
-                reply = (
-                    "Sorry, I missed that — could you say it again?"
-                )
+                reply = "Sorry, I missed that — could you say it again?"
             if self._stt_end_ts is not None:
                 ttft_ms = (time.perf_counter() - self._stt_end_ts) * 1000
                 self._dispatcher.timing.record(
@@ -162,7 +189,7 @@ class DispatcherProcessor(FrameProcessor):
                     state=self._dispatcher.state.value,
                 )
                 self._stt_end_ts = None
-            logger.info("BOT[{}]: {}", self._dispatcher.state.value, reply)
+            logger.info("BOT[{}]: {}", self._dispatcher.state.value, redact_pii(reply))
             if reply:
                 await self.push_frame(TTSSpeakFrame(reply))
             return
@@ -175,7 +202,7 @@ class DispatcherProcessor(FrameProcessor):
 
 def _build_dispatcher(openai_client: AsyncOpenAI | None = None) -> Dispatcher:
     client: Any = openai_client or AsyncOpenAI()
-    ehr_base = os.environ.get("PROSPER_EHR_URL", "http://127.0.0.1:8000")
+    ehr_base = _validated_ehr_url()
     ehr = EHRClient.for_http(ehr_base)
     llm = OpenAILLMAdapter(
         client=client,
@@ -195,7 +222,7 @@ async def _startup_health_check() -> None:
     """
     import httpx
 
-    ehr_base = os.environ.get("PROSPER_EHR_URL", "http://127.0.0.1:8000")
+    ehr_base = _validated_ehr_url()
     try:
         async with httpx.AsyncClient(timeout=2.0) as c:
             r = await c.get(f"{ehr_base}/health")
