@@ -151,6 +151,8 @@ async def run_scenario(scenario: Scenario, *, openai_client: Any) -> ScenarioRes
             criteria=scenario.judge_criteria,
         )
         timing = dispatcher.timing.summary()
+        cached_tokens = dispatcher.cached_prompt_tokens_total
+        prompt_tokens = dispatcher.prompt_tokens_total
     duration = (time.perf_counter() - started) * 1000
     return ScenarioResult(
         name=scenario.name,
@@ -162,4 +164,6 @@ async def run_scenario(scenario: Scenario, *, openai_client: Any) -> ScenarioRes
         duration_ms=duration,
         transcript=dispatcher.transcript,
         timing_summary=timing,
+        cached_prompt_tokens=cached_tokens,
+        prompt_tokens=prompt_tokens,
     )

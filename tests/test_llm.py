@@ -10,14 +10,25 @@ from prosper.dispatcher import LLMReply, ToolCall
 from prosper.llm import OpenAILLMAdapter
 
 
-def _fake_response(text: str, tool_calls: list[tuple[str, dict]] | None = None) -> object:
+def _fake_response(
+    text: str,
+    tool_calls: list[tuple[str, dict]] | None = None,
+    *,
+    cached_tokens: int = 0,
+    prompt_tokens: int = 0,
+) -> object:
     tcs = []
     for name, args in tool_calls or []:
         fn = SimpleNamespace(name=name, arguments=json.dumps(args))
         tcs.append(SimpleNamespace(id="call_x", function=fn))
     msg = SimpleNamespace(content=text, tool_calls=tcs or None)
     choice = SimpleNamespace(message=msg)
-    return SimpleNamespace(choices=[choice])
+    usage = SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=0,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=cached_tokens),
+    )
+    return SimpleNamespace(choices=[choice], usage=usage)
 
 
 @pytest.fixture
@@ -63,3 +74,15 @@ async def test_adapter_parses_tool_calls(
     assert reply.tool_calls[0] == ToolCall(
         name="find_patient_by_phone", arguments={"phone": "2025550100"}
     )
+
+
+async def test_adapter_surfaces_cached_prompt_tokens() -> None:
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = AsyncMock(
+        return_value=_fake_response("hi", cached_tokens=1280, prompt_tokens=1700)
+    )
+    adapter = OpenAILLMAdapter(client=fake_client, model="gpt-4o-mini")
+    reply = await adapter.generate(state="GREETING", history=[], tools=[])
+    assert reply.usage is not None
+    assert reply.usage.cached_prompt_tokens == 1280
+    assert reply.usage.prompt_tokens == 1700

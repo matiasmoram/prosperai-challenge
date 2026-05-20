@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from prosper.dispatcher import LLMReply, ToolCall
+from prosper.dispatcher import LLMReply, LLMUsage, ToolCall
 
 
 class OpenAILLMAdapter:
@@ -40,4 +40,24 @@ class OpenAILLMAdapter:
             except json.JSONDecodeError:
                 args = {}
             tool_calls.append(ToolCall(name=tc.function.name, arguments=args))
-        return LLMReply(text=text, tool_calls=tool_calls)
+        # OpenAI returns cached_tokens nested under prompt_tokens_details; guard
+        # for absence so other providers / mocked tests still work.
+        usage = getattr(resp, "usage", None)
+        cached = 0
+        prompt = 0
+        completion = 0
+        if usage is not None:
+            prompt = getattr(usage, "prompt_tokens", 0) or 0
+            completion = getattr(usage, "completion_tokens", 0) or 0
+            details = getattr(usage, "prompt_tokens_details", None)
+            if details is not None:
+                cached = getattr(details, "cached_tokens", 0) or 0
+        return LLMReply(
+            text=text,
+            tool_calls=tool_calls,
+            usage=LLMUsage(
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                cached_prompt_tokens=cached,
+            ),
+        )

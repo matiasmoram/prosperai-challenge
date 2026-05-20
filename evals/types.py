@@ -44,7 +44,16 @@ class ScenarioResult:
     duration_ms: float
     transcript: list[dict]
     timing_summary: dict[str, dict[str, float]] = field(default_factory=dict)
+    cached_prompt_tokens: int = 0
+    prompt_tokens: int = 0
 
     @property
     def overall_pass(self) -> bool:
         return self.state_pass and self.judge_pass
+
+    @property
+    def cache_hit_ratio(self) -> float:
+        """Fraction of prompt tokens served from OpenAI's prompt cache."""
+        if self.prompt_tokens == 0:
+            return 0.0
+        return self.cached_prompt_tokens / self.prompt_tokens

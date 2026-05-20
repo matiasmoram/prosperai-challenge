@@ -39,10 +39,20 @@ class ToolCall:
 class LLMReply:
     text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: LLMUsage | None = None
 
 
 class LLMClientProtocol(Protocol):
     async def generate(self, *, state: str, history: list[dict], tools: list[dict]) -> LLMReply: ...
+
+
+@dataclass
+class LLMUsage:
+    """Optional usage metrics reported by the LLM provider."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_prompt_tokens: int = 0
 
 
 @dataclass
@@ -71,6 +81,9 @@ class Dispatcher:
         self.history: list[dict] = []
         self.transcript: list[dict] = []
         self.timing = TimingCollector()
+        self.cached_prompt_tokens_total: int = 0
+        self.prompt_tokens_total: int = 0
+        self._user_turn_start_ts: float | None = None  # for TTFT in DispatcherProcessor
 
     async def start(self) -> str:
         """Run the GREETING state's opening turn (no user input yet)."""
@@ -89,8 +102,19 @@ class Dispatcher:
         for _ in range(4):
             async with self.timing.measure(phase="llm", state=self.state.value):
                 reply = await self._llm.generate(state=self.state.value, history=msgs, tools=tools)
+            if reply.usage is not None:
+                self.cached_prompt_tokens_total += reply.usage.cached_prompt_tokens
+                self.prompt_tokens_total += reply.usage.prompt_tokens
             self.transcript.append(
-                {"kind": "assistant", "state": self.state.value, "text": reply.text}
+                {
+                    "kind": "assistant",
+                    "state": self.state.value,
+                    "text": reply.text,
+                    "cached_prompt_tokens": (
+                        reply.usage.cached_prompt_tokens if reply.usage else 0
+                    ),
+                    "prompt_tokens": (reply.usage.prompt_tokens if reply.usage else 0),
+                }
             )
             self.history.append({"role": "assistant", "content": reply.text})
 

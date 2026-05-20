@@ -45,10 +45,13 @@ def _summary(results: list[ScenarioResult]) -> str:
     lines = []
     for r in results:
         mark = "+" if r.overall_pass else "-"
+        ttft = r.timing_summary.get("ttft", {}).get("p50", 0)
+        cache_pct = r.cache_hit_ratio * 100
         lines.append(
             f"{mark} {r.name:42s} state={'P' if r.state_pass else 'F'} "
             f"judge={'P' if r.judge_pass else 'F'}  "
-            f"turns={r.turns:2d}  {r.duration_ms:6.0f}ms"
+            f"turns={r.turns:2d}  total={r.duration_ms:6.0f}ms  "
+            f"ttft_p50={ttft:5.0f}ms  cache={cache_pct:4.0f}%"
         )
         if not r.state_pass:
             for reason in r.state_reasons:
@@ -70,6 +73,9 @@ def _to_json(results: list[ScenarioResult]) -> list[dict]:
             "turns": r.turns,
             "duration_ms": r.duration_ms,
             "timing_summary": r.timing_summary,
+            "cached_prompt_tokens": r.cached_prompt_tokens,
+            "prompt_tokens": r.prompt_tokens,
+            "cache_hit_ratio": r.cache_hit_ratio,
         }
         for r in results
     ]

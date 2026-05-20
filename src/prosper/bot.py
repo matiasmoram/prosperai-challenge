@@ -10,8 +10,10 @@ source of truth for which tools fire.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
+import pipecat as _pipecat
 from dotenv import load_dotenv
 from loguru import logger
 from openai import AsyncOpenAI
@@ -41,6 +43,28 @@ from prosper.llm import OpenAILLMAdapter
 load_dotenv(override=True)
 
 
+# NOTE on pipecat aggregation_timeout (web research finding, 2026):
+# Pipecat's default LLMUserAggregator carries a 1.0s aggregation_timeout that
+# is widely reported as the #1 latency complaint. We do NOT use the user
+# aggregator at all — DispatcherProcessor consumes TranscriptionFrame directly
+# (see Pipeline construction below) and dispatches to our FSM. So that tax
+# does not apply to this pipeline. If a future change inserts an aggregator,
+# pass ``LLMUserAggregatorParams(aggregation_timeout=0.3)`` to avoid the
+# regression.
+
+# NOTE on pipecat version: 0.0.100 is intentional. v1.0.0 (released
+# 2026-04-14) carries breaking changes and migrating mid-submission would
+# risk shipping a half-working bot. Upgrade is listed in SOLUTION.md "Future
+# work".
+_PIPECAT_VERSION = getattr(_pipecat, "__version__", "unknown")
+if not _PIPECAT_VERSION.startswith("0."):
+    logger.warning(
+        "Pipecat {} detected; this codebase targets 0.0.100 — re-validate "
+        "FrameProcessor + Frame APIs before shipping.",
+        _PIPECAT_VERSION,
+    )
+
+
 class DispatcherProcessor(FrameProcessor):
     """Bridges Pipecat frames to our dispatcher.
 
@@ -52,6 +76,12 @@ class DispatcherProcessor(FrameProcessor):
         super().__init__()
         self._dispatcher = dispatcher
         self._greeted = False
+        # TTFT (time-to-first-token, end-of-user-speech → start-of-bot-speech):
+        # the canonical voice-agent metric in 2026. Recorded by stamping
+        # _stt_end_ts on each final TranscriptionFrame and computing the
+        # delta once the dispatcher hands back the bot's reply (the LLM
+        # response is the first thing TTS will emit).
+        self._stt_end_ts: float | None = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -68,8 +98,17 @@ class DispatcherProcessor(FrameProcessor):
             if not user_text:
                 await self.push_frame(frame, direction)
                 return
+            self._stt_end_ts = time.perf_counter()
             logger.info("USER: {}", user_text)
             reply = await self._dispatcher.handle_user_turn(user_text)
+            if self._stt_end_ts is not None:
+                ttft_ms = (time.perf_counter() - self._stt_end_ts) * 1000
+                self._dispatcher.timing.record(
+                    phase="ttft",
+                    duration_ms=ttft_ms,
+                    state=self._dispatcher.state.value,
+                )
+                self._stt_end_ts = None
             logger.info("BOT[{}]: {}", self._dispatcher.state.value, reply)
             if reply:
                 await self.push_frame(TTSSpeakFrame(reply))
