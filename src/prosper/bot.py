@@ -38,7 +38,20 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 
 from prosper.dispatcher import Dispatcher
 from prosper.ehr_client import EHRClient
+from prosper.flows import State
 from prosper.llm import OpenAILLMAdapter
+
+# States that always trigger at least one EHR HTTP call. Inject a brief
+# filler "one moment" before the LLM turn to mask the wait. See
+# 2026-05-20-latency-advanced-research.md §1.
+_TOOL_FIRING_STATES = {
+    State.IDENTIFY_PATIENT,
+    State.BOOK_FLOW,
+    State.CANCEL_FLOW,
+    State.CONFIRM_BOOK,
+    State.CONFIRM_CANCEL,
+    State.REGISTER_PATIENT,
+}
 
 load_dotenv(override=True)
 
@@ -100,6 +113,11 @@ class DispatcherProcessor(FrameProcessor):
                 return
             self._stt_end_ts = time.perf_counter()
             logger.info("USER: {}", user_text)
+            # Filler speech: in tool-firing states the LLM round-trip + EHR
+            # call easily exceeds 800ms. Push a brief filler so the caller
+            # hears acknowledgement immediately rather than dead air.
+            if self._dispatcher.state in _TOOL_FIRING_STATES:
+                await self.push_frame(TTSSpeakFrame("One moment."))
             reply = await self._dispatcher.handle_user_turn(user_text)
             if self._stt_end_ts is not None:
                 ttft_ms = (time.perf_counter() - self._stt_end_ts) * 1000

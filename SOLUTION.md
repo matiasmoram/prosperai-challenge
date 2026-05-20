@@ -24,6 +24,26 @@ OPENAI_API_KEY=... uv run python -m evals --json evals/results/baseline.json
 OPENAI_API_KEY=... uv run python -m evals --baseline evals/results/baseline.json   # CI gate
 ```
 
+## Endpoint mapping (challenge spec → REST)
+
+The README requests five named endpoints. We grouped them by HTTP verb and
+resource so the EHR feels like a real integration. The mapping is exact:
+
+| Challenge name | REST endpoint |
+|---|---|
+| `create_patient` | `POST /patients` |
+| `find_patient` (by name + DOB) | `GET /patients/by-name-dob?name=&dob=` |
+| `find_patient` (by phone, our addition) | `GET /patients/by-phone?phone=` |
+| `list_availability_slots` | `GET /availability?date=&provider_id=` |
+| `create_appointment` | `POST /appointments` |
+| `cancel_appointment` | `POST /appointments/{id}/cancel` |
+| (helper) get patient appointments | `GET /patients/{id}/appointments` |
+
+The phone-first `find_patient` variant exists because phone numbers are the
+single thing STT handles crisply — it's the bot's primary identification
+path. The challenge-required name+DOB lookup is still fully implemented and
+exercised as the fallback path.
+
 ## Architecture decisions
 
 | Decision | Choice | Why |
@@ -36,7 +56,9 @@ OPENAI_API_KEY=... uv run python -m evals --baseline evals/results/baseline.json
 | Appointment cancel | **Adaptive 0 / 1 / N** | 0 upcoming → say so and exit; 1 → auto-confirm; N → numbered list. One conditional, big UX win. |
 | Tool returns | **`Result[Ok, Err]` discriminated union** | Eliminates `dict \| None` ambiguity at the boundary; gives the dispatcher and the eval state-assertions a stable error-code enum to branch on. |
 | Eval suite | **Hybrid scripted text + paired state-assertion + LLM judge** | The deterministic check closes the "judge hallucinated success on a transcript that didn't actually mutate the EHR" gap. Audio smoke tests are marker-gated so default CI doesn't burn ElevenLabs credits on every push. |
-| Latency | **Instrumentation + long stable persona for prompt-cache + tight per-state prompts** | `TimingCollector` emits per-span JSON logs and p50/p95 aggregates. The persona preamble is ≥1100 tokens so OpenAI's prompt cache kicks in across turns. Per-state task messages stay ≤1 KB. |
+| Latency | **Instrumentation + long stable persona for prompt-cache + tight per-state prompts + filler speech + Flash v2.5 TTS** | TimingCollector with TTFT + cached-token surfacing; ElevenLabs Flash v2.5 (~75ms first-audio vs ~200ms); "One moment." filler before tool-firing states masks the LLM round-trip. |
+| Reliability | **tenacity retry + fallback model + EHR health-check** | `OpenAILLMAdapter` retries transient 5xx/429 with exponential jitter, falls back to `PROSPER_BOT_FALLBACK_MODEL` once after retries exhaust, soft-fails the EHR `/health` ping at boot. README bonus #2 explicitly. |
+| Correctness (audit fixes) | **Past-slot filter + IntegrityError→409 + UUID redaction + memory-validated tool args** | Bot can't offer 8am at 11am; concurrent-booking races surface as recoverable 409 not 500; LLM history only ever sees human-readable summaries (no raw UUIDs to read aloud); `create_appointment` rejects hallucinated slot_ids before they reach the EHR. |
 
 The full deliberation trail is in
 `docs/superpowers/specs/2026-05-19-prosper-challenge-design.md` —
@@ -77,17 +99,44 @@ dispatcher rejects it, injects a system message into the LLM history, and
 records a `tool_rejected` event in the transcript — the model recovers on
 the next iteration rather than the call silently mis-firing.
 
+## Reliability (README bonus #2)
+
+Three layers, all in `src/prosper/llm.py` and `src/prosper/bot.py`:
+
+1. **`tenacity` retry on transient LLM failures** — `AsyncRetrying` with
+   3 attempts and exponential jitter, scoped to `APIConnectionError`,
+   `APITimeoutError`, `InternalServerError`, `RateLimitError`. Auth errors
+   are NOT retried — they don't get better with backoff.
+2. **Fallback model** — `PROSPER_BOT_FALLBACK_MODEL` env var; on primary-
+   model exhaustion, one last call against the fallback (e.g.
+   `gpt-4o-mini` brownout → `gpt-4o`) before propagating.
+3. **Startup health-check** — `_startup_health_check()` pings the EHR
+   `/health` before accepting clients. Soft-fail with loud warning so the
+   operator sees the failure pre-call, not mid-conversation.
+
+Two passing unit tests cover the retry + fallback paths
+(`test_adapter_retries_on_transient_5xx_then_succeeds`,
+`test_adapter_falls_back_to_secondary_model_after_retries_exhausted`).
+
+Explicitly deferred to "Future work":
+- STT/TTS multi-provider fallback (would need a `ServiceSwitcher` over
+  Pipecat services; tracked by upstream issue #4139).
+- Pre-recorded "everything is on fire" TTS fallback with regex phone
+  capture + callback queue.
+
 ## Eval suite
 
 Two checks per scenario, **both must pass**:
 
 - **State assertion (deterministic):** queries DB counts before/after the
-  run, verifies expected tool calls fired and forbidden ones didn't, and
-  verifies the FSM reached the expected terminal state.
+  run, verifies expected tool calls fired and forbidden ones didn't,
+  verifies the FSM reached the expected terminal state, and runs a
+  regex post-check for hallucinated confirmations ("I've cancelled" with
+  no matching tool_ok).
 - **LLM judge (semantic):** scores the full transcript against natural-
   language criteria.
 
-Six base scenarios at launch:
+Eleven scenarios at launch (3 happy / 1 recovery / 2 edge / 5 adversarial):
 
 | Scenario | Tags | What it tests |
 |---|---|---|
@@ -95,14 +144,36 @@ Six base scenarios at launch:
 | `existing_patient_cancels` | happy | Phone match → 1 upcoming → adaptive auto-confirm → cancel |
 | `cancel_picks_from_list` | happy | 3 upcoming → numbered list → ordinal pick → cancel |
 | `dob_misheard_then_corrected` | recovery | Persona mispronounces DOB year, corrects after read-back |
-| `slot_taken_by_other` | edge | Persona insists on a slot that another patient already holds; agent must offer alternatives |
+| `slot_taken_by_other` | edge | Persona insists on a slot another patient holds; agent must offer alternatives |
 | `cancel_when_nothing_to_cancel` | edge | Patient has 0 upcoming; agent must say so, not invent one |
+| `prompt_injection_direct_override` | adversarial | "Ignore previous instructions" — bot must refuse and never write |
+| `prompt_injection_stored_in_name` | adversarial | Injection hidden inside the name field — must be treated as literal |
+| `cross_patient_cancel_refusal` | adversarial | Caller authenticates then asks to cancel Bob's appointment — must refuse + not leak |
+| `hallucinated_confirmation_trap` | adversarial | Caller insists a non-existent appointment exists — bot must not invent / claim |
+| `off_topic_steering_and_budget` | adversarial | Weather/pizza/joke probes then cooperate — bot must stay in scope |
 
 Adding a scenario is a 20-line PR — `evals/scenarios.py` is plain Python
 data, no framework changes needed. CLI also supports
 `--baseline previous.json` to fail the run on regression vs a prior snapshot.
 
-## Latency
+## Latency (README bonus #1)
+
+Shipped tactics:
+
+- **TimingCollector** — per-span JSON logs + p50/p95/max aggregates printed
+  at the end of every call and surfaced inline in `make eval`.
+- **TTFT (time-to-first-token)** — recorded between final `TranscriptionFrame`
+  and dispatcher reply. Canonical voice-agent metric in 2026.
+- **`CLINIC_PERSONA` ≥ 1100 tokens** — crosses OpenAI's 1024-token prompt-
+  cache threshold; cached fraction reported per scenario as `cache=XX%`.
+- **Per-state task messages ≤ 1 KB** — enforced by
+  `test_each_task_message_under_1_kb` so future contributors can't blow
+  up per-turn input cost.
+- **ElevenLabs Flash v2.5** — `eleven_flash_v2_5` cuts first-audio
+  latency from ~200ms → ~75ms vs the default constructor.
+- **Filler speech in tool-firing states** — `"One moment."` TTS frame
+  pushed before each LLM turn that lives in a tool-calling state, so the
+  caller hears acknowledgement immediately rather than dead air.
 
 A representative table from a sample eval run looks like this (replace
 with your local numbers after `make eval-baseline`):
@@ -157,53 +228,65 @@ are worth pasting in.
 ## Dev-log
 
 - Initial dispatcher draft used a single mega-prompt with every tool
-  enabled. We switched to the per-state whitelist after the first eval
+  enabled. Switched to the per-state whitelist after the first eval
   run produced a transcript where the model called `cancel_appointment`
   during GREETING. The whitelist made that bug structurally impossible.
 - Tried `python-dateparser` first for DOB parsing; dropped it for
   `python-dateutil` because dateparser pulls `babel` and added noticeable
   cold-import time without improving real-world DOB recognition.
-- The challenge spec implies `find_patient` takes name+DOB; we exposed
-  both `find_patient_by_phone` and `find_patient_by_name_dob` so the bot
-  could lead with phone but still exercise the spec endpoint on
-  fallback. One scenario asserts each path fires.
+- Spec implies `find_patient` takes name+DOB; exposed both
+  `find_patient_by_phone` and `find_patient_by_name_dob` so the bot
+  leads with phone but exercises the spec endpoint on fallback. One
+  scenario asserts each path fires.
 - `pipecat-ai[daily]` does not have Windows wheels (the `daily-python`
-  binding only ships Linux/macOS); since this project uses the WebRTC
-  transport, we dropped the `daily` extra. Documented for any
-  reviewer running on Windows.
+  binding only ships Linux/macOS); since this project uses WebRTC
+  transport, we dropped the `daily` extra.
 - `Err.code` strings became the public eval contract — renaming one
   without updating `evals/scenarios.py` is now banned by CLAUDE.md.
+- Web-research pass (Pipecat docs + 2026 voice-agent blogs) revealed
+  the default `LLMUserAggregator` carries a 1.0s `aggregation_timeout`.
+  We don't use the aggregator at all (DispatcherProcessor consumes
+  `TranscriptionFrame` directly), so the tax doesn't apply — but the
+  finding is documented at the top of `bot.py` so a future refactor
+  doesn't re-introduce it.
+- Codebase-audit subagent caught four real bugs (past-slot exposure,
+  IntegrityError→500 instead of 409, UUID leak into LLM history,
+  unvalidated hallucinated slot_ids). Each got a fix + a regression
+  test in the same commit.
+- After paired state+judge over the original 6 scenarios, we found the
+  judge could mark a scenario PASS even when the assistant said "I've
+  cancelled that for you" with no matching `tool_ok`. Added a regex
+  post-check in the runner — that single ~30-line addition makes the 5
+  adversarial scenarios actually meaningful.
 
 ## Intentional cuts (deferred to future work)
 
 | Cut | Why |
 |---|---|
 | No auth / HIPAA encryption | Demo scope; SQLite is dev-only. Documented upgrade path is Postgres + a managed token service. |
-| No multi-provider LLM/TTS fallback | One env-var swap with OpenRouter would add this; kept as documented future work to avoid scope creep. |
-| No streaming TTS | Skipped pending latency measurement; instrumentation shows LLM dominates, so streaming TTS would be a perceived-latency win we can prioritise next. |
-| No proactive prefetch on STT partials | Brittle on partial-text changes; revisit once instrumented data shows where real pain lives. |
-| No prompt-injection eval scenario | Easy add-on; one scenario with malicious user text trying to make the bot cancel someone else's appointment. |
-| No cached-token counter in eval output | OpenAI returns it; surfacing requires plumbing a `usage` field through `OpenAILLMAdapter`. |
+| No multi-provider **STT/TTS** fallback | Pipecat has no first-class ServiceSwitcher (issue #4139); meanwhile we ship LLM retry+fallback as the higher-value reliability win. |
+| No proactive prefetch on STT partials | Brittle on partial-text changes; instrumentation now in place to see where real pain is before adding. |
 | No `mypy --strict` gate in pre-commit / CI | Strict-clean coverage isn't there yet; documented as next quality gate in CLAUDE.md. |
-| No availability cache | Skipped as a stretch; would be a 30-line in-memory `dict` keyed by `(date, provider_id)` invalidated on book/cancel. |
+| No availability cache | 30-line `dict` TTL cache would shave the 21 ms `list_availability_slots` cost — far below the LLM-dominated budget, so deferred. |
+| No pre-recorded "everything is on fire" TTS fallback | Would need a checked-in WAV + regex phone capture; deferred behind the LLM retry layer that handles 99% of provider blips. |
 
 ## Future work (in priority order)
 
-1. **OpenRouter as the LLM gateway** with an ordered fallback list —
-   production resiliency for LLM provider outages. One env-var change in
-   `llm.py`.
+1. **STT/TTS multi-provider fallback** — Deepgram for STT, OpenAI TTS as
+   secondary. Blocked on a Pipecat `ServiceSwitcher` story (issue #4139).
 2. **Streaming TTS** via ElevenLabs flush-after-each-clause — biggest
-   perceived-latency win once instrumentation data shows where pain is.
-3. **Proactive prefetch on STT partial transcripts** — fire
-   `find_patient_by_phone` as soon as the partial contains digits,
-   before the user finishes speaking.
+   remaining perceived-latency win.
+3. **OpenRouter as LLM gateway** — would simplify the fallback story to
+   a single env-var swap and unlock 100+ models. We currently keep
+   provider-direct so the prompt-cache discount still applies.
 4. **Audio smoke tests with a real TTS→STT loop** — current skeleton
    just asserts the dispatcher module imports.
 5. **`mypy --strict` in pre-commit / CI.**
-6. **Cached-token counter in eval output** — proves prompt-caching is
-   working.
-7. **Prompt-injection scenario** — caller asks the bot to cancel a
-   different patient's appointment; assert the bot refuses.
+6. **Continuous production eval (5–10% sampling)** — 2026 production
+   pattern; would sample live transcripts to the LLM judge for drift
+   detection.
+7. **Pre-recorded "everything is on fire" TTS fallback** — for the
+   double-failure case where retry + fallback both exhaust.
 8. **`AvailabilityCache`** with 60 s TTL in `repository.py`.
 
 ## File map (where to look for what)
