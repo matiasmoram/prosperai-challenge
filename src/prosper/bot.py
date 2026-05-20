@@ -127,14 +127,49 @@ def _build_dispatcher(openai_client: AsyncOpenAI | None = None) -> Dispatcher:
     llm = OpenAILLMAdapter(
         client=client,
         model=os.environ.get("PROSPER_BOT_MODEL", "gpt-4o-mini"),
+        fallback_model=os.environ.get("PROSPER_BOT_FALLBACK_MODEL"),
     )
     return Dispatcher(llm=llm, ehr_client=ehr)
 
 
+async def _startup_health_check() -> None:
+    """Probe EHR /health before accepting clients. Soft-fails (logs only).
+
+    Surfaces the most-likely failure-at-call-time (EHR not running) before a
+    caller sits through the greeting only to hit a tool error. We do NOT
+    block boot — the bot still starts so the operator can see the warning
+    in the logs and fix it.
+    """
+    import httpx
+
+    ehr_base = os.environ.get("PROSPER_EHR_URL", "http://127.0.0.1:8000")
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as c:
+            r = await c.get(f"{ehr_base}/health")
+            if r.status_code == 200:
+                logger.info("EHR health-check OK ({})", ehr_base)
+            else:
+                logger.warning("EHR health-check returned {} from {}", r.status_code, ehr_base)
+    except Exception as e:
+        logger.warning(
+            "EHR health-check FAILED ({} on {}); the bot will run but tool "
+            "calls will return ehr_error until the EHR is reachable",
+            type(e).__name__,
+            ehr_base,
+        )
+
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> None:
+    await _startup_health_check()
     elevenlabs_key = os.environ["ELEVENLABS_API_KEY"]
     stt = ElevenLabsRealtimeSTTService(api_key=elevenlabs_key)
-    tts = ElevenLabsTTSService(api_key=elevenlabs_key, voice_id="SAz9YHcvj6GT2YYXdXww")
+    # ElevenLabs Flash v2.5 (per 2026-05-20 latency research) — much lower
+    # first-audio latency than the default; constructor-only change.
+    tts = ElevenLabsTTSService(
+        api_key=elevenlabs_key,
+        voice_id="SAz9YHcvj6GT2YYXdXww",
+        model="eleven_flash_v2_5",
+    )
 
     dispatcher = _build_dispatcher()
     await dispatcher._ehr.__aenter__()  # noqa: SLF001 — bot owns this client for the call

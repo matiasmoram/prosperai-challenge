@@ -86,3 +86,39 @@ async def test_adapter_surfaces_cached_prompt_tokens() -> None:
     assert reply.usage is not None
     assert reply.usage.cached_prompt_tokens == 1280
     assert reply.usage.prompt_tokens == 1700
+
+
+async def test_adapter_retries_on_transient_5xx_then_succeeds() -> None:
+    from openai import InternalServerError
+
+    fake_client = MagicMock()
+    err = InternalServerError("boom", response=MagicMock(status_code=500), body={"error": "x"})
+    fake_client.chat.completions.create = AsyncMock(
+        side_effect=[err, err, _fake_response("recovered")]
+    )
+    adapter = OpenAILLMAdapter(client=fake_client, model="gpt-4o-mini", max_attempts=3)
+    reply = await adapter.generate(state="GREETING", history=[], tools=[])
+    assert reply.text == "recovered"
+    assert fake_client.chat.completions.create.call_count == 3
+
+
+async def test_adapter_falls_back_to_secondary_model_after_retries_exhausted() -> None:
+    from openai import InternalServerError
+
+    err = InternalServerError("boom", response=MagicMock(status_code=500), body={"error": "x"})
+    fake_client = MagicMock()
+    # primary: 3 attempts all fail; fallback: succeeds on first try
+    fake_client.chat.completions.create = AsyncMock(
+        side_effect=[err, err, err, _fake_response("from fallback")]
+    )
+    adapter = OpenAILLMAdapter(
+        client=fake_client,
+        model="gpt-4o-mini",
+        fallback_model="gpt-4o",
+        max_attempts=3,
+    )
+    reply = await adapter.generate(state="GREETING", history=[], tools=[])
+    assert reply.text == "from fallback"
+    # Verify fallback model used on last call
+    last_call_kwargs = fake_client.chat.completions.create.call_args_list[-1].kwargs
+    assert last_call_kwargs["model"] == "gpt-4o"
