@@ -182,6 +182,26 @@ def test_cancel_appointment_marks_status_and_frees_slot(session: Session) -> Non
     assert later.id != appt.id
 
 
+def test_list_availability_excludes_past_slots(session: Session) -> None:
+    """Audit A1: never offer a slot whose start_at already passed."""
+    provider = _seed_provider(session)
+    today = datetime.now(timezone.utc).date()
+    past = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=1)
+    future = datetime.now(timezone.utc) + timedelta(hours=2)
+    past_slot = Slot(
+        provider=provider, start_at=past, end_at=past + timedelta(minutes=30)
+    )
+    future_slot = Slot(
+        provider=provider, start_at=future, end_at=future + timedelta(minutes=30)
+    )
+    session.add_all([past_slot, future_slot])
+    session.commit()
+    available = repo.list_available_slots(session, date_=today)
+    ids = {s.id for s in available}
+    assert past_slot.id not in ids
+    assert future_slot.id in ids
+
+
 def test_get_upcoming_appointments_returns_only_scheduled_future(session: Session) -> None:
     provider = _seed_provider(session)
     slots = _seed_slots(session, provider, count=2)

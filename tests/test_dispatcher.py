@@ -75,6 +75,37 @@ async def test_dispatcher_starts_in_greeting_and_transitions_on_first_user_turn(
         assert d.state is State.IDENTIFY_PATIENT
 
 
+async def test_dispatcher_rejects_hallucinated_slot_id(ehr_client: EHRClient) -> None:
+    """Audit A4: bot must not call create_appointment with a slot_id it never saw."""
+    from prosper.flows import State
+
+    canned = CannedLLM(
+        [
+            LLMReply(text="hi", tool_calls=[]),
+            LLMReply(text="ok, what day?", tool_calls=[]),
+            LLMReply(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        name="create_appointment",
+                        arguments={"slot_id": "fake-id", "patient_id": "fake-pid"},
+                    )
+                ],
+            ),
+            LLMReply(text="sorry, let me check availability", tool_calls=[]),
+        ]
+    )
+    async with ehr_client:
+        d = Dispatcher(llm=canned, ehr_client=ehr_client)
+        await d.start()
+        await d.handle_user_turn("book a slot")
+        # force into CONFIRM_BOOK so create_appointment is whitelisted
+        d.state = State.CONFIRM_BOOK
+        await d.handle_user_turn("yes")
+    errs = [e for e in d.transcript if e.get("kind") == "tool_err"]
+    assert any(e["code"] == "hallucinated_slot_id" for e in errs)
+
+
 async def test_dispatcher_rejects_tool_not_in_whitelist(ehr_client: EHRClient) -> None:
     canned = CannedLLM(
         [

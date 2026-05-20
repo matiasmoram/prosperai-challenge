@@ -25,7 +25,7 @@ from prosper.ehr_client import EHRClient
 from prosper.flows import ALLOWED_TOOLS, TRANSITIONS, State
 from prosper.observability.timing import TimingCollector
 from prosper.prompts import CLINIC_PERSONA, TASK_MESSAGES
-from prosper.result import Result, is_err, is_ok
+from prosper.result import Err, Result, is_err, is_ok
 from prosper.tools import HANDLERS, TOOL_SCHEMAS
 
 
@@ -70,6 +70,51 @@ _AFFIRM = re.compile(
 _DENY = re.compile(r"\b(no|nope|nah|cancel that|stop|wrong)\b", re.I)
 _CANCEL_INTENT = re.compile(r"\b(cancel|reschedule|move)\b", re.I)
 _BOOK_INTENT = re.compile(r"\b(book|schedule|new appointment|new visit|set up)\b", re.I)
+
+
+def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
+    """Compact, UUID-free string the LLM can safely consume.
+
+    The LLM doesn't need to see slot_ids or appointment_ids — it should never
+    read them aloud and never include them in next-turn arguments (the
+    dispatcher carries them in `memory`). We feed the LLM a human-readable
+    summary that mentions date/time/provider/name only.
+    """
+    if name == "list_availability_slots":
+        slots = value.get("slots", [])
+        if not slots:
+            return "no slots available for that date"
+        return "available slots: " + "; ".join(
+            f"{s['start_at_iso']} with {s['provider_name']}" for s in slots[:6]
+        )
+    if name == "get_upcoming_appointments":
+        appts = value.get("appointments", [])
+        if not appts:
+            return "no upcoming appointments"
+        return "upcoming: " + "; ".join(
+            f"#{i + 1} {a['start_at']} with {a['provider_name']}"
+            for i, a in enumerate(appts)
+        )
+    if name in ("find_patient_by_phone", "find_patient_by_name_dob"):
+        patients = value.get("patients", [])
+        if not patients:
+            return "no patient found"
+        return "matched patients: " + "; ".join(
+            f"{p['first_name']} {p['last_name']} (DOB {p['dob']})"
+            for p in patients[:3]
+        )
+    if name == "create_patient":
+        return (
+            f"patient registered: {value['first_name']} {value['last_name']} "
+            f"(phone {value['phone']})"
+        )
+    if name == "create_appointment":
+        return (
+            f"booked {value['start_at']} with {value['provider_name']}"
+        )
+    if name == "cancel_appointment":
+        return "appointment cancelled"
+    return "ok"
 
 
 class Dispatcher:
@@ -154,13 +199,69 @@ class Dispatcher:
             args["patient_id"] = (self.memory.identified_patient or {}).get("id") or args.get(
                 "patient_id"
             )
+        # Audit A4: prevent the LLM from booking/cancelling against a hallucinated
+        # id that didn't come from a tool result this session. Cheap defence-in-depth
+        # on top of the EHR's own validation.
+        guard_err = self._validate_against_memory(call.name, args)
+        if guard_err is not None:
+            return guard_err
         async with self.timing.measure(phase=f"tool:{call.name}", state=self.state.value):
             return await handler(self._ehr, **args)
+
+    def _validate_against_memory(self, name: str, args: dict[str, Any]) -> Err | None:
+        if name == "create_appointment":
+            slot_id = args.get("slot_id")
+            known_slots = {s["slot_id"] for s in self.memory.last_slots}
+            if slot_id is not None and slot_id not in known_slots:
+                return Err(
+                    code="hallucinated_slot_id",
+                    message=(
+                        f"slot_id {slot_id!r} not in last_slots — likely "
+                        f"hallucinated; call list_availability_slots first"
+                    ),
+                    retryable=True,
+                )
+            patient_id = args.get("patient_id")
+            identified = self.memory.identified_patient or {}
+            known_patient = identified.get("id")
+            if patient_id is not None and known_patient and patient_id != known_patient:
+                return Err(
+                    code="patient_id_mismatch",
+                    message=(
+                        f"patient_id {patient_id!r} != identified patient "
+                        f"{known_patient!r}"
+                    ),
+                    retryable=False,
+                )
+        elif name == "cancel_appointment":
+            appt_id = args.get("appointment_id")
+            known = {a["id"] for a in self.memory.last_upcoming_appointments}
+            if appt_id is not None and appt_id not in known:
+                return Err(
+                    code="hallucinated_appointment_id",
+                    message=(
+                        f"appointment_id {appt_id!r} not in "
+                        f"last_upcoming_appointments — call "
+                        f"get_upcoming_appointments first"
+                    ),
+                    retryable=True,
+                )
+        return None
 
     def _record_tool_result(self, name: str, result: Result[dict]) -> None:
         if is_ok(result):
             self.transcript.append({"kind": "tool_ok", "name": name, "value": result.value})
-            self.history.append({"role": "tool", "name": name, "content": str(result.value)})
+            # Audit A3: redact raw UUIDs from the string the LLM sees. The
+            # transcript and memory keep the originals for our own logic,
+            # but the LLM only gets a human-readable summary so it can't
+            # accidentally read a slot_id or appointment_id aloud.
+            self.history.append(
+                {
+                    "role": "tool",
+                    "name": name,
+                    "content": _redact_for_llm(name, result.value),
+                }
+            )
             if name == "list_availability_slots":
                 self.memory.last_slots = result.value["slots"]
             elif name == "get_upcoming_appointments":

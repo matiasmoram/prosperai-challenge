@@ -13,6 +13,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from rapidfuzz.fuzz import token_sort_ratio
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from prosper.ehr.models import Appointment, AppointmentStatus, Patient, Slot
@@ -110,9 +111,11 @@ def list_available_slots(
 ) -> list[Slot]:
     day_start = datetime.combine(date_, time.min, tzinfo=timezone.utc)
     day_end = day_start + timedelta(days=1)
+    # Audit A1: never offer a slot whose start_at is already in the past.
+    cutoff = max(day_start, datetime.now(timezone.utc))
     stmt = (
         select(Slot)
-        .where(Slot.start_at >= day_start)
+        .where(Slot.start_at >= cutoff)
         .where(Slot.start_at < day_end)
         .where(Slot.is_blocked.is_(False))
         .order_by(Slot.start_at)
@@ -153,7 +156,21 @@ def create_appointment(
         raise SlotTakenError(slot_id=slot_id, owner_patient_id=existing.patient_id)
     appt = Appointment(patient_id=patient_id, slot_id=slot_id, notes=notes)
     session.add(appt)
-    session.commit()
+    # Audit A2: a concurrent writer may have inserted a scheduled appointment
+    # for this slot between our SELECT above and the COMMIT below. The partial
+    # unique index catches it as an IntegrityError. Translate to SlotTakenError
+    # so the EHR layer can emit a 409 (LLM-recoverable) instead of a 500.
+    try:
+        session.commit()
+    except IntegrityError as e:
+        session.rollback()
+        race_owner = session.execute(
+            select(Appointment)
+            .where(Appointment.slot_id == slot_id)
+            .where(Appointment.status == AppointmentStatus.SCHEDULED)
+        ).scalar_one_or_none()
+        owner_id = race_owner.patient_id if race_owner else "unknown"
+        raise SlotTakenError(slot_id=slot_id, owner_patient_id=owner_id) from e
     session.refresh(appt)
     return appt
 
