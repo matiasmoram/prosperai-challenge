@@ -1,4 +1,4 @@
-.PHONY: install seed ehr bot dev test eval eval-baseline lint type bench pre-commit clean
+.PHONY: install seed ehr bot dev test eval eval-baseline lint type bench verify pre-commit clean
 
 install:
 	uv sync
@@ -33,6 +33,15 @@ type:
 
 bench:
 	uv run python scripts/bench.py --rounds 10
+
+# One-shot pre-submit gate: everything CI runs, locally. Use this before
+# pushing or opening a PR. Stops on first failure.
+verify:
+	@echo "==> lint" && uv run ruff check src/ tests/ evals/
+	@echo "==> format" && uv run ruff format --check src/ tests/ evals/
+	@echo "==> type" && uv run mypy src/prosper
+	@echo "==> tests" && uv run pytest tests/ evals/test_types.py evals/test_runner_checks.py -q
+	@echo "==> all green"
 
 pre-commit:
 	uv run pre-commit run --all-files

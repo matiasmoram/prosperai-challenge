@@ -104,8 +104,8 @@ Privacy and tone
 TASK_MESSAGES = {
     "GREETING": (
         "[STATE: GREETING] Open warmly in one short, inviting sentence: "
-        "\"Hi, thanks for calling Prosper Health — I can help you book a "
-        "new visit or cancel an existing one. Which would you like?\" "
+        '"Hi, thanks for calling Prosper Health — I can help you book a '
+        'new visit or cancel an existing one. Which would you like?" '
         "Vary the wording naturally, but stay under two sentences and "
         "always offer both options. Do NOT call any tools in this state."
     ),
