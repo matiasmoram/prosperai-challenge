@@ -4,6 +4,7 @@
 Exits non-zero if any scenario fails OR if --baseline is supplied and at
 least one scenario that previously passed now fails (regression).
 """
+
 from __future__ import annotations
 
 import argparse

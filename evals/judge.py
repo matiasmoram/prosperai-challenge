@@ -1,4 +1,5 @@
 """LLM-as-judge: scores a transcript against natural-language criteria."""
+
 from __future__ import annotations
 
 from typing import Any

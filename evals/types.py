@@ -1,8 +1,9 @@
 """Eval-suite primitives: Scenario and StateExpectation dataclasses."""
+
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -14,7 +15,7 @@ class StateExpectation:
     patient_count_delta: int = 0
     active_appointment_count_delta: int = 0
     cancelled_appointment_count_delta: int = 0
-    expected_terminal_state: Optional[str] = None
+    expected_terminal_state: str | None = None
     expected_tool_call_codes: list[str] = field(default_factory=list)
     forbidden_tool_calls: list[str] = field(default_factory=list)
 

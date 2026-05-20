@@ -1,4 +1,5 @@
 """End-to-end HTTP tests against the FastAPI EHR using TestClient."""
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -12,7 +13,7 @@ from prosper.ehr.models import Provider, Slot
 
 @pytest.fixture
 def client(tmp_path, monkeypatch) -> TestClient:
-    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path/'ehr.db'}")
+    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path / 'ehr.db'}")
     engine = get_engine(reset=True)
     Base.metadata.create_all(engine)
     with Session(engine) as session:

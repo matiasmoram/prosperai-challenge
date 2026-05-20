@@ -5,6 +5,7 @@ cache kicks in — cache hits drop per-turn input tokens dramatically on
 repeat-state turns. Do not edit the persona mid-sprint or you'll thrash the
 cache. Task messages stay under 1 KB to keep per-turn output budgets tight.
 """
+
 from __future__ import annotations
 
 MIN_PERSONA_TOKENS_FOR_CACHE = 1024

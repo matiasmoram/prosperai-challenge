@@ -11,13 +11,15 @@ For each Scenario:
 6. Run the LLM judge.
 7. Return a ScenarioResult.
 """
+
 from __future__ import annotations
 
 import os
 import tempfile
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -80,8 +82,7 @@ def _evaluate_state(
         )
     if e.active_appointment_count_delta != deltas["active"]:
         reasons.append(
-            f"active_appt_delta {deltas['active']} != expected "
-            f"{e.active_appointment_count_delta}"
+            f"active_appt_delta {deltas['active']} != expected {e.active_appointment_count_delta}"
         )
     if e.cancelled_appointment_count_delta != deltas["cancelled"]:
         reasons.append(
@@ -90,14 +91,9 @@ def _evaluate_state(
         )
     if e.expected_terminal_state and terminal_state.value != e.expected_terminal_state:
         reasons.append(
-            f"terminal state {terminal_state.value} != expected "
-            f"{e.expected_terminal_state}"
+            f"terminal state {terminal_state.value} != expected {e.expected_terminal_state}"
         )
-    fired_codes = [
-        ev["name"]
-        for ev in transcript
-        if ev.get("kind") in ("tool_ok", "tool_err")
-    ]
+    fired_codes = [ev["name"] for ev in transcript if ev.get("kind") in ("tool_ok", "tool_err")]
     for code in e.expected_tool_call_codes:
         if code not in fired_codes:
             reasons.append(f"expected tool {code} never fired")

@@ -1,8 +1,9 @@
 """FastAPI app: 5 challenge endpoints plus a helper for upcoming appointments."""
+
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import date as date_t
-from typing import Iterator
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -90,8 +91,7 @@ def create_app() -> FastAPI:
     ) -> PatientList:
         return PatientList(
             patients=[
-                PatientOut.model_validate(p)
-                for p in repo.find_patient_by_phone(session, phone)
+                PatientOut.model_validate(p) for p in repo.find_patient_by_phone(session, phone)
             ]
         )
 

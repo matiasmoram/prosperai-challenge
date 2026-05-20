@@ -1,4 +1,5 @@
 """Smoke tests for EHR ORM models."""
+
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, select

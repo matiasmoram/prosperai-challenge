@@ -1,5 +1,6 @@
 """Tests for the httpx-based async EHR client. Uses ASGITransport so the
 client talks to the FastAPI app in-process without a separate uvicorn."""
+
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -13,7 +14,7 @@ from prosper.ehr_client import EHRClient
 
 @pytest.fixture
 def asgi_client(tmp_path, monkeypatch) -> EHRClient:
-    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path/'ehr.db'}")
+    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path / 'ehr.db'}")
     get_engine(reset=True)
     init_db()
     app = create_app()
@@ -59,7 +60,5 @@ async def test_create_find_book_cancel_roundtrip(asgi_client: EHRClient) -> None
         )
         assert appt["status"] == "scheduled"
 
-        cancelled = await asgi_client.cancel_appointment(
-            appointment_id=appt["id"], reason="t"
-        )
+        cancelled = await asgi_client.cancel_appointment(appointment_id=appt["id"], reason="t")
         assert cancelled["status"] == "cancelled"

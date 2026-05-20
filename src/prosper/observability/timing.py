@@ -3,14 +3,15 @@
 Designed for short-lived sessions (one call). The dispatcher calls
 ``record`` after each LLM/tool/EHR span and ``format_table`` at session end.
 """
+
 from __future__ import annotations
 
 import json
 import time
 from collections import defaultdict
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from statistics import median
-from typing import AsyncIterator
 
 
 def _percentile(values: list[float], pct: float) -> float:

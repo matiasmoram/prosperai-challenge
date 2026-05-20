@@ -1,5 +1,6 @@
 """Tests for repository helpers — phone lookup, name+dob fuzzy match,
 availability query, idempotent appointment creation, cancellation."""
+
 from datetime import date, datetime, timedelta, timezone
 
 import pytest

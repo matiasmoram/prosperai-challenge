@@ -1,4 +1,5 @@
 """The state graph is data, not behaviour — these tests are about shape only."""
+
 from prosper.flows import ALLOWED_TOOLS, STATES, TRANSITIONS, State
 
 

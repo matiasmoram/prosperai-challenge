@@ -1,4 +1,5 @@
 """OpenAI adapter test — uses fake responses to avoid real network."""
+
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -32,9 +33,7 @@ def adapter_with_text() -> tuple[OpenAILLMAdapter, AsyncMock]:
 def adapter_with_tool_call() -> tuple[OpenAILLMAdapter, AsyncMock]:
     fake_client = MagicMock()
     fake_client.chat.completions.create = AsyncMock(
-        return_value=_fake_response(
-            "", [("find_patient_by_phone", {"phone": "2025550100"})]
-        )
+        return_value=_fake_response("", [("find_patient_by_phone", {"phone": "2025550100"})])
     )
     return OpenAILLMAdapter(client=fake_client, model="gpt-4o-mini"), fake_client
 

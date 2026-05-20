@@ -4,10 +4,11 @@ Transition decisions are made by the dispatcher (which inspects tool result
 codes and identifies short-circuit keywords in the LLM reply). This module
 only defines the topology.
 """
+
 from __future__ import annotations
 
 import enum
-from typing import Mapping
+from collections.abc import Mapping
 
 
 class State(str, enum.Enum):

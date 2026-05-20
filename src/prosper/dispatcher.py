@@ -14,11 +14,12 @@ Drives the conversation by:
 Kept intentionally small so reviewers can trace the whole machine in one
 read.
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol
+from typing import Any, Protocol
 
 from prosper.ehr_client import EHRClient
 from prosper.flows import ALLOWED_TOOLS, TRANSITIONS, State
@@ -41,16 +42,14 @@ class LLMReply:
 
 
 class LLMClientProtocol(Protocol):
-    async def generate(
-        self, *, state: str, history: list[dict], tools: list[dict]
-    ) -> LLMReply: ...
+    async def generate(self, *, state: str, history: list[dict], tools: list[dict]) -> LLMReply: ...
 
 
 @dataclass
 class SessionMemory:
     """Cross-state data the LLM accumulates within a call."""
 
-    identified_patient: Optional[dict] = None
+    identified_patient: dict | None = None
     last_slots: list[dict] = field(default_factory=list)
     last_upcoming_appointments: list[dict] = field(default_factory=list)
 
@@ -89,9 +88,7 @@ class Dispatcher:
         reply = LLMReply(text="")
         for _ in range(4):
             async with self.timing.measure(phase="llm", state=self.state.value):
-                reply = await self._llm.generate(
-                    state=self.state.value, history=msgs, tools=tools
-                )
+                reply = await self._llm.generate(state=self.state.value, history=msgs, tools=tools)
             self.transcript.append(
                 {"kind": "assistant", "state": self.state.value, "text": reply.text}
             )
@@ -108,7 +105,9 @@ class Dispatcher:
                     self.history.append(
                         {
                             "role": "system",
-                            "content": f"Tool '{call.name}' is not available in state {self.state.value}.",
+                            "content": (
+                                f"Tool '{call.name}' is not available in state {self.state.value}."
+                            ),
                         }
                     )
                     continue
@@ -137,9 +136,7 @@ class Dispatcher:
     def _record_tool_result(self, name: str, result: Result[dict]) -> None:
         if is_ok(result):
             self.transcript.append({"kind": "tool_ok", "name": name, "value": result.value})
-            self.history.append(
-                {"role": "tool", "name": name, "content": str(result.value)}
-            )
+            self.history.append({"role": "tool", "name": name, "content": str(result.value)})
             if name == "list_availability_slots":
                 self.memory.last_slots = result.value["slots"]
             elif name == "get_upcoming_appointments":

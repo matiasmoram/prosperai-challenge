@@ -9,10 +9,11 @@ Two construction modes:
 All methods return JSON-decoded dicts/lists. Errors raise ``EHRHTTPError``;
 the dispatcher translates these into ``Result[Ok, Err]`` values.
 """
+
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Optional, Self
+from typing import Any, Self
 
 import httpx
 from fastapi import FastAPI
@@ -29,12 +30,12 @@ class EHRClient:
     def __init__(
         self,
         *,
-        transport: Optional[httpx.AsyncBaseTransport] = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         base_url: str = "http://ehr",
     ) -> None:
         self._transport = transport
         self._base_url = base_url
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     @classmethod
     def for_asgi_app(cls, app: FastAPI) -> Self:

@@ -6,10 +6,11 @@ STT text into a small adapter that calls ``Dispatcher.handle_user_turn``
 and emits the dispatcher's reply via TTS. This keeps the FSM as the single
 source of truth for which tools fire.
 """
+
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -80,7 +81,7 @@ class DispatcherProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-def _build_dispatcher(openai_client: Optional[AsyncOpenAI] = None) -> Dispatcher:
+def _build_dispatcher(openai_client: AsyncOpenAI | None = None) -> Dispatcher:
     client: Any = openai_client or AsyncOpenAI()
     ehr_base = os.environ.get("PROSPER_EHR_URL", "http://127.0.0.1:8000")
     ehr = EHRClient.for_http(ehr_base)
@@ -94,9 +95,7 @@ def _build_dispatcher(openai_client: Optional[AsyncOpenAI] = None) -> Dispatcher
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> None:
     elevenlabs_key = os.environ["ELEVENLABS_API_KEY"]
     stt = ElevenLabsRealtimeSTTService(api_key=elevenlabs_key)
-    tts = ElevenLabsTTSService(
-        api_key=elevenlabs_key, voice_id="SAz9YHcvj6GT2YYXdXww"
-    )
+    tts = ElevenLabsTTSService(api_key=elevenlabs_key, voice_id="SAz9YHcvj6GT2YYXdXww")
 
     dispatcher = _build_dispatcher()
     await dispatcher._ehr.__aenter__()  # noqa: SLF001 — bot owns this client for the call

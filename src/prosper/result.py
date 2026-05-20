@@ -1,4 +1,5 @@
 """Typed Result discriminated union for tool handlers and integrations."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

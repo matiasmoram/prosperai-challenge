@@ -1,5 +1,6 @@
 """Sanity checks on prompt sizes — persona large enough for OpenAI cache,
 per-state task messages tight enough to stay fast."""
+
 from prosper.prompts import (
     CLINIC_PERSONA,
     MIN_PERSONA_TOKENS_FOR_CACHE,

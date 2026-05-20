@@ -3,6 +3,7 @@
 Tests are skipped (not failed) when the env var is missing, so external forks
 and CI without secrets get a clean lint/type/unit pass.
 """
+
 from __future__ import annotations
 
 import os

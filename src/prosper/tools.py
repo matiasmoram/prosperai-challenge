@@ -10,6 +10,7 @@ Each handler:
 The OpenAI tool schemas live in ``TOOL_SCHEMAS`` below; the per-state
 whitelist in ``flows.py`` references them by name.
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -29,9 +30,7 @@ def _parse_dob(raw: str) -> Result[date]:
     return Ok(value=parsed)
 
 
-async def find_patient_by_phone_handler(
-    client: EHRClient, *, phone: str
-) -> Result[dict[str, Any]]:
+async def find_patient_by_phone_handler(client: EHRClient, *, phone: str) -> Result[dict[str, Any]]:
     try:
         patients = await client.find_patients_by_phone(phone)
     except EHRHTTPError as e:
@@ -122,9 +121,7 @@ async def create_appointment_handler(
     notes: str | None = None,
 ) -> Result[dict[str, Any]]:
     try:
-        appt = await client.create_appointment(
-            patient_id=patient_id, slot_id=slot_id, notes=notes
-        )
+        appt = await client.create_appointment(patient_id=patient_id, slot_id=slot_id, notes=notes)
     except EHRHTTPError as e:
         if (
             e.status_code == 409
@@ -171,9 +168,7 @@ async def cancel_appointment_handler(
     client: EHRClient, *, appointment_id: str, reason: str | None = None
 ) -> Result[dict[str, Any]]:
     try:
-        cancelled = await client.cancel_appointment(
-            appointment_id=appointment_id, reason=reason
-        )
+        cancelled = await client.cancel_appointment(appointment_id=appointment_id, reason=reason)
     except EHRHTTPError as e:
         if e.status_code == 404:
             return Err(code="appointment_not_found", message=str(e), retryable=False)
@@ -207,8 +202,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "function": {
             "name": "find_patient_by_name_dob",
             "description": (
-                "Fallback lookup when phone search fails. Returns "
-                "{found, patients[similarity]}."
+                "Fallback lookup when phone search fails. Returns {found, patients[similarity]}."
             ),
             "parameters": {
                 "type": "object",
@@ -231,8 +225,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "function": {
             "name": "create_patient",
             "description": (
-                "Register a new patient. Only call after confirming details "
-                "aloud with the user."
+                "Register a new patient. Only call after confirming details aloud with the user."
             ),
             "parameters": {
                 "type": "object",
@@ -288,7 +281,9 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "function",
         "function": {
             "name": "get_upcoming_appointments",
-            "description": "List upcoming appointments for an identified patient. Use in CANCEL_FLOW.",
+            "description": (
+                "List upcoming appointments for an identified patient. Use in CANCEL_FLOW."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"patient_id": {"type": "string"}},

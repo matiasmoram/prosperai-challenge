@@ -5,6 +5,7 @@ including any scripted mistake (e.g. "spell your last name 'Smyth' on first
 try, then correct it to 'Smith' when read back"). Determinism is achieved by
 scripting the persona, not by trying to constrain the bot.
 """
+
 from __future__ import annotations
 
 from typing import Any

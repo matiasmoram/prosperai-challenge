@@ -4,12 +4,12 @@ Functions accept a SQLAlchemy ``Session`` and return ORM objects or raise
 typed exceptions. The FastAPI layer (api.py) translates exceptions to HTTP
 status codes; the eval / dispatcher layers translate to ``Result[Ok, Err]``.
 """
+
 from __future__ import annotations
 
 import re
 import unicodedata
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Optional
 
 from rapidfuzz.fuzz import token_sort_ratio
 from sqlalchemy import select
@@ -39,9 +39,7 @@ def normalize_name(raw: str) -> str:
     ascii_only = decomposed.encode("ascii", "ignore").decode("ascii")
     lowered = ascii_only.lower()
     tokens = [
-        t
-        for t in re.split(r"\s+", lowered.strip())
-        if t and t.rstrip(".") not in _HONORIFICS
+        t for t in re.split(r"\s+", lowered.strip()) if t and t.rstrip(".") not in _HONORIFICS
     ]
     return " ".join(tokens)
 
@@ -88,7 +86,7 @@ def create_patient(
     last_name: str,
     dob: date,
     phone: str,
-    email: Optional[str] = None,
+    email: str | None = None,
 ) -> Patient:
     p = Patient(
         first_name=first_name.strip(),
@@ -108,7 +106,7 @@ def list_available_slots(
     session: Session,
     *,
     date_: date,
-    provider_id: Optional[str] = None,
+    provider_id: str | None = None,
 ) -> list[Slot]:
     day_start = datetime.combine(date_, time.min, tzinfo=timezone.utc)
     day_end = day_start + timedelta(days=1)
@@ -138,7 +136,7 @@ def create_appointment(
     *,
     patient_id: str,
     slot_id: str,
-    notes: Optional[str] = None,
+    notes: str | None = None,
 ) -> Appointment:
     """Idempotent: same patient + same slot returns existing row.
 
@@ -164,7 +162,7 @@ def cancel_appointment(
     session: Session,
     *,
     appointment_id: str,
-    reason: Optional[str] = None,
+    reason: str | None = None,
 ) -> Appointment:
     appt = session.get(Appointment, appointment_id)
     if appt is None:

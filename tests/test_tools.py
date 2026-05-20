@@ -1,4 +1,5 @@
 """Tool handlers translate EHR client calls into Result[Ok,Err] for the LLM."""
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -21,7 +22,7 @@ from prosper.tools import (
 
 @pytest.fixture
 def client(tmp_path, monkeypatch) -> EHRClient:
-    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path/'ehr.db'}")
+    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path / 'ehr.db'}")
     get_engine(reset=True)
     init_db()
     app = create_app()
@@ -117,9 +118,7 @@ async def test_book_same_slot_other_patient_returns_typed_err(client: EHRClient)
 
 async def test_cancel_nonexistent_returns_typed_err(client: EHRClient) -> None:
     async with client:
-        r = await cancel_appointment_handler(
-            client, appointment_id="does-not-exist", reason=None
-        )
+        r = await cancel_appointment_handler(client, appointment_id="does-not-exist", reason=None)
     assert is_err(r)
     assert r.code == "appointment_not_found"
 

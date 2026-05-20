@@ -1,4 +1,5 @@
 """Six base scenarios that exercise the spec's mandatory flows."""
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
@@ -10,9 +11,7 @@ from prosper.ehr import repository as repo
 from prosper.ehr.models import Patient, Provider, Slot
 
 
-def _seed_provider_and_slots(
-    session: Session, *, count: int = 4
-) -> tuple[Provider, list[Slot]]:
+def _seed_provider_and_slots(session: Session, *, count: int = 4) -> tuple[Provider, list[Slot]]:
     prov = Provider(name="Dr. Patel", timezone="UTC")
     session.add(prov)
     session.commit()

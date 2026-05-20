@@ -3,8 +3,9 @@
 LLM calls are stubbed: each turn returns a pre-canned ``LLMReply`` so we can
 assert that the dispatcher transitions correctly given known model output.
 """
+
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from typing import Iterator
 
 import pytest
 from sqlalchemy.orm import Session
@@ -23,9 +24,7 @@ class CannedLLM(LLMClientProtocol):
         self.received_states: list[str] = []
         self.received_tools_offered: list[list[str]] = []
 
-    async def generate(
-        self, *, state: str, history: list[dict], tools: list[dict]
-    ) -> LLMReply:
+    async def generate(self, *, state: str, history: list[dict], tools: list[dict]) -> LLMReply:
         self.received_states.append(state)
         self.received_tools_offered.append([t["function"]["name"] for t in tools])
         try:
@@ -36,7 +35,7 @@ class CannedLLM(LLMClientProtocol):
 
 @pytest.fixture
 def ehr_client(tmp_path, monkeypatch) -> EHRClient:
-    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path/'ehr.db'}")
+    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path / 'ehr.db'}")
     get_engine(reset=True)
     init_db()
     app = create_app()

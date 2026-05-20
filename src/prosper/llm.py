@@ -1,4 +1,5 @@
 """OpenAI Chat Completions adapter conforming to ``LLMClientProtocol``."""
+
 from __future__ import annotations
 
 import json
@@ -19,9 +20,7 @@ class OpenAILLMAdapter:
         self._model = model
         self._temperature = temperature
 
-    async def generate(
-        self, *, state: str, history: list[dict], tools: list[dict]
-    ) -> LLMReply:
+    async def generate(self, *, state: str, history: list[dict], tools: list[dict]) -> LLMReply:
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": history,
@@ -35,7 +34,7 @@ class OpenAILLMAdapter:
         msg = choice.message
         text = msg.content or ""
         tool_calls: list[ToolCall] = []
-        for tc in (msg.tool_calls or []):
+        for tc in msg.tool_calls or []:
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:

@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-type-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+      - name: Sync deps
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check src/ tests/ evals/
+      - name: Format check
+        run: uv run ruff format --check src/ tests/ evals/
+      - name: Unit tests
+        run: uv run pytest tests/ -v
+      - name: Scenario evals (only if OPENAI_API_KEY available)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        if: ${{ env.OPENAI_API_KEY != '' }}
+        run: uv run pytest evals/test_scripted.py -v

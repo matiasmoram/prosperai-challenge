@@ -4,6 +4,7 @@ Engine URL is taken from ``PROSPER_DB_URL`` (default: file-backed
 ``data/ehr.db``). ``get_engine(reset=True)`` rebuilds a fresh engine — used
 by tests so each fixture gets isolated state.
 """
+
 from __future__ import annotations
 
 import os
@@ -34,9 +35,7 @@ def get_engine(*, reset: bool = False) -> Engine:
             future=True,
             connect_args={"check_same_thread": False},
         )
-        _SessionLocal = sessionmaker(
-            bind=_engine, autoflush=False, autocommit=False, future=True
-        )
+        _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
     return _engine
 
 
