@@ -127,7 +127,13 @@ class OpenAILLMAdapter:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            tool_calls.append(ToolCall(name=tc.function.name, arguments=args))
+            tool_calls.append(
+                ToolCall(
+                    name=tc.function.name,
+                    arguments=args,
+                    id=getattr(tc, "id", None) or "call_stub",
+                )
+            )
         usage = getattr(resp, "usage", None)
         cached = 0
         prompt = 0

@@ -181,26 +181,28 @@ def test_validate_against_memory_skips_for_read_tools(ehr_client: EHRClient) -> 
 # both halves of the AND.
 
 
-def test_validate_against_memory_allows_missing_slot_id(ehr_client: EHRClient) -> None:
-    """Mutation: ``slot_id is not None and ...`` → ``slot_id is None or ...``.
-
-    When ``slot_id`` is absent from args the guard MUST pass (it has nothing to
-    validate against memory). The original short-circuits; the mutant would
-    incorrectly Err on every call missing slot_id.
-    """
+def test_validate_against_memory_rejects_missing_slot_id(ehr_client: EHRClient) -> None:
+    """A create_appointment call without slot_id is a structured Err (not a
+    handler TypeError). Live eval surfaced this — the LLM occasionally omits
+    a required field and the dispatcher must return a retryable Err pointing
+    the model at the missing piece."""
     canned = CannedLLM([])
     d = Dispatcher(llm=canned, ehr_client=ehr_client)
     d.memory = SessionMemory(last_slots=[{"slot_id": "slot-1"}])
-    # No slot_id in args at all — should not raise hallucinated_slot_id.
-    assert d._validate_against_memory("create_appointment", {"patient_id": "p1"}) is None
+    err = d._validate_against_memory("create_appointment", {"patient_id": "p1"})
+    assert err is not None
+    assert err.code == "missing_slot_id"
+    assert err.retryable is True
 
 
-def test_validate_against_memory_allows_missing_appointment_id(ehr_client: EHRClient) -> None:
-    """Mutation: ``appt_id is not None and ...`` → ``appt_id is None or ...``."""
+def test_validate_against_memory_rejects_missing_appointment_id(ehr_client: EHRClient) -> None:
     canned = CannedLLM([])
     d = Dispatcher(llm=canned, ehr_client=ehr_client)
     d.memory = SessionMemory(last_upcoming_appointments=[{"id": "real-appt"}])
-    assert d._validate_against_memory("cancel_appointment", {"reason": "test"}) is None
+    err = d._validate_against_memory("cancel_appointment", {"reason": "test"})
+    assert err is not None
+    assert err.code == "missing_appointment_id"
+    assert err.retryable is True
 
 
 def test_validate_against_memory_allows_known_slot_id(ehr_client: EHRClient) -> None:

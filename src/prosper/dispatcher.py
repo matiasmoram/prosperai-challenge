@@ -18,6 +18,7 @@ read.
 from __future__ import annotations
 
 import inspect
+import json
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -35,6 +36,11 @@ from prosper.tools import HANDLERS, TOOL_SCHEMAS
 class ToolCall:
     name: str
     arguments: dict[str, Any]
+    # OpenAI requires every assistant message with tool_calls to carry an id
+    # the matching tool-response message references via `tool_call_id`. We
+    # capture the LLM-provided id in OpenAILLMAdapter; mocks and tests
+    # default to a deterministic stub so the wiring still round-trips.
+    id: str = "call_stub"
 
 
 @dataclass
@@ -189,7 +195,24 @@ class Dispatcher:
                     "prompt_tokens": (reply.usage.prompt_tokens if reply.usage else 0),
                 }
             )
-            self.history.append({"role": "assistant", "content": reply.text})
+            # OpenAI tool-call schema is strict: if the assistant emits
+            # tool_calls, the message MUST carry the tool_calls field, and
+            # every subsequent role:tool response MUST reference the same
+            # id via tool_call_id. Build the assistant message accordingly.
+            assistant_msg: dict[str, Any] = {"role": "assistant", "content": reply.text or ""}
+            if reply.tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
+                    }
+                    for tc in reply.tool_calls
+                ]
+            self.history.append(assistant_msg)
 
             if not reply.tool_calls:
                 break
@@ -199,17 +222,23 @@ class Dispatcher:
                     self.transcript.append(
                         {"kind": "tool_rejected", "name": call.name, "state": self.state.value}
                     )
+                    # Reject still satisfies the tool_call → tool_response
+                    # invariant: every tool_call id MUST be answered by a
+                    # role:tool message with matching tool_call_id, or OpenAI
+                    # rejects the next turn with a 400.
                     self.history.append(
                         {
-                            "role": "system",
+                            "role": "tool",
+                            "tool_call_id": call.id,
                             "content": (
-                                f"Tool '{call.name}' is not available in state {self.state.value}."
+                                f"ERROR: tool '{call.name}' is not available in "
+                                f"state {self.state.value}; ask the user instead."
                             ),
                         }
                     )
                     continue
                 result = await self._execute_tool(call)
-                self._record_tool_result(call.name, result)
+                self._record_tool_result(call.name, result, tool_call_id=call.id)
                 self._maybe_transition_from_tool(call.name, result)
 
             msgs = self._messages_for_llm()
@@ -276,8 +305,23 @@ class Dispatcher:
     def _validate_against_memory(self, name: str, args: dict[str, Any]) -> Err | None:
         if name == "create_appointment":
             slot_id = args.get("slot_id")
+            # If LLM forgets either id entirely, return a structured Err so it
+            # retries with the right shape instead of crashing on TypeError
+            # at the handler boundary.
+            if not slot_id:
+                return Err(
+                    code="missing_slot_id",
+                    message="create_appointment requires slot_id; call list_availability_slots first",
+                    retryable=True,
+                )
+            if not args.get("patient_id"):
+                return Err(
+                    code="missing_patient_id",
+                    message="create_appointment requires patient_id of the identified caller",
+                    retryable=True,
+                )
             known_slots = {s["slot_id"] for s in self.memory.last_slots}
-            if slot_id is not None and slot_id not in known_slots:
+            if slot_id not in known_slots:
                 return Err(
                     code="hallucinated_slot_id",
                     message=(
@@ -297,8 +341,14 @@ class Dispatcher:
                 )
         elif name == "cancel_appointment":
             appt_id = args.get("appointment_id")
+            if not appt_id:
+                return Err(
+                    code="missing_appointment_id",
+                    message="cancel_appointment requires appointment_id; call get_upcoming_appointments first",
+                    retryable=True,
+                )
             known = {a["id"] for a in self.memory.last_upcoming_appointments}
-            if appt_id is not None and appt_id not in known:
+            if appt_id not in known:
                 return Err(
                     code="hallucinated_appointment_id",
                     message=(
@@ -310,17 +360,25 @@ class Dispatcher:
                 )
         return None
 
-    def _record_tool_result(self, name: str, result: Result[dict[str, Any]]) -> None:
+    def _record_tool_result(
+        self,
+        name: str,
+        result: Result[dict[str, Any]],
+        *,
+        tool_call_id: str = "call_stub",
+    ) -> None:
         if is_ok(result):
             self.transcript.append({"kind": "tool_ok", "name": name, "value": result.value})
             # Audit A3: redact raw UUIDs from the string the LLM sees. The
             # transcript and memory keep the originals for our own logic,
             # but the LLM only gets a human-readable summary so it can't
             # accidentally read a slot_id or appointment_id aloud.
+            # OpenAI schema: role:tool requires tool_call_id pointing at the
+            # preceding assistant message's tool_calls[].id (NOT a `name`).
             self.history.append(
                 {
                     "role": "tool",
-                    "name": name,
+                    "tool_call_id": tool_call_id,
                     "content": _redact_for_llm(name, result.value),
                 }
             )
@@ -353,7 +411,7 @@ class Dispatcher:
             self.history.append(
                 {
                     "role": "tool",
-                    "name": name,
+                    "tool_call_id": tool_call_id,
                     "content": f"ERROR code={result.code} message={result.message}",
                 }
             )

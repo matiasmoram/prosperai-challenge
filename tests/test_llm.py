@@ -71,9 +71,9 @@ async def test_adapter_parses_tool_calls(
         tools=[{"type": "function", "function": {"name": "find_patient_by_phone"}}],
     )
     assert len(reply.tool_calls) == 1
-    assert reply.tool_calls[0] == ToolCall(
-        name="find_patient_by_phone", arguments={"phone": "2025550100"}
-    )
+    assert reply.tool_calls[0].name == "find_patient_by_phone"
+    assert reply.tool_calls[0].arguments == {"phone": "2025550100"}
+    assert reply.tool_calls[0].id  # OpenAI assigns; tests use stub fallback
 
 
 async def test_adapter_surfaces_cached_prompt_tokens() -> None:
