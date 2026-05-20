@@ -18,6 +18,7 @@ Full design + decision trail in [`SOLUTION.md`](./SOLUTION.md).
 cp env.example .env       # add ELEVENLABS_API_KEY and OPENAI_API_KEY
 make install              # or: uv sync
 make seed                 # or: uv run python scripts/seed.py
+make mock-eval            # zero-cost: 16 scenarios via deterministic mock LLM in ~5 s — verifies the eval suite works without burning a single token
 ```
 
 ## Run
@@ -38,18 +39,24 @@ Or with Docker: `docker-compose up`.
 | `seed`           | `uv run python scripts/seed.py`                                                  | Populate SQLite (3 providers, 14 days of slots, 2 demo patients) |
 | `ehr`            | `uv run uvicorn prosper.ehr.api:app --host 0.0.0.0 --port 8000 --reload`         | FastAPI EHR + Swagger `/docs` on `:8000`                         |
 | `bot`            | `uv run bot.py`                                                                  | Pipecat browser client on `:7860`                                |
-| `test`           | `uv run pytest tests/ -v`                                                        | 125 unit tests (no external services); 91% line coverage         |
-| `eval`           | `uv run pytest evals/test_scripted.py -v`                                        | Scripted scenarios via pytest (needs `OPENAI_API_KEY`)           |
-| `eval-baseline`  | `uv run python -m evals --json evals/results/current.json --baseline evals/results/baseline.json` | CLI eval with regression diff against a snapshot                 |
+| `test`           | `uv run pytest tests/ -v`                                                        | 149 unit tests + 17 skipped (no external services); 91% line coverage on `src/prosper` (97% excluding `bot.py`) |
+| `mock-eval`      | `uv run python -m evals --mock-llm`                                              | Run all 16 scenarios offline with the deterministic mock LLM (~5 s, no API key) |
+| `eval`           | `uv run pytest evals/test_scripted.py -v`                                        | Live scripted scenarios (needs `PROSPER_EVAL_LIVE=1` **and** `OPENAI_API_KEY`) |
+| `eval-baseline`  | `uv run python -m evals --json evals/results/current.json --baseline evals/results/baseline.json` | CLI eval with regression diff against a snapshot. Supports `--concurrency N` (default 4) for parallel runs |
+| `verify`         | `uv run ruff check ...` → `ruff format --check` → `mypy --strict` → `pytest -q`  | One-shot pre-submit gate: lint + format + type + tests, stops on first failure |
 | `lint`           | `uv run ruff check src/ tests/ evals/` then `uv run ruff format --check ...`     | Ruff lint + format check (`I,E,F,W,B,UP,ARG,SIM,RET,RUF,S`)      |
 | `type`           | `uv run mypy src/prosper`                                                        | `mypy --strict` on the package                                   |
 | `bench`          | `uv run python scripts/bench.py --rounds 10`                                     | EHR endpoint micro-bench (needs `make ehr` running on `:8000`)   |
+| `status`         | `uv run python scripts/status.py`                                                | Repo health snapshot: test count, coverage, dirty files, lint status |
 | `pre-commit`     | `uv run pre-commit run --all-files`                                              | Run the full pre-commit suite                                    |
 | `clean`          | `rm -rf data/ .pytest_cache/ .mypy_cache/ .ruff_cache/ evals/results/`           | Reset local caches and DB                                        |
 
 Running `tests/` plus the two eval unit-test modules (`evals/test_runner_checks.py`
-+ `evals/test_types.py`) collects **130 tests total**; `evals/test_scripted.py`
-is gated behind `OPENAI_API_KEY`.
++ `evals/test_types.py`) collects **149 passing + 17 skipped** tests
+total; `evals/test_scripted.py` (live OpenAI) is gated behind
+`PROSPER_EVAL_LIVE=1` + `OPENAI_API_KEY`, while `test_scenario_mock`
+(parametrised over all 16 scenarios via `evals/mock_llm.py`) runs on
+every push.
 
 ### Eval CLI exit codes (`python -m evals` and `make eval-baseline`)
 
@@ -78,15 +85,22 @@ src/prosper/                   # bot, dispatcher, flows, prompts, tools, llm, eh
 src/prosper/ehr/               # FastAPI EHR (models, repository, api, schemas, db w/ WAL)
 src/prosper/observability/     # TimingCollector + redact_pii / mask_name
 evals/                         # Scenario dataclasses, runner, judge, persona sim, CLI
-tests/                         # 125 unit tests (EHR + dispatcher + tools + llm + redact)
-docs/adr/                      # 3 Architecture Decision Records
+evals/mock_llm.py              # deterministic mock LLM (~700 LOC) powering `make mock-eval`
+tests/                         # 149 unit tests + 17 skipped (EHR + dispatcher + tools + llm + redact + mock scenarios)
+docs/adr/                      # 3 Architecture Decision Records (001 hybrid FSM, 002 separate EHR process, 003 paired state+judge)
 docs/architecture.md           # ASCII process + FSM diagrams
 docs/bench-results.md          # pinned EHR-bench snapshots (pre/post each perf wave)
+docs/glossary.md               # terminology cheat-sheet (FSM, eval, Pipecat, OpenAI vocabulary)
 docs/interview-notes.md        # candidate prep — also doubles as decision evidence
 docs/research/                 # audit / security / reliability / perf research notes
 docs/superpowers/              # design specs + implementation plan
 scripts/seed.py                # one-shot DB seeding
 scripts/bench.py               # re-runnable EHR-endpoint micro-bench (`make bench`)
+scripts/status.py              # repo health snapshot (`make status`)
+CONTRIBUTING.md                # how to add scenarios / tools / states
+SECURITY.md                    # SSRF guard, PII redaction, threat model
+CHANGELOG.md                   # reverse-chronological delivery log
+.editorconfig / .gitattributes # consistent line endings + indent across editors
 ```
 
 ## Notable

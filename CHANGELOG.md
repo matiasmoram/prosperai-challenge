@@ -6,6 +6,50 @@ this repo is a single interview submission, not a released package.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.3] — 2026-05-20 — Offline eval, dev-loop polish, repo hygiene
+
+### Added
+
+- **Mock LLM eval mode** — `evals/mock_llm.py` (~700 LOC deterministic
+  mock) + `make mock-eval` target. Runs all 16 scenarios with no
+  `OPENAI_API_KEY` in ~5 s; `test_scenario_mock` is parametrised over
+  every scenario so the suite gates on a real run on every push.
+- **Live-eval gating on `PROSPER_EVAL_LIVE=1`** — previously a missing
+  quota silently passed; the live suite now exits with code 2 unless
+  both `PROSPER_EVAL_LIVE=1` and `OPENAI_API_KEY` are set.
+- **5 more adversarial / mixed scenarios** — `multi_turn_drift_hallucinated_slot`,
+  `phone_format_chaos`, `patient_correction_mid_register`,
+  `goodbye_mid_confirmation`, `insurance_question_redirect` (11 → 16).
+- **Parallel eval runner** — `python -m evals --concurrency N` (default 4)
+  with per-scenario isolated SQLite engine so transactional state never
+  crosses scenarios.
+- **`make verify`** — one-shot pre-submit gate: lint → format → mypy →
+  pytest. Stops on first failure.
+- **`make status`** + `scripts/status.py` — repo health snapshot (test
+  count, coverage, dirty files, lint status).
+- **`make mock-eval`** — see above.
+- **Repo hygiene**: `CONTRIBUTING.md` (how to add scenarios / tools /
+  states), `SECURITY.md` (SSRF guard, PII redaction, threat model),
+  `CHANGELOG.md` (this file), `.editorconfig`, `.gitattributes`.
+- **Docs expansion**: `docs/glossary.md` (terminology cheat-sheet),
+  `docs/architecture.md` (process + FSM diagrams), `docs/interview-notes.md`
+  (candidate prep + decision evidence), three ADRs under `docs/adr/`,
+  `docs/bench-results.md` (pinned bench snapshots).
+
+### Changed
+
+- `SOLUTION.md` reconciled with the new file map, eval-suite section,
+  quality-gates row (149 tests + 17 skipped, 91% coverage on
+  `src/prosper`, 97% excluding `bot.py`), and trimmed future-work list.
+- `README.md` quickstart now leads with `make mock-eval` as the zero-cost
+  way to verify the suite; `make` table grew `mock-eval`, `verify`,
+  `status` rows.
+
+### Fixed
+
+- Scenario table in `SOLUTION.md` now lists all 16 scenarios (was 11);
+  test count in `README.md` corrected from 125 → 149.
+
 ## [0.1.2] — 2026-05-20 — Security, coverage, parallel eval
 
 ### Added
