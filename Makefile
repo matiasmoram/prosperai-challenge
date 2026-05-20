@@ -1,4 +1,4 @@
-.PHONY: install seed ehr bot dev test eval eval-baseline lint type bench verify status pre-commit clean
+.PHONY: install seed ehr bot dev test eval mock-eval eval-baseline lint type bench verify status pre-commit clean
 
 install:
 	uv sync
@@ -20,6 +20,12 @@ test:
 
 eval:
 	uv run pytest evals/test_scripted.py -v
+
+# Run the full 16-scenario suite WITHOUT an OpenAI API key.
+# Uses the deterministic mock LLM in evals/mock_llm.py. Finishes in
+# ~5 s, great for routine verification.
+mock-eval:
+	uv run python -m evals --mock-llm
 
 eval-baseline:
 	uv run python -m evals --json evals/results/current.json --baseline evals/results/baseline.json
