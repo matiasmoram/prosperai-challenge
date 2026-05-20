@@ -19,9 +19,9 @@ Or with Docker: `docker-compose up`.
 
 ## Quick evaluate
 ```bash
-OPENAI_API_KEY=... make eval          # 6 scripted scenarios, paired state + judge
+OPENAI_API_KEY=... make eval          # 16 scripted scenarios, paired state + judge
 OPENAI_API_KEY=... uv run python -m evals --json evals/results/baseline.json
-OPENAI_API_KEY=... uv run python -m evals --baseline evals/results/baseline.json   # CI gate
+OPENAI_API_KEY=... uv run python -m evals --concurrency 4 --baseline evals/results/baseline.json   # CI gate, 4-way parallel
 ```
 
 ## Endpoint mapping (challenge spec → REST)
@@ -217,7 +217,7 @@ Two checks per scenario, **both must pass**:
 - **LLM judge (semantic):** scores the full transcript against natural-
   language criteria.
 
-Eleven scenarios at launch (3 happy / 1 recovery / 2 edge / 5 adversarial):
+Sixteen scenarios at launch (3 happy / 1 recovery / 2 edge / 10 adversarial / recovery):
 
 | Scenario | Tags | What it tests |
 |---|---|---|

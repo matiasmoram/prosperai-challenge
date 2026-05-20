@@ -5,26 +5,91 @@ on:
     branches: [main]
   pull_request:
 
+# Minimum-blast-radius default: workflow can read repo content, nothing else.
+# Override per-job if a step needs to write (e.g. release, comment on PR).
+permissions:
+  contents: read
+
+# When a PR pushes a new commit, cancel any in-flight runs of older commits.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
         with:
           version: latest
+          enable-cache: true
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
       - name: Sync deps
-        run: uv sync --frozen
+        run: uv sync --frozen --python ${{ matrix.python-version }}
       - name: Lint
         run: uv run ruff check src/ tests/ evals/
       - name: Format check
         run: uv run ruff format --check src/ tests/ evals/
       - name: Type check (mypy --strict)
         run: uv run mypy src/prosper
-      - name: Unit tests
-        run: uv run pytest tests/ -v
+      - name: Unit tests + coverage
+        run: |
+          uv run pytest tests/ evals/test_types.py evals/test_runner_checks.py \
+            --cov=src/prosper --cov=evals \
+            --cov-report=term-missing --cov-report=xml \
+            -v
+      - name: Upload coverage XML
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
       - name: Scenario evals (only if OPENAI_API_KEY available)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        if: ${{ env.OPENAI_API_KEY != '' }}
+        if: ${{ env.OPENAI_API_KEY != '' && matrix.python-version == '3.11' }}
+        timeout-minutes: 15
         run: uv run pytest evals/test_scripted.py -v
+
+  bench-smoke:
+    # Spin up the EHR and assert basic perf — catches regressions like
+    # the previous N+1 in list_available_slots (115ms → 18ms).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+          enable-cache: true
+      - name: Sync deps
+        run: uv sync --frozen
+      - name: Seed DB
+        run: uv run python scripts/seed.py
+      - name: Start EHR (background)
+        run: |
+          uv run uvicorn prosper.ehr.api:app --host 127.0.0.1 --port 8000 &
+          echo $! > ehr.pid
+          for i in 1 2 3 4 5; do
+            curl -fs http://127.0.0.1:8000/health && break
+            sleep 1
+          done
+      - name: Bench EHR endpoints
+        run: uv run python scripts/bench.py --rounds 5 | tee bench.out
+      - name: Assert availability p50 < 50 ms
+        run: |
+          p50=$(awk -F'|' '/availability/ {gsub(/ /,"",$4); print $4}' bench.out)
+          echo "availability p50: ${p50}ms"
+          awk -v p="$p50" 'BEGIN{ if (p+0 >= 50) { exit 1 } }'
+      - name: Stop EHR
+        if: always()
+        run: |
+          if [ -f ehr.pid ]; then kill $(cat ehr.pid) || true; fi
