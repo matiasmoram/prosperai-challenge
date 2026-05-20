@@ -38,13 +38,18 @@ Or with Docker: `docker-compose up`.
 | `seed`           | `uv run python scripts/seed.py`                                                  | Populate SQLite (3 providers, 14 days of slots, 2 demo patients) |
 | `ehr`            | `uv run uvicorn prosper.ehr.api:app --host 0.0.0.0 --port 8000 --reload`         | FastAPI EHR + Swagger `/docs` on `:8000`                         |
 | `bot`            | `uv run bot.py`                                                                  | Pipecat browser client on `:7860`                                |
-| `test`           | `uv run pytest tests/ -v`                                                        | Unit tests (no external services)                                |
+| `test`           | `uv run pytest tests/ -v`                                                        | 125 unit tests (no external services); 91% line coverage         |
 | `eval`           | `uv run pytest evals/test_scripted.py -v`                                        | Scripted scenarios via pytest (needs `OPENAI_API_KEY`)           |
 | `eval-baseline`  | `uv run python -m evals --json evals/results/current.json --baseline evals/results/baseline.json` | CLI eval with regression diff against a snapshot                 |
-| `lint`           | `uv run ruff check src/ tests/ evals/` then `uv run ruff format --check ...`     | Ruff lint + format check                                         |
-| `type`           | `uv run mypy src/prosper`                                                        | mypy on the package                                              |
+| `lint`           | `uv run ruff check src/ tests/ evals/` then `uv run ruff format --check ...`     | Ruff lint + format check (`I,E,F,W,B,UP,ARG,SIM,RET,RUF,S`)      |
+| `type`           | `uv run mypy src/prosper`                                                        | `mypy --strict` on the package                                   |
+| `bench`          | `uv run python scripts/bench.py --rounds 10`                                     | EHR endpoint micro-bench (needs `make ehr` running on `:8000`)   |
 | `pre-commit`     | `uv run pre-commit run --all-files`                                              | Run the full pre-commit suite                                    |
 | `clean`          | `rm -rf data/ .pytest_cache/ .mypy_cache/ .ruff_cache/ evals/results/`           | Reset local caches and DB                                        |
+
+Running `tests/` plus the two eval unit-test modules (`evals/test_runner_checks.py`
++ `evals/test_types.py`) collects **130 tests total**; `evals/test_scripted.py`
+is gated behind `OPENAI_API_KEY`.
 
 ### Eval CLI exit codes (`python -m evals` and `make eval-baseline`)
 
@@ -61,24 +66,27 @@ Or with Docker: `docker-compose up`.
 |------------------------------|-------------------------------|------------------------------------------------------------------------------------------|
 | `ELEVENLABS_API_KEY`         | _required_                    | ElevenLabs STT (Realtime) + TTS (Flash v2.5).                                            |
 | `OPENAI_API_KEY`             | _required for bot + eval_     | OpenAI Chat Completions for the dispatcher LLM and the eval judge.                       |
-| `PROSPER_EHR_URL`            | `http://127.0.0.1:8000`       | Where the bot reaches the EHR. Override in Docker / split-host setups.                   |
+| `PROSPER_EHR_URL`            | `http://127.0.0.1:8000`       | Where the bot reaches the EHR. SSRF-guarded: scheme must be `http`/`https` and the URL must have a hostname. |
 | `PROSPER_DB_URL`             | `sqlite:///data/ehr.db`       | SQLAlchemy DSN. Swap to Postgres without code changes.                                   |
 | `PROSPER_BOT_MODEL`          | `gpt-4o-mini`                 | Primary LLM for the dispatcher.                                                          |
 | `PROSPER_BOT_FALLBACK_MODEL` | _unset_ (e.g. `gpt-4o`)       | Optional secondary model — tried once if the primary exhausts its retry budget.          |
+| `PROSPER_BOT_ENTRYPOINT`     | _unset_ (set to `1` in prod)  | When `1`, missing required env vars `SystemExit(2)` *before* the 17 s pipecat import wall instead of crashing mid-call. Tests deliberately leave it unset so imports don't blow up. |
 
 ## Project layout
 ```
-src/prosper/             # bot, dispatcher, flows, prompts, tools, llm, ehr_client
-src/prosper/ehr/         # FastAPI EHR (models, repository, api, schemas, db)
-src/prosper/observability/   # TimingCollector
-evals/                   # Scenario dataclasses, runner, judge, persona sim, CLI
-tests/                   # unit tests (EHR + dispatcher + tool handlers)
-docs/adr/                # Architecture Decision Records (3 short ADRs)
-docs/architecture.md     # ASCII process + FSM diagrams
-docs/interview-notes.md  # candidate prep — also doubles as decision evidence
-docs/superpowers/        # design specs + implementation plan
-scripts/seed.py          # one-shot DB seeding
-scripts/bench.py         # re-runnable EHR-endpoint micro-bench
+src/prosper/                   # bot, dispatcher, flows, prompts, tools, llm, ehr_client
+src/prosper/ehr/               # FastAPI EHR (models, repository, api, schemas, db w/ WAL)
+src/prosper/observability/     # TimingCollector + redact_pii / mask_name
+evals/                         # Scenario dataclasses, runner, judge, persona sim, CLI
+tests/                         # 125 unit tests (EHR + dispatcher + tools + llm + redact)
+docs/adr/                      # 3 Architecture Decision Records
+docs/architecture.md           # ASCII process + FSM diagrams
+docs/bench-results.md          # pinned EHR-bench snapshots (pre/post each perf wave)
+docs/interview-notes.md        # candidate prep — also doubles as decision evidence
+docs/research/                 # audit / security / reliability / perf research notes
+docs/superpowers/              # design specs + implementation plan
+scripts/seed.py                # one-shot DB seeding
+scripts/bench.py               # re-runnable EHR-endpoint micro-bench (`make bench`)
 ```
 
 ## Notable

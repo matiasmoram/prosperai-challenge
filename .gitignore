@@ -48,3 +48,4 @@ data/
 
 # Eval artifacts
 evals/results/
+coverage.xml
