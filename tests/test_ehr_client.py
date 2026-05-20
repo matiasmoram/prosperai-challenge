@@ -1,40 +1,13 @@
 """Tests for the httpx-based async EHR client. Uses ASGITransport so the
-client talks to the FastAPI app in-process without a separate uvicorn."""
+client talks to the FastAPI app in-process without a separate uvicorn.
+
+The ``asgi_client`` fixture is hoisted into ``tests/conftest.py`` as
+``seeded_ehr_client`` and re-exported under the legacy name.
+"""
 
 from datetime import date, datetime, timedelta, timezone
 
-import pytest
-from sqlalchemy.orm import Session
-
-from prosper.ehr.api import create_app
-from prosper.ehr.db import get_engine, init_db
-from prosper.ehr.models import Provider, Slot
 from prosper.ehr_client import EHRClient
-
-
-@pytest.fixture
-def asgi_client(tmp_path, monkeypatch) -> EHRClient:
-    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path / 'ehr.db'}")
-    get_engine(reset=True)
-    init_db()
-    app = create_app()
-    with Session(get_engine()) as session:
-        prov = Provider(name="Dr. Patel", timezone="UTC")
-        session.add(prov)
-        session.commit()
-        start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
-            hour=10, minute=0, second=0, microsecond=0
-        )
-        for i in range(2):
-            session.add(
-                Slot(
-                    provider_id=prov.id,
-                    start_at=start + timedelta(minutes=30 * i),
-                    end_at=start + timedelta(minutes=30 * (i + 1)),
-                )
-            )
-        session.commit()
-    return EHRClient.for_asgi_app(app)
 
 
 async def test_create_find_book_cancel_roundtrip(asgi_client: EHRClient) -> None:

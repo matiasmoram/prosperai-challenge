@@ -27,7 +27,7 @@ ToolHandler = Callable[..., Awaitable[Result[dict[str, Any]]]]
 # Defensive bounds for any parsed date used downstream — DOBs and availability
 # query dates alike. Catches obviously-wrong values (year 9999 typos, dateutil
 # fuzzy-parser inventing 1990 from a stray digit) before they hit the DB.
-_MIN_PARSED_YEAR = 1900
+_MIN_PARSED_YEAR = 1901
 _MAX_PARSED_YEAR = 2100
 
 

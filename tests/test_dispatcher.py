@@ -2,18 +2,13 @@
 
 LLM calls are stubbed: each turn returns a pre-canned ``LLMReply`` so we can
 assert that the dispatcher transitions correctly given known model output.
+
+Uses the shared ``ehr_client`` fixture (see ``tests/conftest.py``).
 """
 
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
-
-import pytest
-from sqlalchemy.orm import Session
 
 from prosper.dispatcher import Dispatcher, LLMClientProtocol, LLMReply, ToolCall
-from prosper.ehr.api import create_app
-from prosper.ehr.db import get_engine, init_db
-from prosper.ehr.models import Provider, Slot
 from prosper.ehr_client import EHRClient
 from prosper.flows import State
 
@@ -31,31 +26,6 @@ class CannedLLM(LLMClientProtocol):
             return next(self._iter)
         except StopIteration:
             return LLMReply(text="", tool_calls=[])
-
-
-@pytest.fixture
-def ehr_client(tmp_path, monkeypatch) -> EHRClient:
-    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path / 'ehr.db'}")
-    get_engine(reset=True)
-    init_db()
-    app = create_app()
-    with Session(get_engine()) as session:
-        prov = Provider(name="Dr. Patel", timezone="UTC")
-        session.add(prov)
-        session.commit()
-        start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
-            hour=10, minute=0, second=0, microsecond=0
-        )
-        for i in range(2):
-            session.add(
-                Slot(
-                    provider_id=prov.id,
-                    start_at=start + timedelta(minutes=30 * i),
-                    end_at=start + timedelta(minutes=30 * (i + 1)),
-                )
-            )
-        session.commit()
-    return EHRClient.for_asgi_app(app)
 
 
 async def test_dispatcher_starts_in_greeting_and_transitions_on_first_user_turn(

@@ -5,15 +5,13 @@ exercise: every ``_redact_for_llm`` branch, the Err recording path, the
 ``patient_id_mismatch`` guard, hallucinated-appointment guard, every
 TRANSITIONS edge (including ``abort`` rollback edges out of CONFIRM_*), the
 sliding-window history cap, and the LLM-usage accumulator.
+
+Uses the shared ``ehr_client`` fixture (see ``tests/conftest.py``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
-
-import pytest
-from sqlalchemy.orm import Session
 
 from prosper.dispatcher import (
     Dispatcher,
@@ -24,9 +22,6 @@ from prosper.dispatcher import (
     ToolCall,
     _redact_for_llm,
 )
-from prosper.ehr.api import create_app
-from prosper.ehr.db import get_engine, init_db
-from prosper.ehr.models import Provider, Slot
 from prosper.ehr_client import EHRClient
 from prosper.flows import State
 from prosper.result import Err, Ok
@@ -43,31 +38,6 @@ class CannedLLM(LLMClientProtocol):
             return next(self._iter)
         except StopIteration:
             return LLMReply(text="", tool_calls=[])
-
-
-@pytest.fixture
-def ehr_client(tmp_path, monkeypatch) -> EHRClient:
-    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path / 'ehr.db'}")
-    get_engine(reset=True)
-    init_db()
-    app = create_app()
-    with Session(get_engine()) as session:
-        prov = Provider(name="Dr. Patel", timezone="UTC")
-        session.add(prov)
-        session.commit()
-        start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
-            hour=10, minute=0, second=0, microsecond=0
-        )
-        for i in range(2):
-            session.add(
-                Slot(
-                    provider_id=prov.id,
-                    start_at=start + timedelta(minutes=30 * i),
-                    end_at=start + timedelta(minutes=30 * (i + 1)),
-                )
-            )
-        session.commit()
-    return EHRClient.for_asgi_app(app)
 
 
 # ---------------------------------------------------------------------------

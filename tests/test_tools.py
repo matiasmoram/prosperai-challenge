@@ -1,13 +1,10 @@
-"""Tool handlers translate EHR client calls into Result[Ok,Err] for the LLM."""
+"""Tool handlers translate EHR client calls into Result[Ok,Err] for the LLM.
+
+Uses the shared ``client`` fixture (see ``tests/conftest.py``).
+"""
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-from sqlalchemy.orm import Session
-
-from prosper.ehr.api import create_app
-from prosper.ehr.db import get_engine, init_db
-from prosper.ehr.models import Provider, Slot
 from prosper.ehr_client import EHRClient
 from prosper.result import is_err, is_ok
 from prosper.tools import (
@@ -18,31 +15,6 @@ from prosper.tools import (
     find_patient_by_phone_handler,
     list_availability_slots_handler,
 )
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch) -> EHRClient:
-    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path / 'ehr.db'}")
-    get_engine(reset=True)
-    init_db()
-    app = create_app()
-    with Session(get_engine()) as session:
-        prov = Provider(name="Dr. Patel", timezone="UTC")
-        session.add(prov)
-        session.commit()
-        start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
-            hour=10, minute=0, second=0, microsecond=0
-        )
-        for i in range(2):
-            session.add(
-                Slot(
-                    provider_id=prov.id,
-                    start_at=start + timedelta(minutes=30 * i),
-                    end_at=start + timedelta(minutes=30 * (i + 1)),
-                )
-            )
-        session.commit()
-    return EHRClient.for_asgi_app(app)
 
 
 async def test_find_by_phone_no_match(client: EHRClient) -> None:

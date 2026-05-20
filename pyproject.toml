@@ -29,6 +29,7 @@ dev = [
     "anyio>=4.6",
     "pre-commit>=4.0",
     "pytest-cov>=7.1.0",
+    "mutmut>=3.5.0",
 ]
 
 [tool.ruff]

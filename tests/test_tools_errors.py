@@ -7,15 +7,10 @@ silently rename one.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
-from sqlalchemy.orm import Session
 
-from prosper.ehr.api import create_app
-from prosper.ehr.db import get_engine, init_db
-from prosper.ehr.models import Provider, Slot
 from prosper.ehr_client import EHRClient, EHRHTTPError
 from prosper.result import is_err
 from prosper.tools import (
@@ -240,29 +235,7 @@ async def test_cancel_appointment_returns_ehr_error_on_500() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def asgi_client(tmp_path, monkeypatch) -> EHRClient:
-    monkeypatch.setenv("PROSPER_DB_URL", f"sqlite:///{tmp_path / 'ehr.db'}")
-    get_engine(reset=True)
-    init_db()
-    app = create_app()
-    with Session(get_engine()) as session:
-        prov = Provider(name="Dr. Patel", timezone="UTC")
-        session.add(prov)
-        session.commit()
-        start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
-            hour=10, minute=0, second=0, microsecond=0
-        )
-        for i in range(2):
-            session.add(
-                Slot(
-                    provider_id=prov.id,
-                    start_at=start + timedelta(minutes=30 * i),
-                    end_at=start + timedelta(minutes=30 * (i + 1)),
-                )
-            )
-        session.commit()
-    return EHRClient.for_asgi_app(app)
+# ``asgi_client`` is provided by ``tests/conftest.py``.
 
 
 async def test_create_patient_duplicate_phone_returns_patient_exists(

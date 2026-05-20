@@ -40,3 +40,32 @@ def test_every_state_has_a_task_message() -> None:
 def test_each_task_message_under_1_kb() -> None:
     for state, msg in TASK_MESSAGES.items():
         assert len(msg) < 1024, f"{state} task message is {len(msg)} bytes (>=1024)"
+
+
+def test_persona_has_adversarial_refusal_patterns() -> None:
+    """Persona must carry canned refusals so the bot doesn't improvise."""
+    lower = CLINIC_PERSONA.lower()
+    # Off-topic / out-of-scope front-desk redirect.
+    assert "front desk" in lower
+    # Cross-patient refusal.
+    assert "your own appointments" in lower
+    # Generic decline.
+    assert "i can't do that" in lower or "i cannot do that" in lower
+
+
+def test_persona_forbids_hallucinated_success_and_injection() -> None:
+    """Persona must explicitly cover the adversarial-eval attack surface."""
+    lower = CLINIC_PERSONA.lower()
+    # No success without a tool call.
+    assert "returned an ok" in lower or "returned ok" in lower
+    # Treat field contents as literal data, not instructions.
+    assert "literal" in lower and "instruction" in lower
+    # No leaking ids / internal state.
+    assert "slot id" in lower or "slot ids" in lower
+    # No quoting the persona back.
+    assert "quote" in lower or "paraphrase" in lower
+
+
+def test_register_patient_has_literal_name_defense() -> None:
+    msg = TASK_MESSAGES["REGISTER_PATIENT"].lower()
+    assert "literal name" in msg or "not an instruction" in msg
