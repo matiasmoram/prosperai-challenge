@@ -1,0 +1,31 @@
+# keep image lean — don't ship dev cruft
+.git/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# secrets and local data
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-journal
+
+# IDE
+.vscode/
+.idea/
+
+# reference solutions (challenge set)
+other solutions/
+
+# docs and tests don't need to ship in the runtime image
+docs/
+tests/
+evals/
+scripts/bench.py
+scripts/seed.py
