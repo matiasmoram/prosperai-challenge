@@ -96,7 +96,13 @@ async def test_adapter_retries_on_transient_5xx_then_succeeds() -> None:
     fake_client.chat.completions.create = AsyncMock(
         side_effect=[err, err, _fake_response("recovered")]
     )
-    adapter = OpenAILLMAdapter(client=fake_client, model="gpt-4o-mini", max_attempts=3)
+    adapter = OpenAILLMAdapter(
+        client=fake_client,
+        model="gpt-4o-mini",
+        max_attempts=3,
+        retry_wait_initial=0,
+        retry_wait_max=0,
+    )
     reply = await adapter.generate(state="GREETING", history=[], tools=[])
     assert reply.text == "recovered"
     assert fake_client.chat.completions.create.call_count == 3
@@ -116,6 +122,8 @@ async def test_adapter_falls_back_to_secondary_model_after_retries_exhausted() -
         model="gpt-4o-mini",
         fallback_model="gpt-4o",
         max_attempts=3,
+        retry_wait_initial=0,
+        retry_wait_max=0,
     )
     reply = await adapter.generate(state="GREETING", history=[], tools=[])
     assert reply.text == "from fallback"

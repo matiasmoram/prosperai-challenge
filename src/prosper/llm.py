@@ -52,6 +52,8 @@ class OpenAILLMAdapter:
         temperature: float = 0.4,
         fallback_model: str | None = None,
         max_attempts: int = 3,
+        retry_wait_initial: float = 0.5,
+        retry_wait_max: float = 4.0,
     ) -> None:
         self._client = client
         self._model = model
@@ -60,6 +62,8 @@ class OpenAILLMAdapter:
             fallback_model or os.environ.get("PROSPER_BOT_FALLBACK_MODEL") or None
         )
         self._max_attempts = max_attempts
+        self._retry_wait_initial = retry_wait_initial
+        self._retry_wait_max = retry_wait_max
 
     async def generate(self, *, state: str, history: list[dict], tools: list[dict]) -> LLMReply:
         try:
@@ -81,7 +85,9 @@ class OpenAILLMAdapter:
     ) -> LLMReply:
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(self._max_attempts),
-            wait=wait_exponential_jitter(initial=0.5, max=4.0),
+            wait=wait_exponential_jitter(
+                initial=self._retry_wait_initial, max=self._retry_wait_max
+            ),
             retry=retry_if_exception_type(_RETRYABLE),
             reraise=True,
         ):
