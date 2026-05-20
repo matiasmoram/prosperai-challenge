@@ -42,6 +42,7 @@ select = ["I", "E", "F", "W", "B", "UP", "ARG", "SIM", "RET", "RUF", "S"]
 "src/prosper/ehr/db.py" = ["S101"]  # assert used as None-narrowing for `_SessionLocal`
 "src/prosper/ehr_client.py" = ["S101"]  # assert narrows Optional[AsyncClient] inside `_c()`
 "src/prosper/prompts.py" = ["RUF001"]  # en-dash is intentional in user-facing voice copy
+"src/prosper/bot.py" = ["E402"]  # env-check intentionally precedes the 17s pipecat import wall
 "tests/*" = ["S101", "ARG"]  # pytest uses `assert`; mock callbacks accept unused fixture params
 "evals/*" = ["S101", "ARG"]  # eval scenarios use `assert`; setup-lambdas have fixed signatures
 

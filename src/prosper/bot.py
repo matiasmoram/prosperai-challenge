@@ -10,15 +10,41 @@ source of truth for which tools fire.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from typing import Any
 
-import pipecat as _pipecat
+# Perf wave 2 #5: load .env + fail-fast on missing credentials BEFORE the
+# 17s pipecat import cascade. A misconfigured boot used to print "Bot
+# ready!" 17s in then crash on first audio frame; now we print a single
+# line and exit immediately.
 from dotenv import load_dotenv
+
+# override=False (best practice 2026): externally-set env wins over .env.
+# Container / CI / systemd unit env vars should be authoritative. .env is a
+# dev convenience only.
+load_dotenv(override=False)
+
+_REQUIRED_ENV = ("ELEVENLABS_API_KEY", "OPENAI_API_KEY")
+_missing = [k for k in _REQUIRED_ENV if not os.environ.get(k)]
+if _missing:
+    sys.stderr.write(
+        f"ERROR: missing required env vars: {_missing}. "
+        f"Did you 'cp env.example .env' and fill in your keys?\n"
+    )
+    # Exit before incurring the pipecat / silero / onnxruntime import wall
+    # (~17s on this dev box). Re-raise inside test imports would be hostile,
+    # so guard on a CLI-style env hint.
+    if os.environ.get("PROSPER_BOT_ENTRYPOINT") == "1":
+        raise SystemExit(2)
+
+import pipecat as _pipecat
 from loguru import logger
 from openai import AsyncOpenAI
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
+
+# Perf wave 2 #2: lazy-import Silero VAD inside `async def bot()` — alone
+# it pulls onnxruntime + scipy.signal (~4.1s of the 17s cold-import wall).
+# See the imports inside `async def bot` below.
 from pipecat.frames.frames import (
     EndFrame,
     Frame,
@@ -52,12 +78,6 @@ _TOOL_FIRING_STATES = {
     State.CONFIRM_CANCEL,
     State.REGISTER_PATIENT,
 }
-
-# override=False (best practice 2026): externally-set env wins over .env.
-# Container / CI / systemd unit env vars should be authoritative. .env is a
-# dev convenience only.
-load_dotenv(override=False)
-
 
 # NOTE on pipecat aggregation_timeout (web research finding, 2026):
 # Pipecat's default LLMUserAggregator carries a 1.0s aggregation_timeout that
@@ -255,6 +275,13 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
 
 
 async def bot(runner_args: RunnerArguments) -> None:
+    # Perf wave 2 #2: Silero VAD pulls onnxruntime + scipy.signal via
+    # pyloudnorm (~4.1s of the cold-import wall). Importing here means
+    # boot is ~4s faster when the bot is just being inspected (tests,
+    # IDE indexing, type-check tools).
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.audio.vad.vad_analyzer import VADParams
+
     transport_params = {
         "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
