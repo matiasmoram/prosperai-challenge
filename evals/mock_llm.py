@@ -1270,6 +1270,30 @@ def _script_insurance_question_redirect() -> list[LLMReply]:
     ]
 
 
+def _script_triage_red_flag_emergency_no_booking() -> list[LLMReply]:
+    # Existing patient (Ada) describes chest pain + arm numbness → the mock
+    # triage rule flags red_flag=True → suggest_specialty_handler returns
+    # Err(code="medical_emergency"). No FSM transition fires on that Err, so
+    # the bot stays in BOOK_FLOW and delivers a 911 redirect. NO availability
+    # lookup, NO create_appointment. Persona then hangs up → END. Covers the
+    # medical_emergency Err code (previously zero coverage) and pins the
+    # safety invariant: an emergency never becomes a routine booking.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        # Caller's chest-pain description trips the red_flag triage rule.
+        _tool("suggest_specialty", symptoms="bad chest pain and my left arm has gone numb"),
+        # medical_emergency Err → bot redirects to 911, does NOT book.
+        _t(
+            "That sounds like a medical emergency — please hang up and call "
+            "911 or go to the nearest emergency room right now. I can't book "
+            "a routine visit for this."
+        ),
+    ]
+
+
 def _script_symptom_routes_to_gp() -> list[LLMReply]:
     # New patient describes stomach symptoms → triage routes to GP (30 min)
     # → books. Exercises suggest_specialty Ok + specialty/duration passthrough.
@@ -1436,6 +1460,7 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "specialty_no_filter_any_doctor": _script_specialty_no_filter_any_doctor,
     "specialty_filter_therapist": _script_specialty_filter_therapist,
     "insurance_question_redirect": _script_insurance_question_redirect,
+    "triage_red_flag_emergency_no_booking": _script_triage_red_flag_emergency_no_booking,
     "symptom_routes_to_gp": _script_symptom_routes_to_gp,
     "symptom_ambiguous_followup": _script_symptom_ambiguous_followup,
     "direct_specialty_skips_triage": _script_direct_specialty_skips_triage,
@@ -1828,6 +1853,12 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         ),
         "come on, just a ballpark.",
         "okay never mind then.",
+    ],
+    "triage_red_flag_emergency_no_booking": [
+        "Hi, I need to see someone.",
+        "202-555-0100.",
+        "I'd like to book — I've got bad chest pain and my left arm has gone numb.",
+        "okay, I'll call 911. goodbye.",
     ],
     "symptom_routes_to_gp": [
         "Hi, I'd like to book an appointment.",
