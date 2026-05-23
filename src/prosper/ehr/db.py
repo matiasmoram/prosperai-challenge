@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from prosper.ehr.models import Base
@@ -108,8 +108,39 @@ def get_engine(*, reset: bool = False) -> Engine:
 
 
 def init_db(engine: Engine | None = None) -> None:
-    """Create all tables on the given engine (or the singleton if None)."""
-    Base.metadata.create_all(engine if engine is not None else get_engine())
+    """Create all tables on the given engine (or the singleton if None).
+
+    Also runs an idempotent column-add migration for ``providers.specialty``
+    so callers booting against a pre-specialty SQLite file don't have to
+    wipe ``data/ehr.db`` by hand. SQLite only supports ``ADD COLUMN`` so
+    drops/renames still need a manual reseed; that's documented in
+    CLAUDE.md.
+    """
+    eng = engine if engine is not None else get_engine()
+    Base.metadata.create_all(eng)
+    _migrate_provider_specialty(eng)
+
+
+def _migrate_provider_specialty(engine: Engine) -> None:
+    """Add ``providers.specialty`` column if a pre-existing DB lacks it.
+
+    No-op when the column already exists (fresh DBs, in-memory test DBs).
+    Default value matches the ORM ``server_default`` so pre-existing rows
+    get a sensible specialty without surfacing as NULL.
+    """
+    insp = inspect(engine)
+    if "providers" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("providers")}
+    if "specialty" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE providers ADD COLUMN specialty VARCHAR(80) "
+                "NOT NULL DEFAULT 'General Practice'"
+            )
+        )
 
 
 def get_session() -> Session:

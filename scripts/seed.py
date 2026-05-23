@@ -1,11 +1,13 @@
 """Seed the local SQLite EHR with demo data.
 
-Inserts three providers and ~120 slots (next 14 days, 9am–5pm UTC, every 30
-min, lunch noon-1pm skipped) plus 2 demo patients. Idempotent: skips inserts
-if matching rows already exist.
+Inserts five providers across five specialties (Therapist, Psychiatrist,
+General Practice, Dermatologist, Physiotherapist) and ~500 slots (next 14
+days, 9am-5pm UTC, every 30 min, lunch noon-1pm skipped) plus 2 demo
+patients. Idempotent: skips inserts if matching rows already exist.
 
 Run: ``uv run python scripts/seed.py``
 """
+
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
@@ -85,8 +87,7 @@ def main() -> None:
         slot_count = session.execute(select(Slot)).scalars().all()
         pat_count = session.execute(select(Patient)).scalars().all()
         print(
-            f"seeded: providers={len(prov_count)} slots={len(slot_count)} "
-            f"patients={len(pat_count)}"
+            f"seeded: providers={len(prov_count)} slots={len(slot_count)} patients={len(pat_count)}"
         )
 
 
