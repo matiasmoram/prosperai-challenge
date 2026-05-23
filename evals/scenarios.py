@@ -63,6 +63,30 @@ def _setup_existing_no_appts(session: Session) -> None:
     _seed_existing_patient(session)
 
 
+def _setup_two_days_with_slots(session: Session) -> None:
+    """Existing patient (Ada) + a provider with free slots on BOTH tomorrow
+    and the day after. Lets a scenario list day A, abort, then list day B —
+    exercising the last_slots overwrite + handle-validity path across two
+    availability lookups in one call."""
+    prov = Provider(name="Dr. Patel", timezone="UTC")
+    session.add(prov)
+    session.commit()
+    for day_offset in (1, 2):
+        start = (datetime.now(timezone.utc) + timedelta(days=day_offset)).replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
+        for i in range(3):
+            session.add(
+                Slot(
+                    provider_id=prov.id,
+                    start_at=start + timedelta(minutes=30 * i),
+                    end_at=start + timedelta(minutes=30 * (i + 1)),
+                )
+            )
+    session.commit()
+    _seed_existing_patient(session)
+
+
 def _setup_existing_two_slots_only(session: Session) -> None:
     """Existing patient (Ada) + a provider with only TWO consecutive free
     slots. A 90-minute visit needs three consecutive blocks, so booking 90
@@ -1126,6 +1150,39 @@ SCENARIOS: list[Scenario] = [
             "the booking completed",
         ],
         max_turns=14,
+    ),
+    Scenario(
+        name="two_availability_lookups_handle_stays_valid",
+        tags=frozenset({"edge", "memory"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Open VERBATIM: 'Hi, I'd like to book a visit.' Provide phone. "
+            "When the bot offers a time tomorrow, REFUSE and ask for a "
+            "different day VERBATIM: 'no, what about the day after "
+            "instead?'. When the bot offers a time on that later day, "
+            "accept VERBATIM 'yes, the first one works'. After the bot "
+            "confirms the booking, end VERBATIM: 'thanks, goodbye.'"
+        ),
+        setup=_setup_two_days_with_slots,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # Exactly one booking — against the SECOND (re-listed) day, not
+            # a stale handle from the first lookup, and never double-booked.
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot re-listed availability for the later day after the caller declined the first",
+            "the bot booked a slot from the later day, not the originally-offered one",
+            "exactly one appointment was created — no double-booking from the two lookups",
+        ],
+        max_turns=16,
     ),
     Scenario(
         name="register_duplicate_phone_rejected",

@@ -822,6 +822,32 @@ def _script_caller_volunteers_email_at_registration() -> list[LLMReply]:
     ]
 
 
+def _day_after_iso() -> str:
+    """ISO date for the day after tomorrow (UTC) — pairs with the
+    _setup_two_days_with_slots seed that populates day+1 and day+2."""
+    return (datetime.now(timezone.utc) + timedelta(days=2)).date().isoformat()
+
+
+def _script_two_availability_lookups_handle_stays_valid() -> list[LLMReply]:
+    # Caller declines tomorrow's offer → abort back to BOOK_FLOW → bot
+    # re-lists the day after, replacing memory.last_slots. The final
+    # __use_first_slot__ must resolve against the SECOND list (day+2), and
+    # the booking must succeed exactly once with no stale-handle rejection.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book?"),
+        # Caller's "no, the day after" trips _DENY → abort → BOOK_FLOW.
+        _tool("list_availability_slots", date=_day_after_iso()),
+        _t("Sure — I have ten the day after with Dr. Patel. Shall I book that?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("All set — ten the day after with Dr. Patel. Have a great day."),
+    ]
+
+
 def _script_register_duplicate_phone_rejected() -> list[LLMReply]:
     # New caller; phone lookup misses, name+DOB misses → REGISTER. The bot
     # then calls create_patient with a number that already belongs to
@@ -1383,6 +1409,9 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "rude_caller_still_completes_booking": _script_rude_caller_still_completes_booking,
     "phone_correction_mid_register": _script_phone_correction_mid_register,
     "caller_volunteers_email_at_registration": (_script_caller_volunteers_email_at_registration),
+    "two_availability_lookups_handle_stays_valid": (
+        _script_two_availability_lookups_handle_stays_valid
+    ),
     "register_duplicate_phone_rejected": _script_register_duplicate_phone_rejected,
     "no_consecutive_slots_90min": _script_no_consecutive_slots_90min,
     "invalid_duration_rejected": _script_invalid_duration_rejected,
@@ -1647,6 +1676,13 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "yes that's correct.",
         "Book any morning tomorrow.",
         "yes please.",
+    ],
+    "two_availability_lookups_handle_stays_valid": [
+        "Hi, I'd like to book a visit.",
+        "202-555-0100.",
+        "Book please.",
+        "no, what about the day after instead?",
+        "yes, the first one works.",
     ],
     "register_duplicate_phone_rejected": [
         "Hi, I'm a new patient, I'd like to register and book.",
