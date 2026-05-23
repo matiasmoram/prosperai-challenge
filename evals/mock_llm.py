@@ -822,6 +822,35 @@ def _script_caller_volunteers_email_at_registration() -> list[LLMReply]:
     ]
 
 
+def _script_register_duplicate_phone_rejected() -> list[LLMReply]:
+    # New caller; phone lookup misses, name+DOB misses → REGISTER. The bot
+    # then calls create_patient with a number that already belongs to
+    # another record (Ada's +12025550100) → 409 patient_exists. The Err is
+    # non-fatal (no transition); the bot explains and the caller hangs up.
+    # Asserts no duplicate row + no false "registered" success.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("Sure — what's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="555-000-9999"),
+        _t("I don't see you yet — what's your full name and date of birth?"),
+        _tool("find_patient_by_name_dob", name="Bob New", dob="January 1 1985"),
+        _t("I'll register Bob New, born January 1st 1985, phone 202-555-0100 — sound right?"),
+        # Collides with an existing record's phone → patient_exists Err.
+        _tool(
+            "create_patient",
+            first_name="Bob",
+            last_name="New",
+            dob="1985-01-01",
+            phone="2025550100",
+        ),
+        _t(
+            "It looks like that phone number is already on file under "
+            "another record, so I can't set up a duplicate. I'd recommend "
+            "calling our front desk so they can sort it out."
+        ),
+    ]
+
+
 def _script_no_consecutive_slots_90min() -> list[LLMReply]:
     # Provider has only 2 consecutive slots. Bot lists 30-min availability,
     # tries to book 90 min on the anchor → EHR 409 no_consecutive_slots.
@@ -1354,6 +1383,7 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "rude_caller_still_completes_booking": _script_rude_caller_still_completes_booking,
     "phone_correction_mid_register": _script_phone_correction_mid_register,
     "caller_volunteers_email_at_registration": (_script_caller_volunteers_email_at_registration),
+    "register_duplicate_phone_rejected": _script_register_duplicate_phone_rejected,
     "no_consecutive_slots_90min": _script_no_consecutive_slots_90min,
     "invalid_duration_rejected": _script_invalid_duration_rejected,
     "availability_date_unparseable_recovery": (_script_availability_date_unparseable_recovery),
@@ -1617,6 +1647,14 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "yes that's correct.",
         "Book any morning tomorrow.",
         "yes please.",
+    ],
+    "register_duplicate_phone_rejected": [
+        "Hi, I'm a new patient, I'd like to register and book.",
+        "555-000-9999.",
+        "Bob New, January 1st 1985.",
+        "My number is 202-555-0100.",
+        "yes that's correct.",
+        "oh, okay. never mind. goodbye.",
     ],
     "no_consecutive_slots_90min": [
         "Hi, I'd like to book a ninety-minute visit tomorrow.",

@@ -1128,6 +1128,42 @@ SCENARIOS: list[Scenario] = [
         max_turns=14,
     ),
     Scenario(
+        name="register_duplicate_phone_rejected",
+        tags=frozenset({"edge", "recovery"}),
+        persona=(
+            "You are a NEW caller named Bob New, DOB January 1 1985. Open "
+            "VERBATIM: 'Hi, I'm a new patient, I'd like to register and "
+            "book.' When asked for a phone, give VERBATIM '555-000-9999' "
+            "(it won't be on file). Give your name and DOB when asked. "
+            "When asked to confirm your details for registration, give "
+            "your real number VERBATIM '202-555-0100'. After the bot "
+            "tells you that number is already on file and it can't create "
+            "a duplicate, accept it and end VERBATIM: 'oh, okay. never "
+            "mind. goodbye.' (202-555-0100 already belongs to another "
+            "patient record in the system.)"
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            # The 409 blocks the insert — NO new patient row is created.
+            patient_count_delta=0,
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "find_patient_by_name_dob",
+                "create_patient",
+            ],
+            forbidden_tool_calls=["create_appointment", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot did NOT claim the new patient was registered",
+            "the bot did not create a duplicate or book any appointment",
+            "the bot explained the number was already on file and ended gracefully",
+        ],
+        max_turns=14,
+    ),
+    Scenario(
         name="no_consecutive_slots_90min",
         tags=frozenset({"edge", "duration", "recovery"}),
         persona=(
