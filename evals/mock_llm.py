@@ -822,6 +822,28 @@ def _script_caller_volunteers_email_at_registration() -> list[LLMReply]:
     ]
 
 
+def _script_availability_date_unparseable_recovery() -> list[LLMReply]:
+    # Bot calls list_availability_slots with a vague/garbage date string →
+    # handler returns Err(code="date_unparseable"). Dispatcher stays in
+    # BOOK_FLOW (no transition on Err). Bot re-asks for a concrete date,
+    # re-lists with a real date, then books. Verifies date_unparseable is
+    # non-fatal and the recovery path works.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        # First availability call with a date the parser can't resolve.
+        _tool("list_availability_slots", date="sometime next week maybe Thursday or Friday"),
+        _t("Which exact day works best — I can check that date for you?"),
+        # Recovery: concrete date → real slots → CONFIRM_BOOK.
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("All set — ten tomorrow with Dr. Patel. Have a great day."),
+    ]
+
+
 def _script_availability_falls_through_to_next_day() -> list[LLMReply]:
     # Slots only exist on tomorrow. Caller asks for TODAY → handler's
     # forward-scan loop returns the tomorrow slots as next_day_with_slots,
@@ -1287,6 +1309,7 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "rude_caller_still_completes_booking": _script_rude_caller_still_completes_booking,
     "phone_correction_mid_register": _script_phone_correction_mid_register,
     "caller_volunteers_email_at_registration": (_script_caller_volunteers_email_at_registration),
+    "availability_date_unparseable_recovery": (_script_availability_date_unparseable_recovery),
     "availability_falls_through_to_next_day": (_script_availability_falls_through_to_next_day),
     "dob_unparseable_then_recovery": _script_dob_unparseable_then_recovery,
     "goodbye_at_greeting": _script_goodbye_at_greeting,
@@ -1547,6 +1570,15 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "yes that's correct.",
         "Book any morning tomorrow.",
         "yes please.",
+    ],
+    "availability_date_unparseable_recovery": [
+        "Hi, I'd like to book a visit.",
+        "202-555-0100.",
+        "Book please.",
+        "oh, sometime next week maybe, Thursday or Friday?",
+        "tomorrow then.",
+        "first one works.",
+        "yes that's correct.",
     ],
     "availability_falls_through_to_next_day": [
         "Hi, I'd like to book today.",

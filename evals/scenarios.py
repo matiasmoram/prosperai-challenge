@@ -1119,6 +1119,38 @@ SCENARIOS: list[Scenario] = [
         max_turns=14,
     ),
     Scenario(
+        name="availability_date_unparseable_recovery",
+        tags=frozenset({"edge", "recovery"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Open VERBATIM: 'Hi, I'd like to book a visit.' Provide phone. "
+            "When asked what day, give a VAGUE answer first VERBATIM: "
+            "'oh, sometime next week maybe, Thursday or Friday?'. After the "
+            "bot asks for one specific date, say VERBATIM 'tomorrow then'. "
+            "When the bot offers a slot, pick the first VERBATIM 'first "
+            "one works'. Confirm VERBATIM 'yes that\\'s correct'. After "
+            "the bot confirms the booking, end VERBATIM: 'thanks, "
+            "goodbye.'"
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot did not crash or dead-air on the vague/unparseable date",
+            "the bot asked the caller for a single concrete date",
+            "the booking completed once a real date was given",
+        ],
+        max_turns=16,
+    ),
+    Scenario(
         name="availability_falls_through_to_next_day",
         tags=frozenset({"edge", "happy"}),
         persona=(
