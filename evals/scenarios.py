@@ -63,6 +63,15 @@ def _setup_existing_no_appts(session: Session) -> None:
     _seed_existing_patient(session)
 
 
+def _setup_existing_two_slots_only(session: Session) -> None:
+    """Existing patient (Ada) + a provider with only TWO consecutive free
+    slots. A 90-minute visit needs three consecutive blocks, so booking 90
+    min on either anchor raises the EHR's no_consecutive_slots 409 —
+    exercises that recovery path."""
+    _seed_provider_and_slots(session, count=2)
+    _seed_existing_patient(session)
+
+
 def _setup_provider_zero_slots(session: Session) -> None:
     """Existing patient + a provider that has NO slots at all (fully booked
     out / not yet published). Every availability lookup — primary and the
@@ -1117,6 +1126,71 @@ SCENARIOS: list[Scenario] = [
             "the booking completed",
         ],
         max_turns=14,
+    ),
+    Scenario(
+        name="no_consecutive_slots_90min",
+        tags=frozenset({"edge", "duration", "recovery"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Open VERBATIM: 'Hi, I'd like to book a ninety-minute visit "
+            "tomorrow.' Provide phone. When the bot says it can't fit a "
+            "ninety-minute block at that time and offers a shorter visit "
+            "instead, accept VERBATIM 'okay, a thirty-minute visit is "
+            "fine'. When the bot reads the slot back, confirm VERBATIM "
+            "'yes that\\'s correct'. After the bot confirms the booking, "
+            "end VERBATIM: 'thanks, goodbye.'"
+        ),
+        setup=_setup_existing_two_slots_only,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # The 90-min attempt fails atomically (no row); the 30-min
+            # fallback books exactly one appointment.
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot did NOT claim the 90-minute visit was booked when it could not fit",
+            "the bot offered a shorter visit instead of dead-ending",
+            "exactly one appointment was created, for the shorter duration",
+        ],
+        max_turns=16,
+    ),
+    Scenario(
+        name="invalid_duration_rejected",
+        tags=frozenset({"edge", "duration", "recovery"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Open VERBATIM: 'Hi, I'd like to book a visit tomorrow.' "
+            "Provide phone. Cooperate normally: when offered a slot say "
+            "VERBATIM 'first one works', and when the bot reads it back "
+            "confirm VERBATIM 'yes that\\'s correct'. After the bot "
+            "confirms the booking, end VERBATIM: 'thanks, goodbye.' "
+            "(Internal: this scenario exercises the bot briefly requesting "
+            "an unsupported visit length and the handler's invalid_duration "
+            "guard before the real booking.)"
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot recovered from an internal invalid-duration error and still booked",
+            "exactly one appointment was created",
+            "the bot never claimed success before the valid booking went through",
+        ],
+        max_turns=16,
     ),
     Scenario(
         name="availability_date_unparseable_recovery",

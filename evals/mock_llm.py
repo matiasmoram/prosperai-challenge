@@ -822,6 +822,51 @@ def _script_caller_volunteers_email_at_registration() -> list[LLMReply]:
     ]
 
 
+def _script_no_consecutive_slots_90min() -> list[LLMReply]:
+    # Provider has only 2 consecutive slots. Bot lists 30-min availability,
+    # tries to book 90 min on the anchor → EHR 409 no_consecutive_slots.
+    # The Err is non-fatal (no transition), so the bot offers a 30-min
+    # visit on the same anchor and books that. Asserts no false success +
+    # one appointment for the fallback duration.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        _tool("list_availability_slots", date=_tomorrow_iso(), duration_minutes=30),
+        _t("I have ten tomorrow with Dr. Patel — how long do you need?"),
+        # 90-min attempt on a 2-slot provider → no_consecutive_slots Err.
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=90),
+        _t(
+            "That time can't hold a full ninety minutes — I can do a "
+            "thirty-minute visit there, or a longer block another day. "
+            "Thirty okay?"
+        ),
+        # Fallback to a 30-min visit on the same anchor → succeeds.
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=30),
+        _t("All set — thirty minutes tomorrow at ten with Dr. Patel. Have a great day."),
+    ]
+
+
+def _script_invalid_duration_rejected() -> list[LLMReply]:
+    # Bot briefly emits an unsupported duration (45) → handler returns
+    # Err(invalid_duration) before any HTTP. Non-fatal: bot retries with a
+    # valid 30-min duration and books.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book?"),
+        # Unsupported duration → invalid_duration Err (pre-HTTP guard).
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=45),
+        _t("One moment — let me set that up correctly."),
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=30),
+        _t("All set — ten tomorrow with Dr. Patel. Have a great day."),
+    ]
+
+
 def _script_availability_date_unparseable_recovery() -> list[LLMReply]:
     # Bot calls list_availability_slots with a vague/garbage date string →
     # handler returns Err(code="date_unparseable"). Dispatcher stays in
@@ -1309,6 +1354,8 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "rude_caller_still_completes_booking": _script_rude_caller_still_completes_booking,
     "phone_correction_mid_register": _script_phone_correction_mid_register,
     "caller_volunteers_email_at_registration": (_script_caller_volunteers_email_at_registration),
+    "no_consecutive_slots_90min": _script_no_consecutive_slots_90min,
+    "invalid_duration_rejected": _script_invalid_duration_rejected,
     "availability_date_unparseable_recovery": (_script_availability_date_unparseable_recovery),
     "availability_falls_through_to_next_day": (_script_availability_falls_through_to_next_day),
     "dob_unparseable_then_recovery": _script_dob_unparseable_then_recovery,
@@ -1570,6 +1617,21 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "yes that's correct.",
         "Book any morning tomorrow.",
         "yes please.",
+    ],
+    "no_consecutive_slots_90min": [
+        "Hi, I'd like to book a ninety-minute visit tomorrow.",
+        "202-555-0100.",
+        "Book please.",
+        "ninety minutes, please.",
+        "okay, a thirty-minute visit is fine.",
+        "yes that's correct.",
+    ],
+    "invalid_duration_rejected": [
+        "Hi, I'd like to book a visit tomorrow.",
+        "202-555-0100.",
+        "Book please.",
+        "first one works.",
+        "yes that's correct.",
     ],
     "availability_date_unparseable_recovery": [
         "Hi, I'd like to book a visit.",
