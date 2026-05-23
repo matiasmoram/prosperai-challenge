@@ -13,6 +13,7 @@ whitelist in ``flows.py`` references them by name.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from datetime import date
 from typing import Any
@@ -29,6 +30,50 @@ ToolHandler = Callable[..., Awaitable[Result[dict[str, Any]]]]
 # fuzzy-parser inventing 1990 from a stray digit) before they hit the DB.
 _MIN_PARSED_YEAR = 1900
 _MAX_PARSED_YEAR = 2100
+
+# Map spoken-number words to their digit. ElevenLabs realtime STT (no smart-
+# format flag) frequently transcribes phone numbers as words ("five five five
+# oh one zero zero"). LLM is asked to normalise but slips; this is the belt-
+# and-braces normaliser at the tool boundary.
+_NUMBER_WORDS: dict[str, str] = {
+    "zero": "0",
+    "oh": "0",
+    "o": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "for": "4",  # frequent STT slip ("five-for-six" instead of "five-four-six")
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+}
+
+
+def _phone_words_to_digits(raw: str) -> str:
+    """Convert any number-words inside a phone string to digits.
+
+    Leaves digits untouched, drops other tokens. Returns the original string
+    when the conversion would produce fewer than 7 digits — the EHR layer
+    treats <7 digits as empty, so a bad conversion would mask the real input.
+    """
+    if not isinstance(raw, str):
+        return raw
+    tokens = re.findall(r"[A-Za-z]+|\d+", raw)
+    out: list[str] = []
+    for tok in tokens:
+        low = tok.lower()
+        if low.isdigit():
+            out.append(low)
+        elif low in _NUMBER_WORDS:
+            out.append(_NUMBER_WORDS[low])
+        # else: silently drop non-number alphabetic noise
+    digits = "".join(out)
+    if len(digits) < 7:
+        return raw
+    return digits
 
 
 def _parse_dob(raw: str) -> Result[date]:
@@ -55,6 +100,7 @@ def _parse_dob(raw: str) -> Result[date]:
 
 
 async def find_patient_by_phone_handler(client: EHRClient, *, phone: str) -> Result[dict[str, Any]]:
+    phone = _phone_words_to_digits(phone)
     try:
         patients = await client.find_patients_by_phone(phone)
     except EHRHTTPError as e:
@@ -87,6 +133,7 @@ async def create_patient_handler(
     dob_r = _parse_dob(dob)
     if dob_r.kind == "err":
         return dob_r
+    phone = _phone_words_to_digits(phone)
     try:
         created = await client.create_patient(
             first_name=first_name,
@@ -113,28 +160,69 @@ async def list_availability_slots_handler(
     *,
     date: str,
     provider_id: str | None = None,
+    specialty: str | None = None,
 ) -> Result[dict[str, Any]]:
     d_r = _parse_dob(date)
     if d_r.kind == "err":
         return Err(code="date_unparseable", message=d_r.message, retryable=True)
+    asked = d_r.value
     try:
-        slots = await client.list_availability(date_=d_r.value, provider_id=provider_id)
+        slots = await client.list_availability(
+            date_=asked, provider_id=provider_id, specialty=specialty
+        )
     except EHRHTTPError as e:
         return Err(code="ehr_error", message=str(e), retryable=True)
-    return Ok(
-        value={
-            "slots": [
-                {
-                    "slot_id": s["id"],
-                    "start_at_iso": s["start_at"],
-                    "end_at_iso": s["end_at"],
-                    "provider_id": s["provider_id"],
-                    "provider_name": s["provider_name"],
+
+    # Auto-scan forward up to 6 days when the asked date is empty so the LLM
+    # never gets a bare "no slots" dead-end. Surface both the asked date
+    # (empty) and the next available date so the bot can say "Wednesday's
+    # booked solid — Thursday has openings at 10 and 2, either work?". The
+    # specialty filter is preserved on probes so we don't suggest a GP slot
+    # to a caller who asked for a physiotherapist.
+    next_day_with_slots: dict[str, Any] | None = None
+    if not slots:
+        from datetime import timedelta
+
+        for offset in range(1, 7):
+            probe = asked + timedelta(days=offset)
+            try:
+                probe_slots = await client.list_availability(
+                    date_=probe, provider_id=provider_id, specialty=specialty
+                )
+            except EHRHTTPError:
+                continue
+            if probe_slots:
+                next_day_with_slots = {
+                    "date": probe.isoformat(),
+                    "slots": [
+                        {
+                            "slot_id": s["id"],
+                            "start_at_iso": s["start_at"],
+                            "end_at_iso": s["end_at"],
+                            "provider_id": s["provider_id"],
+                            "provider_name": s["provider_name"],
+                        }
+                        for s in probe_slots
+                    ],
                 }
-                for s in slots
-            ]
-        }
-    )
+                break
+
+    value: dict[str, Any] = {
+        "asked_date": asked.isoformat(),
+        "slots": [
+            {
+                "slot_id": s["id"],
+                "start_at_iso": s["start_at"],
+                "end_at_iso": s["end_at"],
+                "provider_id": s["provider_id"],
+                "provider_name": s["provider_name"],
+            }
+            for s in slots
+        ],
+    }
+    if next_day_with_slots is not None:
+        value["next_day_with_slots"] = next_day_with_slots
+    return Ok(value=value)
 
 
 async def create_appointment_handler(
@@ -198,6 +286,41 @@ async def cancel_appointment_handler(
             return Err(code="appointment_not_found", message=str(e), retryable=False)
         return Err(code="ehr_error", message=str(e), retryable=True)
     return Ok(value={"ok": True, "appointment_id": cancelled["id"]})
+
+
+async def reschedule_appointment_handler(
+    client: EHRClient, *, appointment_id: str, slot_id: str
+) -> Result[dict[str, Any]]:
+    """Atomic single-txn appointment slot swap.
+
+    Replaces the older cancel-and-rebook chain — if the new slot is held
+    by someone else, the original appointment is preserved (no orphan
+    state). The LLM passes the new slot's bracketed handle as ``slot_id``
+    just like ``create_appointment``; the dispatcher resolves it to the
+    real UUID before calling here.
+    """
+    try:
+        appt = await client.reschedule_appointment(
+            appointment_id=appointment_id, new_slot_id=slot_id
+        )
+    except EHRHTTPError as e:
+        if (
+            e.status_code == 409
+            and isinstance(e.detail, dict)
+            and e.detail.get("code") == "slot_taken"
+        ):
+            return Err(code="slot_taken_other_patient", message=str(e), retryable=True)
+        if e.status_code == 404:
+            return Err(code="appointment_or_slot_not_found", message=str(e), retryable=False)
+        return Err(code="ehr_error", message=str(e), retryable=True)
+    return Ok(
+        value={
+            "appointment_id": appt["id"],
+            "start_at": appt["start_at"],
+            "end_at": appt["end_at"],
+            "provider_name": appt["provider_name"],
+        }
+    )
 
 
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -269,7 +392,12 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "function",
         "function": {
             "name": "list_availability_slots",
-            "description": "Return available 30-minute slots for a given date.",
+            "description": (
+                "Return available 30-minute slots for a given date. Optional "
+                "`specialty` filter (e.g. 'Therapist', 'Psychiatrist', "
+                "'General Practice', 'Dermatologist', 'Physiotherapist') "
+                "when the caller asks for a specific kind of provider."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -281,6 +409,13 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                         ),
                     },
                     "provider_id": {"type": "string"},
+                    "specialty": {
+                        "type": "string",
+                        "description": (
+                            "Filter by provider specialty (case-insensitive). "
+                            "Leave empty if the caller did not specify."
+                        ),
+                    },
                 },
                 "required": ["date"],
             },
@@ -297,9 +432,32 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "patient_id": {"type": "string"},
-                    "slot_id": {"type": "string"},
-                    "notes": {"type": "string"},
+                    "patient_id": {
+                        "type": "string",
+                        "description": (
+                            "The identified patient's id. The dispatcher "
+                            "auto-fills this from the call's verified "
+                            "patient — you can pass an empty string if you "
+                            "don't have one to hand."
+                        ),
+                    },
+                    "slot_id": {
+                        "type": "string",
+                        "description": (
+                            "The slot the caller picked. Pass the bracketed "
+                            "number from the `list_availability_slots` "
+                            "result — e.g. '1' for the first slot, '2' for "
+                            "the second. Never invent UUIDs."
+                        ),
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": (
+                            "Short reason for visit if the caller mentioned one "
+                            "(e.g. 'follow-up', 'cough', 'medication review'). "
+                            "Leave blank if not stated; do not invent."
+                        ),
+                    },
                 },
                 "required": ["patient_id", "slot_id"],
             },
@@ -329,10 +487,55 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "appointment_id": {"type": "string"},
+                    "appointment_id": {
+                        "type": "string",
+                        "description": (
+                            "The appointment to cancel. Pass the bracketed "
+                            "number from the `get_upcoming_appointments` "
+                            "result — e.g. '1' for the first appointment "
+                            "in the list. Never invent UUIDs."
+                        ),
+                    },
                     "reason": {"type": "string"},
                 },
                 "required": ["appointment_id"],
+            },
+        },
+    },
+    "reschedule_appointment": {
+        "type": "function",
+        "function": {
+            "name": "reschedule_appointment",
+            "description": (
+                "Atomically move an existing appointment to a different "
+                "available slot in a single transaction. Use this instead "
+                "of cancel-then-rebook so the caller never loses their "
+                "original appointment if the new slot turns out to be "
+                "unavailable. Only call after explicit user confirmation."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "appointment_id": {
+                        "type": "string",
+                        "description": (
+                            "Bracketed handle of the existing appointment "
+                            "from the `get_upcoming_appointments` result — "
+                            "e.g. '1' for the first item. Never invent a "
+                            "UUID."
+                        ),
+                    },
+                    "slot_id": {
+                        "type": "string",
+                        "description": (
+                            "Bracketed handle of the NEW slot from the "
+                            "`list_availability_slots` result — e.g. '2' "
+                            "for the second slot offered. Never invent a "
+                            "UUID."
+                        ),
+                    },
+                },
+                "required": ["appointment_id", "slot_id"],
             },
         },
     },
@@ -347,4 +550,5 @@ HANDLERS: dict[str, ToolHandler] = {
     "create_appointment": create_appointment_handler,
     "get_upcoming_appointments": get_upcoming_appointments_handler,
     "cancel_appointment": cancel_appointment_handler,
+    "reschedule_appointment": reschedule_appointment_handler,
 }

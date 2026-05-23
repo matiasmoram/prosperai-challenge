@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from prosper.ehr.models import Appointment, AppointmentStatus, Patient, Slot
+from prosper.ehr.models import Appointment, AppointmentStatus, Patient, Provider, Slot
 
 _HONORIFICS = {"mr", "mrs", "ms", "miss", "mx", "dr", "doctor", "prof", "professor"}
 
@@ -135,11 +135,13 @@ def list_available_slots(
     *,
     date_: date,
     provider_id: str | None = None,
+    specialty: str | None = None,
 ) -> list[Slot]:
     """Slots on ``date_`` that are unblocked, unbooked, and not in the past.
 
-    Optionally filtered to a single ``provider_id``. Returns rows ordered by
-    ``start_at`` ascending.
+    Optionally filtered to a single ``provider_id`` and/or a single
+    ``specialty`` (case-insensitive exact match on ``Provider.specialty``).
+    Returns rows ordered by ``start_at`` ascending.
     """
     day_start = datetime.combine(date_, time.min, tzinfo=timezone.utc)
     day_end = day_start + timedelta(days=1)
@@ -163,6 +165,26 @@ def list_available_slots(
     )
     if provider_id is not None:
         stmt = stmt.where(Slot.provider_id == provider_id)
+    if specialty is not None:
+        # Case-insensitive specialty match via join so the index on
+        # ``providers.specialty`` is usable. ``ilike`` lets the caller pass
+        # "Therapist" / "therapist" interchangeably — the LLM is sloppy with
+        # casing and we'd rather not lose a match because of it.
+        stmt = stmt.join(Provider, Provider.id == Slot.provider_id).where(
+            Provider.specialty.ilike(specialty)
+        )
+    return list(session.execute(stmt).scalars())
+
+
+def list_providers(
+    session: Session,
+    *,
+    specialty: str | None = None,
+) -> list[Provider]:
+    """All providers, optionally filtered to one ``specialty`` (case-insensitive)."""
+    stmt = select(Provider).order_by(Provider.name)
+    if specialty is not None:
+        stmt = stmt.where(Provider.specialty.ilike(specialty))
     return list(session.execute(stmt).scalars())
 
 
@@ -231,6 +253,55 @@ def cancel_appointment(
     if reason:
         appt.notes = (appt.notes + "\n" if appt.notes else "") + f"[cancel] {reason}"
     session.commit()
+    return appt
+
+
+def reschedule_appointment(
+    session: Session,
+    *,
+    appointment_id: str,
+    new_slot_id: str,
+) -> Appointment:
+    """Atomically swap an appointment from its current slot to ``new_slot_id``.
+
+    A single transaction updates ``appointment.slot_id`` so the caller can
+    never end up with a cancelled old appointment AND a failed new booking.
+    Raises ``AppointmentNotFoundError`` if the appointment is missing or
+    already cancelled. Raises ``SlotTakenError`` if ``new_slot_id`` already
+    holds a different patient's scheduled appointment (caught both via the
+    pre-check and via the partial unique index on ``appointment.slot_id``).
+    """
+    appt = session.get(Appointment, appointment_id)
+    if appt is None or appt.status != AppointmentStatus.SCHEDULED:
+        raise AppointmentNotFoundError(appointment_id)
+    # No-op fast path: caller asked to move the appointment to its current
+    # slot. Return the existing row without a write — avoids surfacing a
+    # phantom 409 from the unique index when the new id equals the old id.
+    if appt.slot_id == new_slot_id:
+        return appt
+    holder = session.execute(
+        select(Appointment)
+        .where(Appointment.slot_id == new_slot_id)
+        .where(Appointment.status == AppointmentStatus.SCHEDULED)
+    ).scalar_one_or_none()
+    if holder is not None and holder.id != appointment_id:
+        raise SlotTakenError(slot_id=new_slot_id, owner_patient_id=holder.patient_id)
+    appt.slot_id = new_slot_id
+    try:
+        session.commit()
+    except IntegrityError as e:
+        # Concurrent writer claimed ``new_slot_id`` between our SELECT and
+        # the COMMIT. The partial unique index on ``appointment.slot_id``
+        # (where status = scheduled) catches it; translate to a structured
+        # error so the dispatcher returns ``slot_taken_other_patient``.
+        session.rollback()
+        race_owner = session.execute(
+            select(Appointment)
+            .where(Appointment.slot_id == new_slot_id)
+            .where(Appointment.status == AppointmentStatus.SCHEDULED)
+        ).scalar_one_or_none()
+        owner_id = race_owner.patient_id if race_owner else "unknown"
+        raise SlotTakenError(slot_id=new_slot_id, owner_patient_id=owner_id) from e
     return appt
 
 

@@ -53,6 +53,42 @@ def test_create_then_find_patient_by_phone(client: TestClient) -> None:
     assert len(r2.json()["patients"]) == 1
 
 
+def test_create_patient_duplicate_phone_different_format_returns_409(
+    client: TestClient,
+) -> None:
+    """Same phone in raw + E.164 form must collide as 409, never 500.
+
+    Regression for the bypassed duplicate-phone guard: when the API-side
+    lookup and the repo-side insert disagreed on normalisation, the
+    second POST escaped the 409 ``patient_exists`` branch and tripped
+    the DB ``UNIQUE`` constraint as a 500 ``IntegrityError``.
+    """
+    r1 = client.post(
+        "/patients",
+        json={
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "dob": "1990-12-10",
+            "phone": "2025551234",
+        },
+    )
+    assert r1.status_code == 201, r1.text
+    first_id = r1.json()["id"]
+    r2 = client.post(
+        "/patients",
+        json={
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "dob": "1990-12-10",
+            "phone": "+12025551234",
+        },
+    )
+    assert r2.status_code == 409, r2.text
+    body = r2.json()
+    assert body["detail"]["code"] == "patient_exists"
+    assert body["detail"]["id"] == first_id
+
+
 def test_find_patient_by_name_dob_returns_similarity(client: TestClient) -> None:
     client.post(
         "/patients",

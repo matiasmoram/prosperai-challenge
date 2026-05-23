@@ -15,12 +15,16 @@ For each Scenario:
 from __future__ import annotations
 
 import contextlib
+import datetime as _dt
+import json as _json
 import os
 import re
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Engine, func, select
@@ -78,6 +82,43 @@ _HALLUCINATED_CLAIM = re.compile(
     r"|\bdone, your appointment\b)",
     re.IGNORECASE,
 )
+
+
+# End-of-call phrases. We match only when the phrase is the final utterance
+# (the persona's hang-up) — not mid-sentence in something like "see you next
+# Tuesday at 3pm" while booking. Implementation: phrase must be followed by
+# nothing-but-punctuation (incl. exclamation, period, comma, dash) and then
+# end-of-string. The "thanks" preamble is allowed before each phrase. Case
+# insensitive throughout.
+_STOP_WORDS_PATTERN = re.compile(
+    r"\b("
+    r"thanks,?\s*bye"
+    r"|goodbye"
+    r"|bye"
+    r"|see\s+you"
+    r"|talk\s+(?:to\s+you\s+)?later"
+    r"|never\s*mind"
+    r"|that(?:'s|\s+is)\s+all"
+    r"|i'?m\s+done"
+    r"|have\s+a\s+good\s+(?:day|night|one)"
+    r"|cheers"
+    r"|take\s+care"
+    r")\s*[!.,\-—…]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_persona_stop(user_text: str) -> bool:
+    """Return True if ``user_text`` is a stand-alone end-of-call utterance.
+
+    Whole-word, case-insensitive match anchored to the END of the trimmed
+    string so phrases that legitimately appear mid-sentence (e.g. "see you
+    next Tuesday at 3pm") do NOT trigger the stop.
+    """
+    stripped = user_text.strip()
+    if not stripped:
+        return False
+    return _STOP_WORDS_PATTERN.search(stripped) is not None
 
 
 def _check_hallucinated_confirmation(transcript: list[dict]) -> list[str]:
@@ -143,11 +184,33 @@ def _evaluate_state(
     return (not reasons), reasons
 
 
+def _dump_history_on_bad_request(*, scenario_name: str, dispatcher: Dispatcher) -> Path:
+    """Write the dispatcher history to ``evals/results/debug_<name>_<ts>.json``.
+
+    Called by ``--debug`` when an ``openai.BadRequestError`` propagates out of
+    a dispatcher LLM call. Returns the file path so the runner can print it
+    to stderr.
+    """
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    out_dir = Path("evals/results")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"debug_{scenario_name}_{ts}.json"
+    payload = {
+        "scenario": scenario_name,
+        "timestamp": ts,
+        "state": dispatcher.state.value,
+        "history": dispatcher.history,
+    }
+    path.write_text(_json.dumps(payload, indent=2, default=str))
+    return path
+
+
 async def run_scenario(
     scenario: Scenario,
     *,
     openai_client: Any = None,
     mock: bool = False,
+    debug: bool = False,
 ) -> ScenarioResult:
     """Run a single scenario end-to-end.
 
@@ -157,6 +220,9 @@ async def run_scenario(
         mock: when True, swap in deterministic canned LLMs (no API key needed).
             Used by ``python -m evals --mock-llm`` and the fast unit-test
             harness in ``evals/test_scripted.py::test_scenario_mock``.
+        debug: when True, on ``openai.BadRequestError`` dump ``dispatcher.history``
+            to ``evals/results/debug_<scenario>_<timestamp>.json`` and print
+            the path to stderr before re-raising. No-op otherwise.
     """
     if not mock and openai_client is None:
         raise ValueError("openai_client is required when mock=False")
@@ -179,7 +245,10 @@ async def run_scenario(
             mock_llm.attach(dispatcher)
         else:
             dispatcher = Dispatcher(
-                llm=OpenAILLMAdapter(client=openai_client, model="gpt-4o-mini"),
+                llm=OpenAILLMAdapter(
+                    client=openai_client,
+                    model=os.environ.get("PROSPER_BOT_MODEL", "gpt-4o-mini"),
+                ),
                 ehr_client=ehr,
             )
         async with ehr:
@@ -188,15 +257,41 @@ async def run_scenario(
                 sim = MockPersonaLLM(scenario.name)
             else:
                 sim = PersonaSimulator(client=openai_client, persona=scenario.persona)
-            bot_text = await dispatcher.start()
-            turns = 0
-            while dispatcher.state is not State.END and turns < scenario.max_turns:
-                user_text = await sim.reply_to(bot_text)
-                lower = user_text.lower()
-                if "thanks, bye" in lower or "goodbye" in lower or "bye!" in lower:
-                    break
-                bot_text = await dispatcher.handle_user_turn(user_text)
-                turns += 1
+            try:
+                bot_text = await dispatcher.start()
+                turns = 0
+                while dispatcher.state is not State.END and turns < scenario.max_turns:
+                    user_text = await sim.reply_to(bot_text)
+                    if _is_persona_stop(user_text):
+                        # The persona just hung up. Reflect that in the
+                        # FSM terminal state so the expectation check
+                        # ("expected_terminal_state == END") matches what
+                        # actually happened: the call ended. Without this,
+                        # adding new stop-words would regress scenarios
+                        # whose bot mock relied on processing the user's
+                        # final utterance to reach END internally.
+                        dispatcher.state = State.END
+                        break
+                    bot_text = await dispatcher.handle_user_turn(user_text)
+                    turns += 1
+            except Exception as exc:
+                # Only act on openai.BadRequestError when --debug is on. Lazy
+                # import keeps the runner usable in --mock-llm mode without
+                # the openai package's full import cost on the error path.
+                if debug:
+                    try:
+                        from openai import BadRequestError as _BadRequestError
+                    except ImportError:
+                        _BadRequestError = None  # type: ignore[assignment,misc]
+                    if _BadRequestError is not None and isinstance(exc, _BadRequestError):
+                        path = _dump_history_on_bad_request(
+                            scenario_name=scenario.name, dispatcher=dispatcher
+                        )
+                        print(
+                            f"[debug] dispatcher.history dumped to {path}",
+                            file=sys.stderr,
+                        )
+                raise
         with Session(engine) as snap:
             after = {
                 "patient": _count_patients(snap),

@@ -30,8 +30,10 @@ def test_every_state_has_a_task_message() -> None:
         "CHOOSE_INTENT",
         "BOOK_FLOW",
         "CANCEL_FLOW",
+        "RESCHEDULE_FLOW",
         "CONFIRM_BOOK",
         "CONFIRM_CANCEL",
+        "CONFIRM_RESCHEDULE",
         "END",
     }
     assert set(TASK_MESSAGES) == expected

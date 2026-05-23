@@ -9,9 +9,11 @@ source of truth for which tools fire.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
 
@@ -49,6 +51,7 @@ from openai import AsyncOpenAI
 from pipecat.frames.frames import (
     EndFrame,
     Frame,
+    LLMMessagesAppendFrame,
     StartFrame,
     TranscriptionFrame,
     TTSSpeakFrame,
@@ -57,12 +60,21 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frameworks.rtvi import (
+    RTVIConfig,
+    RTVIObserver,
+    RTVIProcessor,
+)
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.elevenlabs.stt import ElevenLabsRealtimeSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 
+from prosper import prompts
+from prosper.console.audit import AuditJSONLWriter
+from prosper.console.bus import ConsoleBus
+from prosper.console.server import run as run_console_server
 from prosper.dispatcher import Dispatcher
 from prosper.ehr_client import EHRClient
 from prosper.flows import State
@@ -105,13 +117,12 @@ def _validated_ehr_url() -> str:
 # is fixed to "One moment." to preserve the dispatcher-processor unit test
 # contract; the other states use action-specific phrasings that hint at
 # *why* the bot paused.
+# Single source of truth for per-state filler copy lives in `prompts.py`
+# (keyed by state name); this dict re-keys by State enum for fast lookup in
+# the hot path. Adding a state? Update prompts.STATE_FILLERS — the assertion
+# below catches the drift on import.
 _STATE_FILLERS: dict[State, str] = {
-    State.IDENTIFY_PATIENT: "One moment.",
-    State.REGISTER_PATIENT: "Got it, one second.",
-    State.BOOK_FLOW: "Let me check.",
-    State.CANCEL_FLOW: "Looking that up.",
-    State.CONFIRM_BOOK: "One second.",
-    State.CONFIRM_CANCEL: "One second.",
+    State[name]: text for name, text in prompts.STATE_FILLERS.items()
 }
 _TOOL_FIRING_STATES = frozenset(_STATE_FILLERS)
 
@@ -137,6 +148,23 @@ if not _PIPECAT_VERSION.startswith("0."):
     )
 
 
+def _extract_user_text_from_messages(messages: list[dict[str, Any]] | None) -> str:
+    """Pull the user-role text from an LLMMessagesAppendFrame payload.
+
+    The RTVI `send-text` handler produces a single-element list
+    ``[{"role": "user", "content": "..."}]`` — but stay defensive in case
+    future client versions batch multiple messages.
+    """
+    if not messages:
+        return ""
+    for msg in messages:
+        if msg.get("role") == "user":
+            content = msg.get("content")
+            if isinstance(content, str):
+                return content.strip()
+    return ""
+
+
 class DispatcherProcessor(FrameProcessor):
     """Bridges Pipecat frames to our dispatcher.
 
@@ -159,6 +187,10 @@ class DispatcherProcessor(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, StartFrame) and not self._greeted:
+            # Forward StartFrame downstream first — TTS / output transport
+            # refuse all frames until they receive StartFrame. Previously we
+            # consumed it here, leaving the pipeline stuck in "connecting".
+            await self.push_frame(frame, direction)
             self._greeted = True
             opener = await self._dispatcher.start()
             if opener:
@@ -166,53 +198,85 @@ class DispatcherProcessor(FrameProcessor):
             return
 
         if isinstance(frame, TranscriptionFrame) and frame.text:
-            user_text = frame.text.strip()
-            if not user_text:
-                await self.push_frame(frame, direction)
-                return
-            self._stt_end_ts = time.perf_counter()
-            # HIPAA-adjacent: redact phone / DOB / email from log sinks. The
-            # dispatcher still sees the raw text — only the log line is masked.
-            logger.info("USER: {}", redact_pii(user_text))
-            # Filler speech: in tool-firing states the LLM round-trip + EHR
-            # call easily exceeds 800ms. Push a brief filler so the caller
-            # hears acknowledgement immediately rather than dead air.
-            filler = _STATE_FILLERS.get(self._dispatcher.state)
-            if filler is not None:
-                await self.push_frame(TTSSpeakFrame(filler))
-            # Wrap dispatcher in try/except: a stray exception (LLM 5xx after
-            # all retries exhausted, EHR timeout, JSON parse error, etc.) must
-            # NOT crash the Pipecat pipeline mid-call. Speak a recovery line
-            # and let the caller try again. We keep _stt_end_ts reset so we
-            # don't poison the next TTFT sample.
-            try:
-                reply = await self._dispatcher.handle_user_turn(user_text)
-            # last-resort guard for live calls; mid-pipeline crash would kill the WebRTC session
-            except Exception as e:
-                logger.exception("dispatcher.handle_user_turn raised: {}", e)
-                reply = "Sorry, I missed that — could you say it again?"
-            if self._stt_end_ts is not None:
-                ttft_ms = (time.perf_counter() - self._stt_end_ts) * 1000
-                self._dispatcher.timing.record(
-                    phase="ttft",
-                    duration_ms=ttft_ms,
-                    state=self._dispatcher.state.value,
-                    session_id=self._dispatcher.session_id,
-                    turn_id=self._dispatcher.turn_id,
-                )
-                self._stt_end_ts = None
-            logger.info("BOT[{}]: {}", self._dispatcher.state.value, redact_pii(reply))
-            if reply:
-                await self.push_frame(TTSSpeakFrame(reply))
+            await self._route_user_text(frame.text, frame=frame, direction=direction)
             return
+
+        # Chat textbox in the pipecat-react playground sends user input via
+        # the RTVI `send-text` message, which the RTVIProcessor turns into an
+        # LLMMessagesAppendFrame. We don't run an OpenAILLMService (our
+        # dispatcher owns the LLM loop), so without this branch the frame
+        # would just interrupt the bot without ever reaching the dispatcher
+        # — the chat UI would look broken even while voice works.
+        if isinstance(frame, LLMMessagesAppendFrame):
+            text = _extract_user_text_from_messages(frame.messages)
+            if text:
+                await self._route_user_text(text, frame=None, direction=direction)
+                return
 
         if isinstance(frame, EndFrame):
             logger.info("Call ended in state {}", self._dispatcher.state.value)
 
         await self.push_frame(frame, direction)
 
+    async def _route_user_text(
+        self,
+        raw_text: str,
+        *,
+        frame: Frame | None,
+        direction: FrameDirection,
+    ) -> None:
+        """Run one user utterance through the dispatcher → TTS pipeline.
 
-def _build_dispatcher(openai_client: AsyncOpenAI | None = None) -> Dispatcher:
+        ``frame`` is the original input frame when present (TranscriptionFrame
+        path); for synthetic inputs like chat-textbox ``send-text`` it is
+        None and we never forward the upstream frame downstream.
+        """
+        user_text = raw_text.strip()
+        if not user_text:
+            if frame is not None:
+                await self.push_frame(frame, direction)
+            return
+        self._stt_end_ts = time.perf_counter()
+        # HIPAA-adjacent: redact phone / DOB / email from log sinks. The
+        # dispatcher still sees the raw text — only the log line is masked.
+        logger.info("USER: {}", redact_pii(user_text))
+        filler = _STATE_FILLERS.get(self._dispatcher.state)
+        if filler is not None:
+            await self.push_frame(TTSSpeakFrame(filler))
+        try:
+            reply = await self._dispatcher.handle_user_turn(user_text)
+        # last-resort guard for live calls; mid-pipeline crash would kill the WebRTC session
+        except Exception as e:
+            logger.exception("dispatcher.handle_user_turn raised: {}", e)
+            reply = prompts.FALLBACK_LINES["dispatcher_crash"]
+        if self._stt_end_ts is not None:
+            ttft_ms = (time.perf_counter() - self._stt_end_ts) * 1000
+            self._dispatcher.timing.record(
+                phase="ttft",
+                duration_ms=ttft_ms,
+                state=self._dispatcher.state.value,
+                session_id=self._dispatcher.session_id,
+                turn_id=self._dispatcher.turn_id,
+            )
+            self._stt_end_ts = None
+        logger.info("BOT[{}]: {}", self._dispatcher.state.value, redact_pii(reply))
+        if reply:
+            await self.push_frame(TTSSpeakFrame(reply))
+
+
+def _build_dispatcher(
+    openai_client: AsyncOpenAI | None = None,
+    *,
+    bus: ConsoleBus | None = None,
+) -> Dispatcher:
+    """Construct the dispatcher used for one call.
+
+    A bus passed in here flows into the dispatcher's optional ``bus``
+    parameter; every event-publishing hook then fires for the operator
+    console. When tests or the eval runner build the dispatcher with no
+    bus, every publish site is a no-op — backwards compatible by
+    construction.
+    """
     client: Any = openai_client or AsyncOpenAI()
     ehr_base = _validated_ehr_url()
     ehr = EHRClient.for_http(ehr_base)
@@ -221,7 +285,7 @@ def _build_dispatcher(openai_client: AsyncOpenAI | None = None) -> Dispatcher:
         model=os.environ.get("PROSPER_BOT_MODEL", "gpt-4o-mini"),
         fallback_model=os.environ.get("PROSPER_BOT_FALLBACK_MODEL"),
     )
-    return Dispatcher(llm=llm, ehr_client=ehr)
+    return Dispatcher(llm=llm, ehr_client=ehr, bus=bus)
 
 
 async def _startup_health_check() -> None:
@@ -251,6 +315,24 @@ async def _startup_health_check() -> None:
         )
 
 
+@contextlib.asynccontextmanager
+async def _maybe_console_ctx(
+    bus: ConsoleBus | None,
+    audit: AuditJSONLWriter | None,
+) -> AsyncIterator[None]:
+    """Run the embedded console server iff a bus + audit were built.
+
+    Keeps `run_bot` linear — without this helper the `async with` stack
+    would need a conditional that is awkward to express in Python's
+    `async with`.
+    """
+    if bus is None or audit is None:
+        yield
+        return
+    async with run_console_server(bus, audit):
+        yield
+
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> None:
     await _startup_health_check()
     elevenlabs_key = os.environ["ELEVENLABS_API_KEY"]
@@ -263,19 +345,41 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         model="eleven_flash_v2_5",
     )
 
-    dispatcher = _build_dispatcher()
+    # Operator-console wiring. Opt-in via env so tests / eval runs that
+    # spin up a partial bot don't accidentally bind a port. Default off.
+    console_enabled = os.environ.get("PROSPER_CONSOLE_ENABLED", "1") == "1"
+    bus: ConsoleBus | None = None
+    audit: AuditJSONLWriter | None = None
+    if console_enabled:
+        bus = ConsoleBus()
+        audit = AuditJSONLWriter()
+
+    dispatcher = _build_dispatcher(bus=bus)
     # Own the EHR httpx client via async-with so it's released even if the
     # browser drops mid-call and on_client_disconnected never fires (e.g.
     # process killed by SIGTERM, transport crash, exception during pipeline
     # startup). Previously __aexit__ ran only inside the disconnect handler
     # → guaranteed leak on abrupt termination and on every connect-time
     # failure.
-    async with dispatcher._ehr:  # bot owns this httpx client's lifecycle for the call
+    # Stack the audit/console context around the EHR client so the
+    # operator UI sees events from the very first turn — and so the
+    # server is gracefully stopped even on exception paths. If the
+    # console is disabled (tests), `_maybe_console_ctx` yields a no-op.
+    async with (
+        dispatcher._ehr,  # bot owns this httpx client's lifecycle for the call
+        _maybe_console_ctx(bus, audit),
+    ):
         dispatcher_processor = DispatcherProcessor(dispatcher)
+
+        # RTVI handshake: pipecat-react clients block on the `bot-ready`
+        # event sent from this processor. Without it the UI shows "Agent
+        # connecting" forever even when audio is flowing.
+        rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
 
         pipeline = Pipeline(
             [
                 transport.input(),
+                rtvi,
                 stt,
                 dispatcher_processor,
                 tts,
@@ -285,7 +389,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         task = PipelineTask(
             pipeline,
             params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+            observers=[RTVIObserver(rtvi)],
         )
+
+        @rtvi.event_handler("on_client_ready")
+        async def on_client_ready(_rtvi):  # type: ignore[no-untyped-def]
+            # Acknowledge the RTVI handshake so pipecat-react clients leave
+            # the "Agent connecting" state and start rendering messages.
+            await rtvi.set_bot_ready()
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(_transport, _client):  # type: ignore[no-untyped-def]
@@ -329,7 +440,21 @@ async def bot(runner_args: RunnerArguments) -> None:
         "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
+            # VAD tuning for naturalness:
+            # - stop_secs=1.2: longer silence threshold so the bot doesn't
+            #   jump in during natural pauses between digits / sentences.
+            # - min_volume=0.4: was 0.6 — softer voices were getting missed,
+            #   the bot would then talk over the caller because it never
+            #   saw a user_started_speaking event to interrupt the TTS.
+            # - confidence=0.6: matched lower volume tier for better recall.
+            vad_analyzer=SileroVADAnalyzer(
+                params=VADParams(
+                    confidence=0.5,
+                    start_secs=0.15,
+                    stop_secs=1.2,
+                    min_volume=0.3,
+                ),
+            ),
         ),
     }
     transport = await create_transport(runner_args, transport_params)

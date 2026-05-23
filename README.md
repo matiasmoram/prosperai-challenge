@@ -29,6 +29,28 @@ make bot                  # http://localhost:7860  (Pipecat browser client)
 ```
 Open `http://localhost:7860`, click **Connect**, talk to the agent.
 
+While the bot is running, the **Operator Console** is also live at
+[`http://localhost:7861/console`](http://localhost:7861/console). It
+shows the FSM state, every tool call with its outcome and latency, the
+identified patient (PII redacted), slots offered, the live transcript,
+and the final outcome banner — split into a clinical pane (top) and a
+dev pane (bottom). Set `PROSPER_CONSOLE_ENABLED=0` to disable, or
+override the port with `PROSPER_CONSOLE_PORT=...`.
+
+Every call also writes an **append-only audit log** under `data/audit/`
+— one `<session_id>.jsonl` per call. Useful one-liners:
+
+```bash
+ls data/audit/                                              # list sessions
+jq '.type' data/audit/<session_id>.jsonl                    # one event type per line
+jq 'select(.type=="outcome")' data/audit/<session_id>.jsonl # final outcome only
+jq 'select(.type=="tool_call_end") | {tool: .payload.tool, code: .payload.code, ms: .payload.duration_ms}' \
+  data/audit/<session_id>.jsonl                             # tool timeline
+```
+
+All PII fields are masked at the event boundary (see ADR 004), so the
+JSONL is safe to share for audit / replay without further redaction.
+
 Or with Docker: `docker-compose up`.
 
 ## All commands
@@ -77,7 +99,16 @@ every push.
 | `PROSPER_DB_URL`             | `sqlite:///data/ehr.db`       | SQLAlchemy DSN. Swap to Postgres without code changes.                                   |
 | `PROSPER_BOT_MODEL`          | `gpt-4o-mini`                 | Primary LLM for the dispatcher.                                                          |
 | `PROSPER_BOT_FALLBACK_MODEL` | _unset_ (e.g. `gpt-4o`)       | Optional secondary model — tried once if the primary exhausts its retry budget.          |
+| `PROSPER_EVAL_MODEL`         | `gpt-4o-mini`                 | Model used by the eval judge (`evals/judge.py`) and persona simulator (`evals/sim.py`). Live evals reuse `PROSPER_BOT_MODEL` for the dispatcher, mirroring `bot.py`. |
 | `PROSPER_BOT_ENTRYPOINT`     | _unset_ (set to `1` in prod)  | When `1`, missing required env vars `SystemExit(2)` *before* the 17 s pipecat import wall instead of crashing mid-call. Tests deliberately leave it unset so imports don't blow up. |
+| `PROSPER_CONSOLE_ENABLED`    | `1`                           | Operator Console on/off. Set to `0` to skip the second uvicorn (useful for tests or headless CI). |
+| `PROSPER_CONSOLE_PORT`       | `7861`                        | TCP port for the Operator Console. One above the Pipecat browser client (`7860`) — adjacent and easy to remember. |
+| `PROSPER_CONSOLE_HOST`       | `127.0.0.1`                   | Bind address. Override to `0.0.0.0` behind a reverse proxy. |
+| `PROSPER_CONSOLE_AUDIT_ROOT` | `data/audit`                  | Directory holding the per-session JSONL audit files. |
+| `PROSPER_CONSOLE_HEARTBEAT_S`| `15.0`                        | SSE keep-alive interval. Lower for laptop demos, higher if proxies drop on idle. |
+| `PROSPER_CONSOLE_REPLAY_SPEED`| `1.0`                        | Replay pacing. `1.0` = real-time, `0.0` = as-fast-as-possible. |
+| `PROSPER_CONSOLE_REPLAY_MAX_GAP_S`| `5.0`                    | Cap on any single replay pause — even a 10-minute idle in the original call won't stall the replay. |
+| `PROSPER_CONSOLE_QUEUE_DEPTH`| `256`                         | Per-subscriber bus queue depth. Sized for a 60-s connection hiccup at the observed publish rate. |
 
 ## Project layout
 ```

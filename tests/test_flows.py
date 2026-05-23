@@ -11,8 +11,10 @@ def test_all_states_present() -> None:
         State.CHOOSE_INTENT,
         State.BOOK_FLOW,
         State.CANCEL_FLOW,
+        State.RESCHEDULE_FLOW,
         State.CONFIRM_BOOK,
         State.CONFIRM_CANCEL,
+        State.CONFIRM_RESCHEDULE,
         State.END,
     }
 
@@ -27,8 +29,13 @@ def test_tool_whitelist_per_state() -> None:
     assert ALLOWED_TOOLS[State.CHOOSE_INTENT] == set()
     assert ALLOWED_TOOLS[State.BOOK_FLOW] == {"list_availability_slots"}
     assert ALLOWED_TOOLS[State.CANCEL_FLOW] == {"get_upcoming_appointments"}
+    assert ALLOWED_TOOLS[State.RESCHEDULE_FLOW] == {
+        "get_upcoming_appointments",
+        "list_availability_slots",
+    }
     assert ALLOWED_TOOLS[State.CONFIRM_BOOK] == {"create_appointment"}
     assert ALLOWED_TOOLS[State.CONFIRM_CANCEL] == {"cancel_appointment"}
+    assert ALLOWED_TOOLS[State.CONFIRM_RESCHEDULE] == {"reschedule_appointment"}
     assert ALLOWED_TOOLS[State.END] == set()
 
 
@@ -39,11 +46,17 @@ def test_transitions_form_valid_graph() -> None:
 
 
 def test_no_state_can_reach_a_write_tool_directly() -> None:
-    writes = {"create_patient", "create_appointment", "cancel_appointment"}
+    writes = {
+        "create_patient",
+        "create_appointment",
+        "cancel_appointment",
+        "reschedule_appointment",
+    }
     for state, tools in ALLOWED_TOOLS.items():
         if state in (
             State.CONFIRM_BOOK,
             State.CONFIRM_CANCEL,
+            State.CONFIRM_RESCHEDULE,
             State.REGISTER_PATIENT,
         ):
             continue

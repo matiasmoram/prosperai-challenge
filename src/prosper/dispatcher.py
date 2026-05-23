@@ -17,17 +17,22 @@ read.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
+from prosper.console.bus import ConsoleBus
+from prosper.console.events import EventType, make_event
 from prosper.ehr_client import EHRClient
 from prosper.flows import ALLOWED_TOOLS, TRANSITIONS, State
+from prosper.observability.redact import mask_name, mask_phone
 from prosper.observability.timing import TimingCollector
-from prosper.prompts import CLINIC_PERSONA, TASK_MESSAGES
+from prosper.prompts import CLINIC_PERSONA, FALLBACK_LINES, build_task_message
 from prosper.result import Err, Result, is_err, is_ok
 from prosper.tools import HANDLERS, TOOL_SCHEMAS
 
@@ -76,37 +81,133 @@ class SessionMemory:
     identified_patient: dict[str, Any] | None = None
     last_slots: list[dict[str, Any]] = field(default_factory=list)
     last_upcoming_appointments: list[dict[str, Any]] = field(default_factory=list)
+    # Set when caller's wording implies reschedule rather than plain cancel
+    # ("I want to reschedule", "move my appointment"). On a successful
+    # ``cancel_appointment`` we then auto-transition into BOOK_FLOW instead
+    # of ending the call, so the same call can swap out an appointment.
+    wants_reschedule: bool = False
 
 
 _AFFIRM = re.compile(
     r"\b(yes|yeah|yep|yup|sure|correct|that'?s right|please do|go ahead|sounds good)\b", re.I
 )
 _DENY = re.compile(r"\b(no|nope|nah|cancel that|stop|wrong)\b", re.I)
-_CANCEL_INTENT = re.compile(r"\b(cancel|reschedule|move)\b", re.I)
-_BOOK_INTENT = re.compile(r"\b(book|schedule|new appointment|new visit|set up)\b", re.I)
+# Cancel/reschedule intent — broadened so phrasings like "take my appointment
+# off the schedule", "drop my appointment", "remove the booking", "get rid of
+# my visit", "delete my appointment" route correctly. Originally only matched
+# `cancel|reschedule|move`, which missed real-eval personas (see ERRORS.md /
+# `cancel_when_nothing_to_cancel`).
+_CANCEL_INTENT = re.compile(
+    r"\b(?:cancel\w*|reschedul\w*|move\w*|take[^.]*off|drop\w*|"
+    r"remove\w*|delete\w*|get rid of|won'?t make it|can'?t make it|"
+    r"not coming|skip\b)",
+    re.I,
+)
+# Subset of cancel intent that also implies booking a replacement. We honour
+# this in CANCEL_FLOW so the call ends in BOOK_FLOW after the cancellation,
+# not END. Plain "cancel" stays single-action by default.
+_RESCHEDULE_INTENT = re.compile(
+    r"(?:\breschedul\w*|\bmove\s+(?:my|the)|\bchange\s+(?:my|the)|"
+    r"\bswap\b|\bpush back\b|\bpush.*to)",
+    re.I,
+)
+_BOOK_INTENT = re.compile(
+    r"\b(book|schedule|appointment|new appointment|new visit|set up|"
+    r"see (?:a |the )?(?:doctor|provider|therapist)|sign up|get in|come in)\b",
+    re.I,
+)
+# Universal goodbye intent — hanging up is always legal from any state, so a
+# match routes us to END regardless of where we are. Split into two tiers
+# to avoid the "never mind the insurance, I want to book" false positive
+# that aborted a valid booking pre-fix.
+#
+# Tier 1: unambiguous explicit goodbyes — match ANYWHERE in the utterance.
+# "ok bye let's stop", "no, goodbye then" — these are always sign-offs.
+_GOODBYE_HARD = re.compile(
+    r"\b(?:bye|goodbye|hang up|end (?:the )?call)\b",
+    re.I,
+)
+# Tier 2: softer sign-offs that can appear mid-utterance with a totally
+# different meaning ("never mind the insurance, book me"). Require they sit
+# at the END of the utterance so context is implicitly "wrapping up".
+_GOODBYE_INTENT_TRAILING = re.compile(
+    r"(?:\bnevermind\b|never mind|see you|talk later|"
+    r"that'?s all|thanks bye|i'?m done|no thanks|no thank you)"
+    r"\s*[.!?…]*\s*$",
+    re.I,
+)
+
+
+def _has_goodbye_intent(text: str) -> bool:
+    """Return True if the user signalled they want to end the call."""
+    return bool(_GOODBYE_HARD.search(text) or _GOODBYE_INTENT_TRAILING.search(text))
+
+
+# Matches the bracketed handles `_redact_for_llm` emits — `[1]`, `1`, `#1`,
+# `slot 1`, `appointment 2`. The LLM never receives raw UUIDs (audit A3), so
+# this is the only legitimate way it can refer to a slot or appointment.
+_HANDLE_RE = re.compile(
+    r"^\s*[\[#]?\s*(?:slot|appointment|appt|option|number)?\s*[#:]?\s*(\d+)\s*\]?\s*$",
+    re.I,
+)
+
+
+def _maybe_handle_index(candidate: Any) -> int | None:
+    """Return the 0-based index encoded by a handle string, or None.
+
+    Recognises ``"1"``, ``"[2]"``, ``"#3"``, ``"slot 1"``, ``"appointment 2"``.
+    Returns ``None`` for full UUIDs or anything that doesn't parse — so the
+    caller can safely pass the result through to the legacy UUID path.
+    """
+    if not isinstance(candidate, str):
+        return None
+    match = _HANDLE_RE.match(candidate)
+    if match is None:
+        return None
+    return int(match.group(1)) - 1
+
+
+# Sentinel used as `from_state` in the very first state_change event when the
+# call begins. Module-level constant so the value lives in one place — the
+# frontend reads the spec, not the dispatcher source.
+_INIT_STATE_SENTINEL: Final[str] = "(init)"
 
 
 def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
     """Compact, UUID-free string the LLM can safely consume.
 
-    The LLM doesn't need to see slot_ids or appointment_ids — it should never
-    read them aloud and never include them in next-turn arguments (the
-    dispatcher carries them in `memory`). We feed the LLM a human-readable
-    summary that mentions date/time/provider/name only.
+    The LLM never sees raw slot_ids or appointment_ids (audit A3 — they
+    must not be read aloud and must not leak via the model's next-turn
+    arguments). Instead each list is enumerated with bracketed handles
+    ``[1]``, ``[2]`` … that the model passes back as ``slot_id`` /
+    ``appointment_id``; the dispatcher's `_resolve_memory_handles`
+    swaps the handle for the real UUID before any HTTP call.
     """
     if name == "list_availability_slots":
         slots = value.get("slots", [])
+        next_day = value.get("next_day_with_slots")
+        asked_date = value.get("asked_date", "that date")
+        if not slots and next_day:
+            return (
+                f"no slots on {asked_date}; next available is "
+                f"{next_day['date']} — slots: "
+                + "; ".join(
+                    f"[{i + 1}] {s['start_at_iso']} with {s['provider_name']}"
+                    for i, s in enumerate(next_day["slots"][:6])
+                )
+            )
         if not slots:
-            return "no slots available for that date"
+            return f"no slots available for {asked_date} or the next 6 days"
         return "available slots: " + "; ".join(
-            f"{s['start_at_iso']} with {s['provider_name']}" for s in slots[:6]
+            f"[{i + 1}] {s['start_at_iso']} with {s['provider_name']}"
+            for i, s in enumerate(slots[:6])
         )
     if name == "get_upcoming_appointments":
         appts = value.get("appointments", [])
         if not appts:
             return "no upcoming appointments"
         return "upcoming: " + "; ".join(
-            f"#{i + 1} {a['start_at']} with {a['provider_name']}" for i, a in enumerate(appts)
+            f"[{i + 1}] {a['start_at']} with {a['provider_name']}" for i, a in enumerate(appts)
         )
     if name in ("find_patient_by_phone", "find_patient_by_name_dob"):
         patients = value.get("patients", [])
@@ -124,6 +225,8 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
         return f"booked {value['start_at']} with {value['provider_name']}"
     if name == "cancel_appointment":
         return "appointment cancelled"
+    if name == "reschedule_appointment":
+        return f"rescheduled to {value['start_at']} with {value['provider_name']}"
     return "ok"
 
 
@@ -134,7 +237,23 @@ class Dispatcher:
         llm: LLMClientProtocol,
         ehr_client: EHRClient,
         session_id: str | None = None,
+        bus: ConsoleBus | None = None,
     ) -> None:
+        """Build a dispatcher.
+
+        Args:
+            llm: LLM client implementing `LLMClientProtocol`.
+            ehr_client: EHR HTTP client.
+            session_id: Stable session id; auto-generated UUID if omitted.
+                Constrained to ``[A-Za-z0-9_-]+`` by the operator console's
+                ``check_session_id`` — UUIDv4's hex+dash shape passes.
+            bus: Optional operator-console event bus. When supplied, the
+                dispatcher publishes a typed `ConsoleEvent` at each of the
+                8 hook points documented in
+                ``docs/superpowers/specs/2026-05-20-operator-console-design.md``
+                §3.3. When ``None`` (tests, eval runner), every publish
+                site is a no-op — the dispatcher behaves exactly as before.
+        """
         self._llm = llm
         self._ehr = ehr_client
         self.state: State = State.GREETING
@@ -153,12 +272,84 @@ class Dispatcher:
         # Propagate the session id into the EHR client so its X-Request-Id
         # header includes it on every httpx call.
         self._ehr.set_session_id(self.session_id)
+        self._bus: ConsoleBus | None = bus
+        # Track which session ids we already warned about for bus.publish
+        # failures so that we don't spam the logs on every event. The bus
+        # itself dedups overflow warnings; this set is the safety net for
+        # any unexpected publish-side exception that bypasses the bus.
+        self._bus_publish_warned: set[str] = set()
+        # Strong reference to in-flight publish tasks. Without this, an
+        # asyncio implementation detail can GC the task before completion
+        # and emit "Task was destroyed but it is pending" warnings.
+        self._inflight_publishes: set[asyncio.Task[None]] = set()
+
+    def _publish(self, type_: EventType, payload: dict[str, Any]) -> None:
+        """Fire-and-forget publish of a `ConsoleEvent` to the operator bus.
+
+        No-op when no bus was injected (tests / eval runner). Catches any
+        per-event validation failure rather than crashing the call path —
+        operator-console telemetry must never break the voice agent.
+        The bus already enforces PII redaction on `_masked` fields, so a
+        forgotten `mask_name` call here surfaces as a logged ValueError.
+        """
+        if self._bus is None:
+            return
+        try:
+            event = make_event(type_, session_id=self.session_id, payload=payload)
+        except ValueError:
+            if self.session_id not in self._bus_publish_warned:
+                self._bus_publish_warned.add(self.session_id)
+                # Stash in transcript so an eval reviewer can grep for it
+                # without scraping logs; bus drop messages are also logged
+                # at WARNING level from `ConsoleBus._enqueue_with_drop`.
+                self.transcript.append(
+                    {"kind": "console_publish_failed", "type": type_, "state": self.state.value}
+                )
+            return
+        # Fire-and-forget: the bus is fully non-blocking (bounded queues
+        # with overflow-drop semantics), so we don't await the publish.
+        # We keep a reference to the task on `self._inflight_publishes`
+        # so the garbage collector cannot finalise it mid-await, which
+        # would otherwise log "Task was destroyed but it is pending".
+        # `get_running_loop` is the correct call inside an async frame
+        # (Python 3.10+); `get_event_loop` is deprecated for this use
+        # and can silently return a different loop under embedded
+        # runtimes like Pipecat. If somehow called outside an async
+        # frame, fall back to a silent no-op rather than crashing the
+        # call path — telemetry must never break the voice agent.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop — not callable in production paths, but a
+            # defensive fallback for someone wiring a sync test harness.
+            return
+        task = loop.create_task(self._bus.publish(event))
+        self._inflight_publishes.add(task)
+        task.add_done_callback(self._inflight_publishes.discard)
 
     async def start(self) -> str:
         """Run the GREETING state's opening turn (no user input yet)."""
+        # Publish the implicit initial state so the operator console can
+        # render the GREETING badge from the very first connection.
+        self._publish(
+            "state_change",
+            {
+                "from_state": _INIT_STATE_SENTINEL,
+                "to_state": self.state.value,
+                "trigger": "start",
+            },
+        )
         return await self._llm_turn()
 
     async def handle_user_turn(self, user_text: str) -> str:
+        """Process one user utterance; return the bot's spoken reply.
+
+        Publishes a `transcript_turn` event before transition + LLM turn
+        so the operator console renders the caller's words even on calls
+        that crash mid-handling. PII in `user_text` is the operator's
+        responsibility — clinic policy may want it redacted in production,
+        but during the demo the operator legitimately needs the raw text.
+        """
         self.turn_id += 1
         # Push the per-turn request-id prefix into the EHR client so the
         # X-Request-Id header on every tool's HTTP call is greppable
@@ -166,6 +357,10 @@ class Dispatcher:
         self._ehr.set_turn_id(self.turn_id)
         self.history.append({"role": "user", "content": user_text})
         self.transcript.append({"kind": "user", "text": user_text})
+        self._publish(
+            "transcript_turn",
+            {"role": "user", "text": user_text, "turn_id": self.turn_id},
+        )
         self._maybe_transition_from_user_text(user_text)
         return await self._llm_turn()
 
@@ -173,7 +368,14 @@ class Dispatcher:
         tools = [TOOL_SCHEMAS[name] for name in sorted(ALLOWED_TOOLS[self.state])]
         msgs = self._messages_for_llm()
         reply = LLMReply(text="")
+        # Per-turn dedupe: a misbehaving model occasionally fires the same tool
+        # with identical args 3-5x in one turn (seen with list_availability_slots
+        # when results are empty). Allowing one retry is fine — beyond that we
+        # short-circuit with a synthetic tool response telling the LLM the call
+        # was suppressed, which steers it back to speaking to the user.
+        tool_call_signatures: dict[str, int] = {}
         for _ in range(4):
+            llm_started = time.perf_counter()
             async with self.timing.measure(
                 phase="llm",
                 state=self.state.value,
@@ -181,6 +383,8 @@ class Dispatcher:
                 turn_id=self.turn_id,
             ):
                 reply = await self._llm.generate(state=self.state.value, history=msgs, tools=tools)
+            llm_duration_ms = (time.perf_counter() - llm_started) * 1000.0
+            self._publish("latency_tick", {"phase": "llm", "duration_ms": llm_duration_ms})
             if reply.usage is not None:
                 self.cached_prompt_tokens_total += reply.usage.cached_prompt_tokens
                 self.prompt_tokens_total += reply.usage.prompt_tokens
@@ -195,6 +399,11 @@ class Dispatcher:
                     "prompt_tokens": (reply.usage.prompt_tokens if reply.usage else 0),
                 }
             )
+            if reply.text:
+                self._publish(
+                    "transcript_turn",
+                    {"role": "bot", "text": reply.text, "turn_id": self.turn_id},
+                )
             # OpenAI tool-call schema is strict: if the assistant emits
             # tool_calls, the message MUST carry the tool_calls field, and
             # every subsequent role:tool response MUST reference the same
@@ -215,6 +424,14 @@ class Dispatcher:
             self.history.append(assistant_msg)
 
             if not reply.tool_calls:
+                # CHOOSE_INTENT has no tools, so the LLM's free-text reply
+                # is the only intent signal we get. Catch acknowledgements
+                # ("sure, let's find a time" / "okay, let me pull up your
+                # appointments") that the user-text regex missed and route
+                # to the right state — otherwise the bot ad-libs a full
+                # booking from CHOOSE_INTENT without ever calling tools.
+                if self.state is State.CHOOSE_INTENT and reply.text:
+                    self._maybe_transition_from_bot_text(reply.text)
                 break
 
             for call in reply.tool_calls:
@@ -237,6 +454,27 @@ class Dispatcher:
                         }
                     )
                     continue
+                signature = json.dumps(
+                    {"name": call.name, "args": call.arguments},
+                    sort_keys=True,
+                    default=str,
+                )
+                tool_call_signatures[signature] = tool_call_signatures.get(signature, 0) + 1
+                if tool_call_signatures[signature] > 2:
+                    self.transcript.append({"kind": "tool_repeated_blocked", "name": call.name})
+                    self.history.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": (
+                                f"BLOCKED: '{call.name}' already returned the same "
+                                "result twice this turn. Do NOT call it again — "
+                                "respond to the user with what you know (e.g. that "
+                                "date is unavailable, ask for a different one)."
+                            ),
+                        }
+                    )
+                    continue
                 result = await self._execute_tool(call)
                 self._record_tool_result(call.name, result, tool_call_id=call.id)
                 self._maybe_transition_from_tool(call.name, result)
@@ -254,13 +492,19 @@ class Dispatcher:
             # turn can drive the conversation forward, and record the event
             # in the transcript so eval reviewers can spot it.
             if not reply.text:
-                self.transcript.append(
-                    {"kind": "llm_loop_exhausted", "state": self.state.value}
-                )
-                reply = LLMReply(text="Sorry, I'm having trouble — could you repeat that?")
+                self.transcript.append({"kind": "llm_loop_exhausted", "state": self.state.value})
+                reply = LLMReply(text=FALLBACK_LINES["llm_loop_exhausted"])
         return reply.text
 
     async def _execute_tool(self, call: ToolCall) -> Result[dict[str, Any]]:
+        """Run one tool handler under a timing span; publish start + end events.
+
+        Emits `tool_call_start` before the handler runs and
+        `tool_call_end` after, with the wall-clock duration. The redacted
+        args we publish contain only structural metadata (the keys, plus
+        whitelist of safe values) — the raw `args` may carry a phone
+        number or DOB the LLM is feeding us.
+        """
         handler = HANDLERS[call.name]
         args = dict(call.arguments)
         # Test convenience: __use_first_slot__ pulls the slot id we just listed.
@@ -269,6 +513,11 @@ class Dispatcher:
             args["patient_id"] = (self.memory.identified_patient or {}).get("id") or args.get(
                 "patient_id"
             )
+        # Resolve bracketed handles the LLM passes (`slot_id="1"`,
+        # `appointment_id="[2]"`) back to the real UUID held in
+        # SessionMemory. This is the production path — the LLM only ever
+        # sees `[N]` handles (audit A3 keeps UUIDs out of the model).
+        self._resolve_memory_handles(call.name, args)
         # Defensive: drop any kwargs the handler doesn't accept. An LLM occasionally
         # invents extra fields (`mystery_field=42`); without this filter the
         # `handler(**args)` raises TypeError and crashes the whole turn.
@@ -278,14 +527,62 @@ class Dispatcher:
         # on top of the EHR's own validation.
         guard_err = self._validate_against_memory(call.name, args)
         if guard_err is not None:
+            self._publish(
+                "tool_call_start",
+                {
+                    "tool": call.name,
+                    "args_redacted": _redact_tool_args(call.name, args),
+                    "call_id": call.id,
+                },
+            )
+            self._publish(
+                "tool_call_end",
+                {
+                    "tool": call.name,
+                    "call_id": call.id,
+                    "outcome": "err",
+                    "code": guard_err.code,
+                    "duration_ms": 0.0,
+                },
+            )
             return guard_err
+        self._publish(
+            "tool_call_start",
+            {
+                "tool": call.name,
+                "args_redacted": _redact_tool_args(call.name, args),
+                "call_id": call.id,
+            },
+        )
+
+        started = time.perf_counter()
         async with self.timing.measure(
             phase=f"tool:{call.name}",
             state=self.state.value,
             session_id=self.session_id,
             turn_id=self.turn_id,
         ):
-            return await handler(self._ehr, **args)
+            result = await handler(self._ehr, **args)
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        if is_ok(result):
+            outcome_label = "ok"
+            err_code: str | None = None
+        else:
+            assert is_err(result)  # noqa: S101 — TypeGuard narrowing for mypy
+            outcome_label = "err"
+            err_code = result.code
+        self._publish(
+            "tool_call_end",
+            {
+                "tool": call.name,
+                "call_id": call.id,
+                "outcome": outcome_label,
+                "code": err_code,
+                "duration_ms": duration_ms,
+            },
+        )
+        self._publish("latency_tick", {"phase": f"tool:{call.name}", "duration_ms": duration_ms})
+        return result
 
     @staticmethod
     def _filter_handler_kwargs(handler: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -297,10 +594,45 @@ class Dispatcher:
         allowed = {
             name
             for name, p in params.items()
-            if p.kind
-            in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            if p.kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
         }
         return {k: v for k, v in args.items() if k in allowed}
+
+    def _resolve_memory_handles(self, name: str, args: dict[str, Any]) -> None:
+        """Swap LLM-supplied handles (``"1"``, ``"[2]"``) for the real UUIDs.
+
+        The LLM only sees bracketed handles in `_redact_for_llm` output
+        (audit A3 — no UUIDs leak to the model). It must pass those same
+        handles back in `create_appointment.slot_id` and
+        `cancel_appointment.appointment_id`; we map them to the real ids
+        held in ``SessionMemory`` before validation / HTTP.
+        """
+        if name == "create_appointment":
+            idx = _maybe_handle_index(args.get("slot_id"))
+            if idx is not None and 0 <= idx < len(self.memory.last_slots):
+                args["slot_id"] = self.memory.last_slots[idx]["slot_id"]
+            # Common LLM slip: pass `slot_id` but forget `patient_id`. Auto-fill
+            # from the identified patient so we don't bounce the call with a
+            # `missing_patient_id` error the user would hear as confusion.
+            if not args.get("patient_id"):
+                identified = self.memory.identified_patient or {}
+                if identified.get("id"):
+                    args["patient_id"] = identified["id"]
+        elif name == "cancel_appointment":
+            idx = _maybe_handle_index(args.get("appointment_id"))
+            if idx is not None and 0 <= idx < len(self.memory.last_upcoming_appointments):
+                args["appointment_id"] = self.memory.last_upcoming_appointments[idx]["id"]
+        elif name == "reschedule_appointment":
+            idx_appt = _maybe_handle_index(args.get("appointment_id"))
+            if idx_appt is not None and 0 <= idx_appt < len(self.memory.last_upcoming_appointments):
+                args["appointment_id"] = self.memory.last_upcoming_appointments[idx_appt]["id"]
+            idx_slot = _maybe_handle_index(args.get("slot_id"))
+            if idx_slot is not None and 0 <= idx_slot < len(self.memory.last_slots):
+                args["slot_id"] = self.memory.last_slots[idx_slot]["slot_id"]
+        elif name == "get_upcoming_appointments" and not args.get("patient_id"):
+            identified = self.memory.identified_patient or {}
+            if identified.get("id"):
+                args["patient_id"] = identified["id"]
 
     def _validate_against_memory(self, name: str, args: dict[str, Any]) -> Err | None:
         if name == "create_appointment":
@@ -311,7 +643,9 @@ class Dispatcher:
             if not slot_id:
                 return Err(
                     code="missing_slot_id",
-                    message="create_appointment requires slot_id; call list_availability_slots first",
+                    message=(
+                        "create_appointment requires slot_id; call list_availability_slots first"
+                    ),
                     retryable=True,
                 )
             if not args.get("patient_id"):
@@ -344,7 +678,10 @@ class Dispatcher:
             if not appt_id:
                 return Err(
                     code="missing_appointment_id",
-                    message="cancel_appointment requires appointment_id; call get_upcoming_appointments first",
+                    message=(
+                        "cancel_appointment requires appointment_id; "
+                        "call get_upcoming_appointments first"
+                    ),
                     retryable=True,
                 )
             known = {a["id"] for a in self.memory.last_upcoming_appointments}
@@ -355,6 +692,48 @@ class Dispatcher:
                         f"appointment_id {appt_id!r} not in "
                         f"last_upcoming_appointments — call "
                         f"get_upcoming_appointments first"
+                    ),
+                    retryable=True,
+                )
+        elif name == "reschedule_appointment":
+            appt_id = args.get("appointment_id")
+            slot_id = args.get("slot_id")
+            if not appt_id:
+                return Err(
+                    code="missing_appointment_id",
+                    message=(
+                        "reschedule_appointment requires appointment_id; "
+                        "call get_upcoming_appointments first"
+                    ),
+                    retryable=True,
+                )
+            if not slot_id:
+                return Err(
+                    code="missing_slot_id",
+                    message=(
+                        "reschedule_appointment requires slot_id; "
+                        "call list_availability_slots first"
+                    ),
+                    retryable=True,
+                )
+            known_appts = {a["id"] for a in self.memory.last_upcoming_appointments}
+            if appt_id not in known_appts:
+                return Err(
+                    code="hallucinated_appointment_id",
+                    message=(
+                        f"appointment_id {appt_id!r} not in "
+                        f"last_upcoming_appointments — call "
+                        f"get_upcoming_appointments first"
+                    ),
+                    retryable=True,
+                )
+            known_slots = {s["slot_id"] for s in self.memory.last_slots}
+            if slot_id not in known_slots:
+                return Err(
+                    code="hallucinated_slot_id",
+                    message=(
+                        f"slot_id {slot_id!r} not in last_slots — call "
+                        f"list_availability_slots first"
                     ),
                     retryable=True,
                 )
@@ -383,20 +762,37 @@ class Dispatcher:
                 }
             )
             if name == "list_availability_slots":
-                self.memory.last_slots = result.value["slots"]
+                # Empty primary date + auto-scan hit → store the fallback day's
+                # slots so create_appointment doesn't reject them as
+                # hallucinated. The LLM will have read the fallback date aloud
+                # and the caller will pick a slot_id from that list.
+                fallback = result.value.get("next_day_with_slots")
+                primary_slots = result.value.get("slots") or []
+                self.memory.last_slots = (
+                    primary_slots if primary_slots else (fallback or {}).get("slots", [])
+                )
+                if self.memory.last_slots:
+                    self._publish_slots_offered(self.memory.last_slots)
             elif name == "get_upcoming_appointments":
                 self.memory.last_upcoming_appointments = result.value["appointments"]
             elif name in ("find_patient_by_phone", "find_patient_by_name_dob"):
                 patients = result.value.get("patients", [])
                 if len(patients) == 1:
                     self.memory.identified_patient = patients[0]
+                    self._publish_patient_identified(patients[0])
             elif name == "create_patient":
                 self.memory.identified_patient = {
                     "id": result.value["patient_id"],
                     "first_name": result.value["first_name"],
                     "last_name": result.value["last_name"],
                     "phone": result.value["phone"],
+                    # `dob` is in the create_patient response — propagate
+                    # so `_publish_patient_identified` reports the real
+                    # year, not `0` (which would render as "year 0" in
+                    # the operator console).
+                    "dob": result.value.get("dob", ""),
                 }
+                self._publish_patient_identified(self.memory.identified_patient)
         else:
             assert is_err(result)  # noqa: S101 — TypeGuard narrowing for the type checker
             self.transcript.append(
@@ -416,15 +812,87 @@ class Dispatcher:
                 }
             )
 
+    def _maybe_transition_from_bot_text(self, bot_text: str) -> None:
+        """Fallback transition for CHOOSE_INTENT when the user-text regex missed.
+
+        Scans the bot's own reply for phrases that betray which flow it
+        thinks the call is in (e.g. "check availability" → booking,
+        "pull up your appointments" → cancellation). Without this the LLM
+        will happily fabricate a whole booking conversation while the FSM
+        still has zero tools available.
+        """
+        lower = bot_text.lower()
+        # The CHOOSE_INTENT opener almost always offers BOTH options
+        # ("book a new visit or cancel an existing one?"). That's a menu,
+        # not a commitment — never transition on it. A clear `book ... or
+        # ... cancel` (in either order) is the canonical menu shape.
+        if re.search(r"\b(book|schedul)\w*\b[^.?!]{0,80}\bor\b[^.?!]{0,80}\bcancel", lower):
+            return
+        if re.search(r"\bcancel\w*\b[^.?!]{0,80}\bor\b[^.?!]{0,80}\b(book|schedul)", lower):
+            return
+        book_hints = (
+            "availab",
+            "what day",
+            "what date",
+            "what time",
+            "let's find a time",
+            "let me find a time",
+            "find a time",
+            "schedule a",
+        )
+        cancel_hints = (
+            "pull up your appointments",
+            "find your appointment",
+            "which appointment",
+            "cancel that",
+            "look up your booking",
+            "current bookings",
+        )
+        if any(p in lower for p in cancel_hints):
+            self._transition("wants_cancel")
+        elif any(p in lower for p in book_hints):
+            self._transition("wants_book")
+
     def _maybe_transition_from_user_text(self, user_text: str) -> None:
+        # Universal goodbye intent — hanging up is always legal. Checked
+        # FIRST so "bye" at GREETING goes straight to END instead of
+        # auto-transitioning into IDENTIFY_PATIENT. Relies on TRANSITIONS
+        # exposing a `goodbye` label from every non-terminal state; if a
+        # state doesn't, `_transition` is a no-op (safe by construction).
+        if _has_goodbye_intent(user_text):
+            self._transition("goodbye")
+            if self.state is State.END:
+                return
         if self.state is State.GREETING:
             self._transition("go_identify")
             return
+        # Track reschedule intent from ANY state — caller can say "move my
+        # appointment" mid-call. The flag triggers the cancel→rebook
+        # auto-transition once `cancel_appointment` returns Ok.
+        if _RESCHEDULE_INTENT.search(user_text):
+            self.memory.wants_reschedule = True
         if self.state is State.CHOOSE_INTENT:
-            if _CANCEL_INTENT.search(user_text):
+            # Reschedule is a sub-intent of cancel — check it first so
+            # "move my appointment" routes to the atomic RESCHEDULE_FLOW
+            # rather than falling into CANCEL_FLOW and then chaining
+            # cancel-then-book (which can lose the original on failure).
+            if _RESCHEDULE_INTENT.search(user_text):
+                self.memory.wants_reschedule = False
+                self._transition("wants_reschedule")
+            elif _CANCEL_INTENT.search(user_text):
                 self._transition("wants_cancel")
             elif _BOOK_INTENT.search(user_text):
                 self._transition("wants_book")
+        # In a confirm state, a clear "no" / "different time" routes back to
+        # the flow state so the LLM can re-offer choices. Without this, the
+        # caller hears the bot wait silently because no transition fires and
+        # CONFIRM_* has no flow tools left to call.
+        elif (
+            (self.state is State.CONFIRM_BOOK and _DENY.search(user_text))
+            or (self.state is State.CONFIRM_CANCEL and _DENY.search(user_text))
+            or (self.state is State.CONFIRM_RESCHEDULE and _DENY.search(user_text))
+        ):
+            self._transition("abort")
 
     def _maybe_transition_from_tool(self, tool_name: str, result: Result[dict[str, Any]]) -> None:
         if self.state is State.IDENTIFY_PATIENT and tool_name in (
@@ -437,12 +905,46 @@ class Dispatcher:
                     self._transition("patient_found")
                 elif tool_name == "find_patient_by_name_dob" and not patients:
                     self._transition("no_match")
+            elif tool_name == "find_patient_by_name_dob":
+                # An Err on the name+DOB fallback (e.g. unparseable DOB) means
+                # there's no useful identity left to try in this state — route
+                # to REGISTER_PATIENT so the LLM can collect the details fresh
+                # instead of looping inside IDENTIFY_PATIENT forever.
+                self._transition("no_match")
         elif self.state is State.REGISTER_PATIENT and tool_name == "create_patient":
             if is_ok(result):
                 self._transition("registered")
         elif self.state is State.BOOK_FLOW and tool_name == "list_availability_slots":
             if is_ok(result):
-                self._transition("slot_chosen")
+                # Advance when EITHER the asked date OR the auto-scan
+                # fallback returned slots. The dispatcher's last_slots now
+                # carries whichever set was populated, so create_appointment
+                # in CONFIRM_BOOK can validate slot_id without a
+                # hallucinated_slot_id error. Stay in BOOK_FLOW only when
+                # both the asked date and the 6-day look-ahead were empty.
+                primary = result.value.get("slots") or []
+                fallback = (result.value.get("next_day_with_slots") or {}).get("slots") or []
+                if primary or fallback:
+                    self._transition("slot_chosen")
+                else:
+                    self.transcript.append({"kind": "empty_slot_result", "state": self.state.value})
+        elif self.state is State.RESCHEDULE_FLOW and tool_name == "get_upcoming_appointments":
+            # Nothing to move — end gracefully so the caller doesn't get
+            # asked to pick from an empty list.
+            if is_ok(result) and not result.value["appointments"]:
+                self._transition("nothing_to_reschedule")
+        elif self.state is State.RESCHEDULE_FLOW and tool_name == "list_availability_slots":
+            if is_ok(result):
+                primary = result.value.get("slots") or []
+                fallback = (result.value.get("next_day_with_slots") or {}).get("slots") or []
+                if primary or fallback:
+                    # Slot side filled in. Memory still carries the
+                    # caller's chosen appointment from the earlier
+                    # `get_upcoming_appointments` call, so CONFIRM_RESCHEDULE
+                    # can validate both ids.
+                    self._transition("slot_chosen")
+                else:
+                    self.transcript.append({"kind": "empty_slot_result", "state": self.state.value})
         elif self.state is State.CANCEL_FLOW and tool_name == "get_upcoming_appointments":
             if is_ok(result):
                 appts = result.value["appointments"]
@@ -453,18 +955,96 @@ class Dispatcher:
         elif self.state is State.CONFIRM_BOOK and tool_name == "create_appointment":
             if is_ok(result):
                 self._transition("booked")
-        elif self.state is State.CONFIRM_CANCEL and tool_name == "cancel_appointment":  # noqa: SIM102 — keep parallel structure with sibling branches above
-            if is_ok(result):
+        elif (
+            self.state is State.CONFIRM_CANCEL
+            and tool_name == "cancel_appointment"
+            and is_ok(result)
+        ):
+            # Reschedule path: caller said "reschedule" / "move" mid-call
+            # while we were already in the cancel branch — auto-route into
+            # BOOK_FLOW so the same call can produce the new booking. Plain
+            # cancel stays single-action. (When the caller said "reschedule"
+            # from CHOOSE_INTENT we now take the atomic RESCHEDULE_FLOW
+            # path; this chain only fires for mid-call intent flips.)
+            if self.memory.wants_reschedule:
+                self.memory.wants_reschedule = False
+                self._transition("cancelled_then_rebook")
+            else:
                 self._transition("cancelled")
+        elif (
+            self.state is State.CONFIRM_RESCHEDULE
+            and tool_name == "reschedule_appointment"
+            and is_ok(result)
+        ):
+            self._transition("rescheduled")
 
     def _transition(self, label: str) -> None:
+        """Apply a labelled transition if `label` is valid for the current state.
+
+        Publishes a `state_change` event on every successful transition.
+        On reaching ``State.END`` also emits the call's terminal
+        `outcome` event so the audit log is self-describing — the
+        reviewer never needs to parse the transcript to know how the
+        call ended.
+        """
         dst = TRANSITIONS[self.state].get(label)
         if dst is None:
             return
+        prev_state = self.state.value
         self.transcript.append(
-            {"kind": "transition", "from": self.state.value, "to": dst.value, "label": label}
+            {"kind": "transition", "from": prev_state, "to": dst.value, "label": label}
         )
         self.state = dst
+        self._publish(
+            "state_change",
+            {"from_state": prev_state, "to_state": dst.value, "trigger": label},
+        )
+        if dst is State.END:
+            self._publish_outcome(label)
+
+    def _publish_outcome(self, trigger_label: str) -> None:
+        """Emit the `outcome` event when the call has just reached END.
+
+        Four outcome categories — chosen so a clinic-analytics dashboard
+        can answer the four questions that actually matter:
+
+        - ``booked``     — `_transition` fired with label ``booked``.
+        - ``cancelled``  — `_transition` fired with label ``cancelled``.
+        - ``refused``    — the bot reached a confirmation state and the
+                           caller declined (the LLM steered us through
+                           CONFIRM_BOOK / CONFIRM_CANCEL without an
+                           actual booked/cancelled trigger).
+        - ``abandoned``  — everything else: a goodbye that landed before
+                           confirmation, even if a registration or
+                           lookup tool already ran. Post-registration
+                           hangups are NOT refusals — the bot was never
+                           rejected, the caller just left.
+
+        The distinction matters: "refused" implies an offer was made and
+        declined (a UX or trust signal); "abandoned" is a generic drop.
+        Confusing them poisons clinic dashboards.
+        """
+        if trigger_label == "booked":
+            outcome = "booked"
+        elif trigger_label == "cancelled":
+            outcome = "cancelled"
+        else:
+            reached_confirm = any(
+                t.get("kind") == "transition" and t.get("to") in ("CONFIRM_BOOK", "CONFIRM_CANCEL")
+                for t in self.transcript
+            )
+            outcome = "refused" if reached_confirm else "abandoned"
+        # `trigger` is always an FSM-edge label from `TRANSITIONS`
+        # (`booked` / `cancelled` / `goodbye` / etc.) — a finite,
+        # hardcoded vocabulary. Never user text. If a future state
+        # routes a free-form string into this field, the bus's
+        # defence-in-depth check would not catch it (the field name
+        # does not end in `_masked`); reviewers should re-audit then.
+        details: dict[str, Any] = {
+            "trigger": trigger_label,
+            "turns": self.turn_id,
+        }
+        self._publish("outcome", {"outcome": outcome, "details": details})
 
     # Sliding-window cap on the message history sent to the LLM. Long calls
     # (50+ turns) would otherwise grow the prompt linearly and blow up the
@@ -477,11 +1057,169 @@ class Dispatcher:
     _HISTORY_WINDOW = 40
 
     def _messages_for_llm(self) -> list[dict[str, Any]]:
+        """Build the per-turn message list the LLM sees (persona + task + window).
+
+        Pruning runs over the full ``self.history`` (not just the window
+        slice) so any orphaned ``role:tool`` message — one whose parent
+        ``assistant`` carrying its ``tool_call_id`` has been trimmed — is
+        removed from dispatcher state permanently. Pruning only the
+        window-sliced copy used to leave the orphan in ``self.history``;
+        a later turn whose window boundary lifted the orphan to the front
+        would then crash with OpenAI's
+        ``messages with role tool must be a response to a preceeding
+        message with tool_calls`` 400 (ERRORS.md E1).
+        """
+        self.history = self._prune_orphan_tool_messages(self.history)
         hist = self.history
         if len(hist) > self._HISTORY_WINDOW:
             hist = hist[-self._HISTORY_WINDOW :]
+            hist = self._prune_orphan_tool_messages(hist)
         return [
             {"role": "system", "content": CLINIC_PERSONA},
-            {"role": "system", "content": TASK_MESSAGES[self.state.value]},
+            {"role": "system", "content": build_task_message(self.state.value)},
             *hist,
         ]
+
+    @staticmethod
+    def _prune_orphan_tool_messages(
+        hist: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Drop any ``role:tool`` message whose ``tool_call_id`` has no preceding
+        assistant ``tool_calls`` entry inside the window.
+
+        OpenAI's schema requires every ``role:tool`` message to be a response
+        to a preceding ``assistant`` message carrying that ``tool_call_id`` in
+        its ``tool_calls`` array. The sliding-window cap in
+        ``_messages_for_llm`` can slice off the assistant message while
+        leaving its tool reply behind — the reply then becomes the first
+        message in the window and OpenAI rejects the turn with::
+
+            messages with role tool must be a response to a preceding
+            message with tool_calls
+
+        Pruning here (the call site) — not inside ``_redact_for_llm`` —
+        keeps the invariant local to the place that built the broken
+        window. We track every ``tool_call_id`` announced by an assistant
+        message we've kept; any ``role:tool`` whose id is unknown to that
+        set is dropped.
+        """
+        seen_call_ids: set[str] = set()
+        kept: list[dict[str, Any]] = []
+        for msg in hist:
+            if msg.get("role") == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    tc_id = tc.get("id")
+                    if isinstance(tc_id, str):
+                        seen_call_ids.add(tc_id)
+                kept.append(msg)
+                continue
+            if msg.get("role") == "tool":
+                if msg.get("tool_call_id") in seen_call_ids:
+                    kept.append(msg)
+                # else: orphan — drop it silently to keep OpenAI happy.
+                continue
+            kept.append(msg)
+        return kept
+
+    def _publish_patient_identified(self, patient: dict[str, Any]) -> None:
+        """Emit `patient_identified` with masked PII fields.
+
+        ``name_masked`` and ``phone_masked`` use the canonical maskers in
+        ``observability/redact.py``. ``dob_year`` is the bare year (no
+        month/day) — enough for the operator to confirm identity without
+        exposing the full DOB. ``id_internal`` is the EHR UUID; the LLM
+        never sees it (the dispatcher's `_redact_for_llm` strips ids
+        before they reach the model), but the operator legitimately
+        needs it to cross-reference with the EHR if something goes
+        wrong on the call.
+        """
+        first = str(patient.get("first_name") or "")
+        last = str(patient.get("last_name") or "")
+        full_name = f"{first} {last}".strip() or "(unknown)"
+        dob = str(patient.get("dob") or "")
+        dob_year = 0
+        if len(dob) >= 4 and dob[:4].isdigit():
+            dob_year = int(dob[:4])
+        self._publish(
+            "patient_identified",
+            {
+                "name_masked": mask_name(full_name),
+                "dob_year": dob_year,
+                "phone_masked": mask_phone(str(patient.get("phone") or "")),
+                "id_internal": str(patient.get("id") or "(none)"),
+            },
+        )
+
+    def _publish_slots_offered(self, slots: list[dict[str, Any]]) -> None:
+        """Emit `slots_offered` with provider lastnames + date span.
+
+        We expose only counts and provider names — the slot ids stay
+        inside `memory.last_slots`. The clinical pane in the front-end
+        renders a list of "date · time · provider"; the dev pane shows
+        the count + the first/last date so the operator sees the spread.
+        """
+        if not slots:
+            return
+        providers = sorted({str(s.get("provider_name") or "?") for s in slots})
+        first_date = str(slots[0].get("start_at_iso") or slots[0].get("start_at") or "")
+        last_date = str(slots[-1].get("start_at_iso") or slots[-1].get("start_at") or "")
+        self._publish(
+            "slots_offered",
+            {
+                "count": len(slots),
+                "providers": providers,
+                "first_date": first_date,
+                "last_date": last_date,
+            },
+        )
+
+
+def _redact_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Strip PII from tool args before publishing them to the bus.
+
+    The operator console's audit log is durable; raw args here would
+    persist phone numbers and DOBs to disk. We retain structure (keys)
+    so a reviewer can see *what* the tool was called with, but obscure
+    values that are PII. For non-PII tools, args pass through unchanged.
+    """
+    if tool_name == "find_patient_by_phone":
+        return {"phone": mask_phone(str(args.get("phone") or ""))}
+    if tool_name == "find_patient_by_name_dob":
+        return {
+            "name": mask_name(str(args.get("name") or "")),
+            "dob": "[DOB]" if args.get("dob") else "(none)",
+        }
+    if tool_name == "create_patient":
+        return {
+            "first_name": mask_name(str(args.get("first_name") or "")),
+            "last_name": mask_name(str(args.get("last_name") or "")),
+            "phone": mask_phone(str(args.get("phone") or "")),
+            "dob": "[DOB]" if args.get("dob") else "(none)",
+        }
+    if tool_name == "cancel_appointment":
+        # `reason` is free-form text supplied by the caller; it may carry
+        # PHI ("cancel because of my chemo appointment"). The UUID is
+        # itself safe — the LLM never sees it — but we still suppress the
+        # reason from the operator-facing event payload. The transcript
+        # (clinician-only) keeps the unredacted version for follow-up.
+        out: dict[str, Any] = {}
+        if "appointment_id" in args:
+            out["appointment_id"] = args["appointment_id"]
+        if "reason" in args:
+            out["reason"] = "[REASON]" if args["reason"] else "(none)"
+        return out
+    if tool_name == "create_appointment":
+        # Similarly, `notes` may carry PHI. UUIDs pass through.
+        out_ca: dict[str, Any] = {}
+        for safe_key in ("slot_id", "patient_id"):
+            if safe_key in args:
+                out_ca[safe_key] = args[safe_key]
+        if "notes" in args:
+            out_ca["notes"] = "[NOTES]" if args["notes"] else "(none)"
+        return out_ca
+    if tool_name == "reschedule_appointment":
+        # Both ids are EHR UUIDs (no PII). Pass through.
+        return {k: args[k] for k in ("appointment_id", "slot_id") if k in args}
+    # Remaining tools (list_availability_slots, get_upcoming_appointments,
+    # etc.) take only safe scalar args (date, provider_id) — pass through.
+    return dict(args)

@@ -332,6 +332,4 @@ def test_parse_dob_accepts_inclusive_year_endpoints() -> None:
     """Mutation: ``year <= _MAX_PARSED_YEAR`` → ``year < _MAX_PARSED_YEAR``."""
     for raw in ("1900-01-01", "2100-12-31"):
         r = _parse_dob(raw)
-        assert not is_err(r), (
-            f"_parse_dob must accept boundary year {raw!r} (range is inclusive)"
-        )
+        assert not is_err(r), f"_parse_dob must accept boundary year {raw!r} (range is inclusive)"

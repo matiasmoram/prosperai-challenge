@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prosper · Operator Console</title>
+  <!-- Tailwind via CDN keeps the build step out of this project. The full
+       runtime is ~30 KB gzipped and only runs in the browser — no impact
+       on the Python deploy surface. -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    /* Subtle pulse on the live indicator. */
+    @keyframes ping-soft {
+      0%, 100% { opacity: 1 }
+      50% { opacity: 0.4 }
+    }
+    .live-dot { animation: ping-soft 1.6s ease-in-out infinite; }
+    /* Smooth state-badge transition. */
+    .state-badge { transition: background-color 220ms ease, color 220ms ease; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 h-screen flex flex-col">
+  <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between shrink-0">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-sky-600 text-white flex items-center justify-center font-bold">P</div>
+      <div>
+        <h1 class="font-semibold text-slate-900">Prosper · Operator Console</h1>
+        <p class="text-xs text-slate-500" id="session-label">no session yet</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2 text-xs text-slate-500">
+      <span class="live-dot inline-block w-2 h-2 rounded-full bg-emerald-500" id="live-dot"></span>
+      <span id="conn-label">connecting…</span>
+    </div>
+  </header>
+
+  <main class="flex-1 grid grid-rows-[3fr_2fr] gap-3 p-3 overflow-hidden">
+    <!-- TOP: clinical pane -->
+    <section class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+      <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <span class="text-xs uppercase tracking-wide text-slate-500">Activity</span>
+          <span id="activity-line" class="font-medium text-slate-700">Waiting for the call to start…</span>
+        </div>
+        <span id="state-badge" class="state-badge text-xs font-semibold uppercase tracking-wide px-2.5 py-1 rounded-full bg-slate-100 text-slate-600">greeting</span>
+      </div>
+
+      <div class="grid grid-cols-3 gap-4 px-5 py-4 flex-1 overflow-hidden">
+        <!-- Patient card -->
+        <div class="border border-slate-200 rounded-lg p-4 bg-slate-50/50 overflow-hidden flex flex-col">
+          <h2 class="text-xs uppercase tracking-wide text-slate-500 mb-2">Patient</h2>
+          <div id="patient-card" class="text-sm text-slate-400 italic">not identified yet</div>
+        </div>
+
+        <!-- Slots offered -->
+        <div class="border border-slate-200 rounded-lg p-4 bg-slate-50/50 overflow-hidden flex flex-col">
+          <h2 class="text-xs uppercase tracking-wide text-slate-500 mb-2">Availability shown</h2>
+          <ul id="slots-list" class="text-sm text-slate-700 space-y-1.5 overflow-y-auto"><li class="text-slate-400 italic">no slots offered yet</li></ul>
+        </div>
+
+        <!-- Outcome / transcript -->
+        <div class="border border-slate-200 rounded-lg p-4 bg-slate-50/50 overflow-hidden flex flex-col">
+          <h2 class="text-xs uppercase tracking-wide text-slate-500 mb-2">Live transcript</h2>
+          <ul id="transcript-list" class="text-sm text-slate-700 space-y-1.5 overflow-y-auto flex-1"><li class="text-slate-400 italic">awaiting first turn…</li></ul>
+        </div>
+      </div>
+
+      <div id="outcome-banner" class="hidden px-5 py-3 text-sm font-semibold border-t"></div>
+    </section>
+
+    <!-- BOTTOM: dev pane -->
+    <section class="bg-zinc-900 text-zinc-200 rounded-xl shadow-sm overflow-hidden flex flex-col">
+      <div class="px-5 py-2.5 border-b border-zinc-800 flex items-center justify-between text-xs">
+        <span class="uppercase tracking-wide text-zinc-400">Dispatcher internals</span>
+        <span class="mono text-zinc-400" id="latency-strip">llm —  ·  tool —  ·  cache —</span>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4 px-5 py-4 flex-1 overflow-hidden">
+        <!-- FSM + tool timeline -->
+        <div class="overflow-hidden flex flex-col">
+          <div class="mono text-xs text-zinc-400 mb-2">FSM <span id="fsm-state" class="text-sky-400 font-semibold">GREETING</span> <span id="fsm-from" class="text-zinc-500"></span></div>
+          <div class="border border-zinc-800 rounded-md flex-1 overflow-y-auto">
+            <table class="w-full text-xs mono">
+              <thead class="bg-zinc-800 text-zinc-400 sticky top-0">
+                <tr><th class="text-left px-2 py-1">tool</th><th class="text-left px-2 py-1">args</th><th class="text-right px-2 py-1">ms</th><th class="text-left px-2 py-1">outcome</th></tr>
+              </thead>
+              <tbody id="tool-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Raw event log (collapsible) -->
+        <div class="overflow-hidden flex flex-col">
+          <div class="flex items-center justify-between mb-2">
+            <span class="mono text-xs text-zinc-400">Raw events</span>
+            <button id="raw-toggle" class="text-xs text-zinc-400 hover:text-zinc-200 underline">show</button>
+          </div>
+          <div id="raw-log" class="border border-zinc-800 rounded-md p-2 overflow-y-auto mono text-[11px] text-zinc-300 hidden flex-1 leading-relaxed"></div>
+          <div id="raw-placeholder" class="border border-zinc-800 rounded-md p-2 overflow-y-auto mono text-[11px] text-zinc-500 flex-1 leading-relaxed">click "show" to reveal the underlying ConsoleEvent stream</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/console/static/console.js"></script>
+</body>
+</html>

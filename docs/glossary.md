@@ -45,3 +45,17 @@ truth in code.
 - **SSRF guard** — Startup-time URL validation on `PROSPER_EHR_URL` that
   rejects non-http(s) schemes and missing hostnames, blocking redirection
   to cloud metadata endpoints (`src/prosper/bot.py::_validated_ehr_url`).
+- **Operator Console** — Read-only web view on `:7861` that renders the
+  live dispatcher state, tool calls, identified patient (PII redacted),
+  slots offered, transcript, and outcome of a call (`src/prosper/console/`,
+  `docs/adr/004-operator-console-event-stream.md`).
+- **ConsoleEvent** — Frozen dataclass carrying one operator-console
+  telemetry record (`type`, `ts`, `session_id`, `payload`). The 8 valid
+  types form a closed `Literal` (`src/prosper/console/events.py`).
+- **ConsoleBus** — In-memory async pub/sub bus with bounded per-subscriber
+  queues. Publication is non-blocking; overflow drops the oldest event
+  for the slow subscriber (`src/prosper/console/bus.py`).
+- **Audit JSONL** — Append-only `.jsonl` file (one per session) under
+  `data/audit/`, written by `AuditJSONLWriter` as it drains the bus.
+  Source of truth for the `/console/replay/{id}` endpoint
+  (`src/prosper/console/audit.py`).

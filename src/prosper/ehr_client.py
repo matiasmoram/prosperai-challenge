@@ -160,10 +160,13 @@ class EHRClient:
         *,
         date_: date,
         provider_id: str | None = None,
+        specialty: str | None = None,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"date": date_.isoformat()}
         if provider_id is not None:
             params["provider_id"] = provider_id
+        if specialty is not None:
+            params["specialty"] = specialty
         body = await self._request("GET", "/availability", params=params)
         return cast("list[dict[str, Any]]", body["slots"])
 
@@ -195,5 +198,20 @@ class EHRClient:
                 "POST",
                 f"/appointments/{appointment_id}/cancel",
                 json={"reason": reason},
+            ),
+        )
+
+    async def reschedule_appointment(
+        self,
+        *,
+        appointment_id: str,
+        new_slot_id: str,
+    ) -> dict[str, Any]:
+        return cast(
+            "dict[str, Any]",
+            await self._request(
+                "PATCH",
+                f"/appointments/{appointment_id}",
+                json={"new_slot_id": new_slot_id},
             ),
         )

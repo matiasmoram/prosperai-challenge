@@ -17,9 +17,11 @@ from prosper.ehr.db import get_engine, init_db
 from prosper.ehr.models import Patient, Provider, Slot
 
 PROVIDERS = [
-    ("Dr. Aisha Patel", "America/New_York"),
-    ("Dr. Marcus Chen", "America/New_York"),
-    ("Dr. Sofia Romero", "America/New_York"),
+    ("Dr. Aisha Patel", "America/New_York", "Therapist"),
+    ("Dr. Marcus Chen", "America/New_York", "Psychiatrist"),
+    ("Dr. Sofia Romero", "America/New_York", "General Practice"),
+    ("Dr. Liam Okonkwo", "America/New_York", "Dermatologist"),
+    ("Dr. Yuki Tanaka", "America/New_York", "Physiotherapist"),
 ]
 
 DEMO_PATIENTS = [
@@ -63,9 +65,9 @@ def main() -> None:
     engine = get_engine()
     init_db()
     with Session(engine) as session:
-        for name, tz in PROVIDERS:
+        for name, tz, specialty in PROVIDERS:
             if not session.execute(select(Provider).where(Provider.name == name)).first():
-                session.add(Provider(name=name, timezone=tz))
+                session.add(Provider(name=name, timezone=tz, specialty=specialty))
         session.commit()
 
         if session.execute(select(Slot).limit(1)).first() is None:

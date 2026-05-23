@@ -8,16 +8,17 @@ scripting the persona, not by trying to constrain the bot.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
 class PersonaSimulator:
     """Wraps an LLM to generate caller utterances given the bot's last reply."""
 
-    def __init__(self, *, client: Any, persona: str, model: str = "gpt-4o-mini") -> None:
+    def __init__(self, *, client: Any, persona: str, model: str | None = None) -> None:
         self._client = client
         self._persona = persona
-        self._model = model
+        self._model = model or os.environ.get("PROSPER_EVAL_MODEL", "gpt-4o-mini")
         self._history: list[dict[str, Any]] = []
 
     async def reply_to(self, bot_text: str) -> str:

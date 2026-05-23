@@ -54,6 +54,13 @@ class Provider(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    specialty: Mapped[str] = mapped_column(
+        String(80),
+        nullable=False,
+        default="General Practice",
+        server_default="General Practice",
+        index=True,
+    )
     slots: Mapped[list[Slot]] = relationship(back_populates="provider")
 
 

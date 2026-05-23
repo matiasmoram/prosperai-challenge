@@ -43,7 +43,7 @@ def _select(args: argparse.Namespace) -> list[Scenario]:
 
 
 async def _run_all(
-    scenarios: list[Scenario], *, concurrency: int, mock: bool = False
+    scenarios: list[Scenario], *, concurrency: int, mock: bool = False, debug: bool = False
 ) -> list[ScenarioResult]:
     """Run all selected scenarios with at most ``concurrency`` in flight.
 
@@ -71,11 +71,9 @@ async def _run_all(
 
     async def _bounded(s: Scenario) -> ScenarioResult:
         async with sem:
-            return await run_scenario(s, openai_client=client, mock=mock)
+            return await run_scenario(s, openai_client=client, mock=mock, debug=debug)
 
-    raw = await asyncio.gather(
-        *[_bounded(s) for s in scenarios], return_exceptions=True
-    )
+    raw = await asyncio.gather(*[_bounded(s) for s in scenarios], return_exceptions=True)
     results: list[ScenarioResult] = []
     for scenario, item in zip(scenarios, raw, strict=True):
         if isinstance(item, BaseException):
@@ -179,6 +177,15 @@ def main() -> int:
             "checkout / CI without secrets."
         ),
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "On openai.BadRequestError from the dispatcher, dump the live "
+            "dispatcher.history to evals/results/debug_<scenario>_<ts>.json "
+            "and print the path to stderr before re-raising. Off by default."
+        ),
+    )
     parser.add_argument("-v", action="store_true")
     args = parser.parse_args()
 
@@ -195,7 +202,14 @@ def main() -> int:
         print("no scenarios selected", file=sys.stderr)
         return 2
 
-    results = asyncio.run(_run_all(scenarios, concurrency=args.concurrency, mock=args.mock_llm))
+    results = asyncio.run(
+        _run_all(
+            scenarios,
+            concurrency=args.concurrency,
+            mock=args.mock_llm,
+            debug=args.debug,
+        )
+    )
     print(_summary(results))
     _print_aggregate_latency(results)
 

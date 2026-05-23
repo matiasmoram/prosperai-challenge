@@ -64,6 +64,10 @@ class AppointmentCancel(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class AppointmentReschedule(BaseModel):
+    new_slot_id: str = Field(min_length=1, max_length=36)
+
+
 class AppointmentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str

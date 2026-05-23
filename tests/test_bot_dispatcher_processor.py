@@ -47,9 +47,15 @@ async def test_dispatcher_processor_speaks_recovery_line_on_exception() -> None:
         for call in proc.push_frame.call_args_list
         if isinstance(call.args[0], TTSSpeakFrame)
     ]
-    # 1) The "One moment." filler for tool-firing states, 2) the recovery line
-    assert "One moment." in pushed_texts
-    assert any("Sorry, I missed that" in t for t in pushed_texts)
+    # 1) The IDENTIFY_PATIENT filler starts with "One moment." and adds a
+    #    reassurance about wait time. 2) The recovery line follows — the
+    #    exact wording lives in prompts.FALLBACK_LINES so we assert by
+    #    constant rather than pinning a copy phrase that changes when the
+    #    prompt is polished.
+    from prosper.prompts import FALLBACK_LINES
+
+    assert any(t.startswith("One moment.") for t in pushed_texts)
+    assert FALLBACK_LINES["dispatcher_crash"] in pushed_texts
 
 
 async def test_dispatcher_processor_records_ttft_on_normal_turn() -> None:
@@ -87,5 +93,5 @@ async def test_dispatcher_processor_skips_filler_in_non_tool_firing_state() -> N
         for call in proc.push_frame.call_args_list
         if isinstance(call.args[0], TTSSpeakFrame)
     ]
-    assert "One moment." not in pushed_texts
+    assert not any(t.startswith("One moment.") for t in pushed_texts)
     assert "book or cancel?" in pushed_texts

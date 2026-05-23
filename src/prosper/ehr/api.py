@@ -25,6 +25,7 @@ from prosper.ehr.schemas import (
     AppointmentCreate,
     AppointmentList,
     AppointmentOut,
+    AppointmentReschedule,
     PatientCreate,
     PatientFuzzyList,
     PatientList,
@@ -126,6 +127,13 @@ def create_app(engine: Engine | None = None) -> FastAPI:
         payload: PatientCreate,
         session: Session = Depends(session_dep),
     ) -> PatientOut:
+        # Normalise once at the boundary and reuse the canonical form for both
+        # the uniqueness lookup and the insert. Passing the raw ``payload.phone``
+        # through to ``repo.create_patient`` while the lookup uses the normalised
+        # form can desync the two whenever ``normalize_phone`` is not strictly
+        # idempotent on the raw input — letting two equivalent phone strings
+        # slip past the 409 guard and surface as a 500 ``IntegrityError`` from
+        # the underlying ``UNIQUE`` constraint.
         normalized_phone = repo.normalize_phone(payload.phone)
         existing = repo.find_patient_by_phone(session, normalized_phone)
         if existing:
@@ -137,7 +145,7 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             first_name=payload.first_name,
             last_name=payload.last_name,
             dob=payload.dob,
-            phone=payload.phone,
+            phone=normalized_phone,
             email=payload.email,
         )
         return PatientOut.model_validate(p)
@@ -190,9 +198,12 @@ def create_app(engine: Engine | None = None) -> FastAPI:
     def availability(
         date: date_t = Query(...),
         provider_id: str | None = Query(default=None),
+        specialty: str | None = Query(default=None),
         session: Session = Depends(session_dep),
     ) -> SlotList:
-        slots = repo.list_available_slots(session, date_=date, provider_id=provider_id)
+        slots = repo.list_available_slots(
+            session, date_=date, provider_id=provider_id, specialty=specialty
+        )
         return SlotList(slots=[_slot_to_out(s) for s in slots])
 
     @app.post("/appointments", response_model=AppointmentOut, status_code=201)
@@ -230,6 +241,34 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             )
         except repo.AppointmentNotFoundError as e:
             raise HTTPException(status_code=404, detail={"code": "appointment_not_found"}) from e
+        return _appt_to_out(appt)
+
+    @app.patch("/appointments/{appointment_id}", response_model=AppointmentOut)
+    def reschedule_appointment(
+        appointment_id: str,
+        payload: AppointmentReschedule,
+        session: Session = Depends(session_dep),
+    ) -> AppointmentOut:
+        # Pre-check the new slot exists so the 404 is distinguishable from the
+        # "appointment not found" 404. The repository raises ``SlotTakenError``
+        # only when the slot exists but is held by someone else; a missing
+        # slot id would otherwise bubble up as the repository's generic
+        # ``IntegrityError`` path on commit.
+        if session.get(Slot, payload.new_slot_id) is None:
+            raise HTTPException(status_code=404, detail={"code": "slot_not_found"})
+        try:
+            appt = repo.reschedule_appointment(
+                session,
+                appointment_id=appointment_id,
+                new_slot_id=payload.new_slot_id,
+            )
+        except repo.AppointmentNotFoundError as e:
+            raise HTTPException(status_code=404, detail={"code": "appointment_not_found"}) from e
+        except repo.SlotTakenError as e:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "slot_taken", "owner_patient_id": e.owner_patient_id},
+            ) from e
         return _appt_to_out(appt)
 
     @app.get("/health")

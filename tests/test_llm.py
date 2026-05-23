@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from prosper.dispatcher import LLMReply, ToolCall
+from prosper.dispatcher import LLMReply
 from prosper.llm import OpenAILLMAdapter
 
 

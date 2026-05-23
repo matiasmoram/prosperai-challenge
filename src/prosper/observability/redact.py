@@ -103,3 +103,24 @@ def mask_name(name: str) -> str:
         return name
     parts = name.split()
     return " ".join(p[0] + "*" * max(0, len(p) - 1) for p in parts)
+
+
+def mask_phone(phone: str) -> str:
+    """Mask all but the leading sign and trailing four digits.
+
+    ``"+12025550142" -> "+1***0142"``. Used when emitting structured phone
+    fields to the operator console or audit log: the suffix is enough for
+    a clinician to match a known caller without exposing the full number.
+
+    The operator console's bus validation rejects any field name ending
+    in ``_masked`` that lacks a mask character or carries a 7+ digit run,
+    so this helper is the canonical source of masked phones for events.
+    """
+    if not phone:
+        return phone
+    digits_only = "".join(ch for ch in phone if ch.isdigit())
+    if len(digits_only) < 4:
+        # Fewer than 4 digits: nothing useful to expose, mask everything.
+        return "*" * max(len(phone), 1)
+    leading_plus = "+" if phone.lstrip().startswith("+") else ""
+    return f"{leading_plus}**{digits_only[-4:]}"

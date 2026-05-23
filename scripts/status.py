@@ -88,7 +88,7 @@ def _total_commits() -> str:
 
 def _test_count() -> int:
     out = subprocess.run(
-        [".venv/Scripts/python.exe", "-m", "pytest", "--collect-only", "-q",
+        [sys.executable, "-m", "pytest", "--collect-only", "-q",
          "tests/", "evals/test_types.py", "evals/test_runner_checks.py"],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -104,7 +104,7 @@ def _test_count() -> int:
 def _scenario_count() -> int:
     # Side-import via subprocess to avoid heavy pipecat imports.
     out = subprocess.run(
-        [".venv/Scripts/python.exe", "-c",
+        [sys.executable, "-c",
          "from evals.scenarios import SCENARIOS; print(len(SCENARIOS))"],
         cwd=REPO_ROOT,
         capture_output=True,

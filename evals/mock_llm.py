@@ -416,6 +416,55 @@ def _script_goodbye_mid_confirmation() -> list[LLMReply]:
     ]
 
 
+def _script_reschedule_existing_appointment() -> list[LLMReply]:
+    # Ada with 1 booked appt + 3 other free slots tomorrow. We identify her,
+    # list upcoming + list availability, then issue an atomic reschedule.
+    # `__use_first_slot__` resolves slot_id from the FREE slots returned by
+    # list_availability — i.e. NOT Ada's current slot. The bracketed `"1"`
+    # appointment_id resolves via _resolve_memory_handles to her one upcoming.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("Sure — what's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book a new visit, reschedule, or cancel?"),
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t(
+            "Your visit is tomorrow at ten with Dr. Patel — what new time "
+            "would you like to move it to?"
+        ),
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I can move you from ten to ten-thirty with Dr. Patel — shall I go ahead?"),
+        _tool("reschedule_appointment", appointment_id="1", __use_first_slot__=True),
+        _t("All set — you're now at ten-thirty tomorrow with Dr. Patel. Have a great day."),
+    ]
+
+
+def _script_specialty_filter_therapist() -> list[LLMReply]:
+    # New caller asks for THERAPIST specifically. Bot must pass
+    # specialty="Therapist" to list_availability_slots so dermatologist
+    # slots don't leak into the offer.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("Sure — what's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="555-444-7777"),
+        _t("I don't see you yet — what's your full name and DOB?"),
+        _tool("find_patient_by_name_dob", name="Pat Lin", dob="January 1 1990"),
+        _t("I'll register Pat Lin, born January 1st 1990, phone 555-444-7777 — sound right?"),
+        _tool(
+            "create_patient",
+            first_name="Pat",
+            last_name="Lin",
+            dob="1990-01-01",
+            phone="5554447777",
+        ),
+        _t("Great — book a new visit or cancel?"),
+        _tool("list_availability_slots", date=_tomorrow_iso(), specialty="Therapist"),
+        _t("I have ten tomorrow with Dr. Therapy — shall I book?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("All set for tomorrow at ten with Dr. Therapy — have a great day."),
+    ]
+
+
 def _script_insurance_question_redirect() -> list[LLMReply]:
     # Ada exists, no appts. Bot refuses insurance/billing questions.
     return [
@@ -444,6 +493,8 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "phone_format_chaos": _script_phone_format_chaos,
     "patient_correction_mid_register": _script_patient_correction_mid_register,
     "goodbye_mid_confirmation": _script_goodbye_mid_confirmation,
+    "reschedule_existing_appointment": _script_reschedule_existing_appointment,
+    "specialty_filter_therapist": _script_specialty_filter_therapist,
     "insurance_question_redirect": _script_insurance_question_redirect,
 }
 
@@ -570,6 +621,22 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         # AVOID 'goodbye'/'bye'/'thanks, bye' so the runner's short-circuit
         # doesn't fire before the bot can emit _end() and force state -> END.
         "actually, never mind, I changed my mind.",
+    ],
+    "reschedule_existing_appointment": [
+        "Hi, I'd like to reschedule my appointment.",
+        "202-555-0100.",
+        "Reschedule please.",
+        "A later slot tomorrow morning, please.",
+        "the first one works, let's do that.",
+        "yes that's correct.",
+    ],
+    "specialty_filter_therapist": [
+        "Hi, I'd like to book a therapist appointment for tomorrow morning.",
+        "555-444-7777.",
+        "Pat Lin, January 1st 1990.",
+        "Yes that's right.",
+        "Book please — first one with the therapist.",
+        "Yes that's correct.",
     ],
     "insurance_question_redirect": [
         (

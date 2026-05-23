@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 _JUDGE_SYSTEM = """\
@@ -20,12 +21,13 @@ async def judge_transcript(
     client: Any,
     transcript: list[dict],
     criteria: list[str],
-    model: str = "gpt-4o-mini",
+    model: str | None = None,
 ) -> tuple[bool, str]:
+    resolved_model = model or os.environ.get("PROSPER_EVAL_MODEL", "gpt-4o-mini")
     formatted = _format_transcript(transcript)
     crit_block = "\n".join(f"- {c}" for c in criteria)
     resp = await client.chat.completions.create(
-        model=model,
+        model=resolved_model,
         temperature=0,
         messages=[
             {"role": "system", "content": _JUDGE_SYSTEM},

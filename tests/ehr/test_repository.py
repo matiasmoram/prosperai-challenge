@@ -276,6 +276,154 @@ def test_list_availability_includes_slot_exactly_at_day_start(session: Session) 
     )
 
 
+def test_reschedule_appointment_atomic_swap(session: Session) -> None:
+    """Atomic reschedule frees the old slot and binds the new one in one txn."""
+    provider = _seed_provider(session)
+    [old_slot, new_slot] = _seed_slots(session, provider, count=2)
+    patient = repo.create_patient(
+        session,
+        first_name="A",
+        last_name="B",
+        dob=date(1990, 1, 1),
+        phone="2025550111",
+    )
+    appt = repo.create_appointment(session, patient_id=patient.id, slot_id=old_slot.id)
+    moved = repo.reschedule_appointment(session, appointment_id=appt.id, new_slot_id=new_slot.id)
+    assert moved.id == appt.id
+    assert moved.slot_id == new_slot.id
+    # Old slot is now free — re-listing availability includes it again.
+    available = {s.id for s in repo.list_available_slots(session, date_=old_slot.start_at.date())}
+    assert old_slot.id in available
+    assert new_slot.id not in available
+
+
+def test_reschedule_appointment_to_held_slot_raises_slot_taken(session: Session) -> None:
+    """New slot already booked by a different patient → SlotTakenError;
+    original appointment stays intact (no orphan state)."""
+    provider = _seed_provider(session)
+    [old_slot, taken_slot] = _seed_slots(session, provider, count=2)
+    a = repo.create_patient(
+        session,
+        first_name="A",
+        last_name="B",
+        dob=date(1990, 1, 1),
+        phone="2025550111",
+    )
+    b = repo.create_patient(
+        session,
+        first_name="C",
+        last_name="D",
+        dob=date(1991, 2, 2),
+        phone="2025550122",
+    )
+    my_appt = repo.create_appointment(session, patient_id=a.id, slot_id=old_slot.id)
+    repo.create_appointment(session, patient_id=b.id, slot_id=taken_slot.id)
+    with pytest.raises(repo.SlotTakenError) as excinfo:
+        repo.reschedule_appointment(session, appointment_id=my_appt.id, new_slot_id=taken_slot.id)
+    assert excinfo.value.owner_patient_id == b.id
+    session.refresh(my_appt)
+    # Original appointment unchanged after the failed swap.
+    assert my_appt.slot_id == old_slot.id
+    assert my_appt.status is AppointmentStatus.SCHEDULED
+
+
+def test_reschedule_appointment_to_same_slot_is_noop(session: Session) -> None:
+    provider = _seed_provider(session)
+    [slot] = _seed_slots(session, provider, count=1)
+    patient = repo.create_patient(
+        session,
+        first_name="A",
+        last_name="B",
+        dob=date(1990, 1, 1),
+        phone="2025550111",
+    )
+    appt = repo.create_appointment(session, patient_id=patient.id, slot_id=slot.id)
+    same = repo.reschedule_appointment(session, appointment_id=appt.id, new_slot_id=slot.id)
+    assert same.id == appt.id
+    assert same.slot_id == slot.id
+
+
+def test_reschedule_appointment_missing_raises_not_found(session: Session) -> None:
+    provider = _seed_provider(session)
+    [slot] = _seed_slots(session, provider, count=1)
+    with pytest.raises(repo.AppointmentNotFoundError):
+        repo.reschedule_appointment(
+            session, appointment_id="00000000-0000-0000-0000-000000000000", new_slot_id=slot.id
+        )
+
+
+def test_reschedule_appointment_after_cancel_raises_not_found(session: Session) -> None:
+    """A cancelled appointment cannot be rescheduled — treat as not-found
+    so the bot prompts the caller to book fresh instead."""
+    provider = _seed_provider(session)
+    [old_slot, new_slot] = _seed_slots(session, provider, count=2)
+    patient = repo.create_patient(
+        session,
+        first_name="A",
+        last_name="B",
+        dob=date(1990, 1, 1),
+        phone="2025550111",
+    )
+    appt = repo.create_appointment(session, patient_id=patient.id, slot_id=old_slot.id)
+    repo.cancel_appointment(session, appointment_id=appt.id, reason="test")
+    with pytest.raises(repo.AppointmentNotFoundError):
+        repo.reschedule_appointment(session, appointment_id=appt.id, new_slot_id=new_slot.id)
+
+
+def test_list_available_slots_filters_by_specialty(session: Session) -> None:
+    """Specialty filter scopes availability to providers of one specialty.
+
+    Two providers, one slot each. Asking for ``specialty="Therapist"`` must
+    return only the therapist's slot — case-insensitively.
+    """
+    therapist = Provider(name="Dr. Therapy", timezone="UTC", specialty="Therapist")
+    derm = Provider(name="Dr. Skin", timezone="UTC", specialty="Dermatologist")
+    session.add_all([therapist, derm])
+    session.commit()
+    start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
+    t_slot = Slot(provider=therapist, start_at=start, end_at=start + timedelta(minutes=30))
+    d_slot = Slot(
+        provider=derm,
+        start_at=start + timedelta(minutes=30),
+        end_at=start + timedelta(minutes=60),
+    )
+    session.add_all([t_slot, d_slot])
+    session.commit()
+    only_therapist = repo.list_available_slots(session, date_=start.date(), specialty="therapist")
+    assert {s.id for s in only_therapist} == {t_slot.id}
+
+
+def test_list_available_slots_unknown_specialty_returns_empty(session: Session) -> None:
+    """Asking for a specialty no provider offers must return zero slots,
+    not silently fall back to all providers."""
+    therapist = Provider(name="Dr. Therapy", timezone="UTC", specialty="Therapist")
+    session.add(therapist)
+    session.commit()
+    start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
+    session.add(Slot(provider=therapist, start_at=start, end_at=start + timedelta(minutes=30)))
+    session.commit()
+    assert repo.list_available_slots(session, date_=start.date(), specialty="Cardiologist") == []
+
+
+def test_list_providers_filters_by_specialty(session: Session) -> None:
+    therapist = Provider(name="Dr. Therapy", timezone="UTC", specialty="Therapist")
+    derm = Provider(name="Dr. Skin", timezone="UTC", specialty="Dermatologist")
+    session.add_all([therapist, derm])
+    session.commit()
+    assert {p.id for p in repo.list_providers(session, specialty="therapist")} == {therapist.id}
+    assert len(repo.list_providers(session)) == 2
+
+
+def test_provider_default_specialty_when_omitted(session: Session) -> None:
+    """Backwards-compat: tests that construct ``Provider(name=..., timezone=...)``
+    without a specialty must still work — column defaults to 'General Practice'."""
+    p = Provider(name="Dr. Default", timezone="UTC")
+    session.add(p)
+    session.commit()
+    session.refresh(p)
+    assert p.specialty == "General Practice"
+
+
 def test_find_patient_by_name_dob_includes_exact_threshold(session: Session) -> None:
     """Mutation: ``sim >= min_similarity`` → ``sim > min_similarity``.
 

@@ -62,9 +62,40 @@ def test_redact_list_availability_slots_with_slots() -> None:
 
 
 def test_redact_list_availability_slots_empty() -> None:
+    # With no auto-scan match the empty-result line now mentions the
+    # 6-day look-ahead so the LLM doesn't repeat the same query.
     assert _redact_for_llm("list_availability_slots", {"slots": []}) == (
-        "no slots available for that date"
+        "no slots available for that date or the next 6 days"
     )
+
+
+def test_redact_list_availability_slots_empty_with_fallback() -> None:
+    # When the asked date is empty but the auto-scan finds slots on a
+    # later date, _redact_for_llm surfaces the fallback so the LLM can
+    # offer it to the caller without making a second tool call.
+    out = _redact_for_llm(
+        "list_availability_slots",
+        {
+            "asked_date": "2026-05-27",
+            "slots": [],
+            "next_day_with_slots": {
+                "date": "2026-05-28",
+                "slots": [
+                    {
+                        "slot_id": "abc",
+                        "start_at_iso": "2026-05-28T10:00",
+                        "end_at_iso": "2026-05-28T10:30",
+                        "provider_id": "p",
+                        "provider_name": "Dr. Patel",
+                    },
+                ],
+            },
+        },
+    )
+    assert "no slots on 2026-05-27" in out
+    assert "next available is 2026-05-28" in out
+    assert "Dr. Patel" in out
+    assert "slot_id" not in out
 
 
 def test_redact_upcoming_appointments_with_items() -> None:
@@ -76,7 +107,7 @@ def test_redact_upcoming_appointments_with_items() -> None:
             ]
         },
     )
-    assert out.startswith("upcoming: #1 2026-05-21T10:00")
+    assert out.startswith("upcoming: [1] 2026-05-21T10:00")
 
 
 def test_redact_upcoming_appointments_empty() -> None:
@@ -250,14 +281,18 @@ def test_record_tool_result_ok_create_patient_updates_memory(ehr_client: EHRClie
             "first_name": "Ada",
             "last_name": "Lovelace",
             "phone": "+12025550100",
+            "dob": "1815-12-10",
         }
     )
     d._record_tool_result("create_patient", ok)
+    # `dob` propagates so the operator-console `patient_identified` event
+    # reports the real birth year — without it the year defaults to 0.
     assert d.memory.identified_patient == {
         "id": "pid-7",
         "first_name": "Ada",
         "last_name": "Lovelace",
         "phone": "+12025550100",
+        "dob": "1815-12-10",
     }
 
 
@@ -390,6 +425,83 @@ def test_transition_unknown_label_is_noop(ehr_client: EHRClient) -> None:
     d.state = State.GREETING
     d._transition("not_a_real_label")
     assert d.state is State.GREETING  # unchanged, no exception
+
+
+def test_reschedule_intent_from_choose_intent_routes_to_reschedule_flow(
+    ehr_client: EHRClient,
+) -> None:
+    """Caller saying 'reschedule' at CHOOSE_INTENT routes to the atomic
+    RESCHEDULE_FLOW path, not the older cancel-then-rebook chain."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.state = State.CHOOSE_INTENT
+    d._maybe_transition_from_user_text("I want to reschedule my appointment")
+    assert d.state is State.RESCHEDULE_FLOW
+    # Flag is cleared because the atomic path doesn't need the legacy
+    # cancel-then-rebook auto-routing — the swap happens in one tool call.
+    assert d.memory.wants_reschedule is False
+
+
+def test_reschedule_intent_mid_call_still_sets_flag(ehr_client: EHRClient) -> None:
+    """Mid-call 'reschedule' (after the caller is already in CANCEL_FLOW)
+    keeps the legacy chain alive — the flag triggers BOOK_FLOW after the
+    cancel completes."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.state = State.CANCEL_FLOW
+    d._maybe_transition_from_user_text("actually I want to move my appointment instead")
+    assert d.memory.wants_reschedule is True
+    # State stays in CANCEL_FLOW — the flag is what changes the post-cancel
+    # transition, not the current state.
+    assert d.state is State.CANCEL_FLOW
+
+
+def test_cancel_then_rebook_routes_to_book_flow(ehr_client: EHRClient) -> None:
+    """CONFIRM_CANCEL + wants_reschedule + Ok → BOOK_FLOW (not END)."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.state = State.CONFIRM_CANCEL
+    d.memory.wants_reschedule = True
+    d._maybe_transition_from_tool(
+        "cancel_appointment",
+        Ok(value={"appointment_id": "abc"}),
+    )
+    assert d.state is State.BOOK_FLOW
+    # Flag is consumed so a subsequent unrelated cancel still ends in END.
+    assert d.memory.wants_reschedule is False
+
+
+def test_plain_cancel_routes_to_end_not_book_flow(ehr_client: EHRClient) -> None:
+    """Without wants_reschedule flag, cancel Ok still ends the call."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.state = State.CONFIRM_CANCEL
+    assert d.memory.wants_reschedule is False
+    d._maybe_transition_from_tool(
+        "cancel_appointment",
+        Ok(value={"appointment_id": "abc"}),
+    )
+    assert d.state is State.END
+
+
+def test_hard_goodbye_fires_mid_utterance(ehr_client: EHRClient) -> None:
+    """`bye` anywhere in the utterance routes to END (hard goodbye tier)."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.state = State.IDENTIFY_PATIENT
+    d._maybe_transition_from_user_text("ok bye let's stop here")
+    assert d.state is State.END
+
+
+def test_phone_words_to_digits_via_handler() -> None:
+    """find_patient_by_phone normalises spoken digits before EHR lookup."""
+    from prosper.tools import _phone_words_to_digits
+
+    assert _phone_words_to_digits("two oh two five five five oh one zero zero") == ("2025550100")
+    # Already-digit strings are passed through untouched.
+    assert _phone_words_to_digits("2025550100") == "2025550100"
+    # Too few digits → return original so EHR can reject with min_length error.
+    assert _phone_words_to_digits("hello") == "hello"
 
 
 def test_transition_book_flow_nothing_to_book_routes_to_end(ehr_client: EHRClient) -> None:
@@ -569,3 +681,41 @@ async def test_end_state_blocks_user_text_transitions(ehr_client: EHRClient) -> 
         d._maybe_transition_from_user_text("cancel that")
         d._maybe_transition_from_user_text("hello?")
     assert d.state is State.END
+
+
+def test_transition_from_tool_book_flow_empty_slots_stays_put(
+    ehr_client: EHRClient,
+) -> None:
+    """Bug 1 regression: an empty ``slots: []`` result must NOT advance to
+    CONFIRM_BOOK. Otherwise the FSM gets stranded with empty ``last_slots``
+    and every subsequent create_appointment fails ``hallucinated_slot_id``.
+    """
+    d = _make_dispatcher(ehr_client, State.BOOK_FLOW)
+    d._maybe_transition_from_tool("list_availability_slots", Ok(value={"slots": []}))
+    assert d.state is State.BOOK_FLOW
+    # An observability breadcrumb is recorded so reviewers can spot the case.
+    assert any(e.get("kind") == "empty_slot_result" for e in d.transcript)
+
+
+async def test_never_mind_mid_sentence_does_not_trigger_goodbye(
+    ehr_client: EHRClient,
+) -> None:
+    """Bug 2 regression: ``never mind`` mid-utterance must not route to END.
+
+    Previously the goodbye regex matched ``never mind`` anywhere, so a caller
+    saying "never mind the insurance, I want to book" during CHOOSE_INTENT was
+    silently dropped to END mid-flow. The trailing-anchor split fixes this.
+    """
+    canned = CannedLLM([LLMReply(text="ok, what day works for you?")])
+    async with ehr_client:
+        d = Dispatcher(llm=canned, ehr_client=ehr_client)
+        d.state = State.CHOOSE_INTENT
+        await d.handle_user_turn("never mind the insurance, I want to book")
+    # Booking intent in the same utterance wins; END is not reached.
+    assert d.state is State.BOOK_FLOW
+    # And a trailing "never mind" still routes to END from CHOOSE_INTENT.
+    async with ehr_client:
+        d2 = Dispatcher(llm=CannedLLM([LLMReply(text="okay, bye")]), ehr_client=ehr_client)
+        d2.state = State.CHOOSE_INTENT
+        await d2.handle_user_turn("actually, never mind.")
+    assert d2.state is State.END
