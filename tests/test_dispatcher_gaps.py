@@ -12,6 +12,7 @@ Uses the shared ``ehr_client`` fixture (see ``tests/conftest.py``).
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 from prosper.dispatcher import (
     Dispatcher,
@@ -719,3 +720,211 @@ async def test_never_mind_mid_sentence_does_not_trigger_goodbye(
         d2.state = State.CHOOSE_INTENT
         await d2.handle_user_turn("actually, never mind.")
     assert d2.state is State.END
+
+
+def test_mark_last_assistant_interrupted_truncates_and_marks(
+    ehr_client: EHRClient,
+) -> None:
+    """Subproblem A (2026-05-23): the dispatcher must rewrite the last
+    assistant turn to reflect only the audible portion plus the
+    [INTERRUPTED by user] marker so the next LLM call sees an honest
+    timeline. See docs/research/interruption_design.md."""
+    d = _make_dispatcher(ehr_client, State.CONFIRM_BOOK)
+    d.history.append({"role": "user", "content": "ten o'clock works"})
+    d.history.append(
+        {
+            "role": "assistant",
+            "content": "Booking 2 PM with Dr. Smith on Tuesday — confirming now.",
+        }
+    )
+    d.mark_last_assistant_interrupted("Booking 2 PM with Dr. Smi")
+    last = d.history[-1]
+    assert "[INTERRUPTED by user]" in last["content"]
+    assert last["content"].startswith("Booking 2 PM with Dr. Smi")
+    # Previous user turn is untouched.
+    assert d.history[-2]["content"] == "ten o'clock works"
+
+
+def test_mark_last_assistant_interrupted_handles_zero_spoken_text(
+    ehr_client: EHRClient,
+) -> None:
+    """Interrupt that fires before any TTS text propagated → mark the turn
+    as [NOT HEARD] so the LLM knows the caller heard nothing."""
+    d = _make_dispatcher(ehr_client, State.IDENTIFY_PATIENT)
+    d.history.append({"role": "assistant", "content": "What's the best phone number..."})
+    d.mark_last_assistant_interrupted("")
+    last = d.history[-1]
+    assert "[NOT HEARD]" in last["content"]
+    assert "[INTERRUPTED by user]" in last["content"]
+
+
+def test_mark_last_assistant_interrupted_noop_when_last_role_not_assistant(
+    ehr_client: EHRClient,
+) -> None:
+    """Race: if the user turn already landed in history before the interrupt
+    flushes (or there's no history yet), the marker must not corrupt an
+    unrelated entry."""
+    d = _make_dispatcher(ehr_client, State.GREETING)
+    # Empty history — must be a no-op, not an IndexError.
+    d.mark_last_assistant_interrupted("anything")
+    assert d.history == []
+    # User as last role — must remain unchanged.
+    d.history.append({"role": "user", "content": "hello there"})
+    d.mark_last_assistant_interrupted("anything")
+    assert d.history[-1] == {"role": "user", "content": "hello there"}
+
+
+def test_mark_last_assistant_interrupted_is_idempotent(ehr_client: EHRClient) -> None:
+    """Two flushes for the same turn (paranoid frame doubling) must not
+    cascade the marker into a giant string."""
+    d = _make_dispatcher(ehr_client, State.BOOK_FLOW)
+    d.history.append({"role": "assistant", "content": "Let me check what's available"})
+    d.mark_last_assistant_interrupted("Let me check")
+    after_first = d.history[-1]["content"]
+    d.mark_last_assistant_interrupted("Let me check again")
+    assert d.history[-1]["content"] == after_first
+
+
+async def test_interrupted_timeline_reaches_next_llm_call(ehr_client: EHRClient) -> None:
+    """End-to-end timeline contract: an interrupt between two user turns must
+    surface to the LLM as a truncated+marked assistant entry followed by the
+    barge-in utterance, in order. This is the honest-timeline the LLM needs to
+    decide whether the caller is reacting to the cut line or an earlier turn."""
+
+    class HistoryCapturingLLM(LLMClientProtocol):
+        def __init__(self, replies: list[LLMReply]) -> None:
+            self._iter: Iterator[LLMReply] = iter(replies)
+            self.last_history: list[dict[str, Any]] = []
+
+        async def generate(
+            self, *, state: str, history: list[dict[str, Any]], tools: list[dict[str, Any]]
+        ) -> LLMReply:
+            self.last_history = list(history)
+            try:
+                return next(self._iter)
+            except StopIteration:
+                return LLMReply(text="", tool_calls=[])
+
+    canned = HistoryCapturingLLM(
+        [
+            LLMReply(text="Booking 2 PM with Dr. Smith on Tuesday — confirming now."),
+            LLMReply(text="No problem — what day would you prefer instead?"),
+        ]
+    )
+    async with ehr_client:
+        d = Dispatcher(llm=canned, ehr_client=ehr_client)
+        d.state = State.CONFIRM_BOOK
+        # Turn 1: caller agrees, bot starts reading back the booking.
+        await d.handle_user_turn("yes that works")
+        # VAD interrupts mid-readback — observer flushes the audible prefix.
+        d.mark_last_assistant_interrupted("Booking 2 PM with Dr. Smi")
+        # Turn 2: caller cuts in to change their mind.
+        await d.handle_user_turn("wait no, not Tuesday")
+
+    # The LLM's view on turn 2 must contain the marked assistant turn BEFORE
+    # the barge-in user utterance, in timeline order.
+    contents = [m.get("content", "") for m in canned.last_history]
+    marked = next((c for c in contents if "[INTERRUPTED by user]" in c), None)
+    assert marked is not None, "interrupted assistant turn missing from LLM history"
+    assert "wait no, not Tuesday" in contents
+    assert contents.index(marked) < contents.index("wait no, not Tuesday")
+
+
+# --- Subproblem C: fuzzy multi-candidate identity disambiguation -------------
+
+_TWO_SMITHS = [
+    {
+        "id": "p1",
+        "first_name": "John",
+        "last_name": "Smith",
+        "dob": "1985-03-04",
+        "similarity": 0.9,
+    },
+    {
+        "id": "p2",
+        "first_name": "Jon",
+        "last_name": "Smith",
+        "dob": "1985-03-04",
+        "similarity": 0.88,
+    },
+]
+
+
+def test_redact_find_multiple_candidates_numbered() -> None:
+    """A multi-candidate find result is rendered as a numbered, UUID-free
+    list so the caller can pick by number."""
+    out = _redact_for_llm("find_patient_by_name_dob", {"patients": _TWO_SMITHS})
+    assert "[1] John Smith (DOB 1985-03-04)" in out
+    assert "[2] Jon Smith (DOB 1985-03-04)" in out
+    assert "p1" not in out and "p2" not in out  # no ids leak
+
+
+def test_identify_multiple_candidates_holds_disambiguation(ehr_client: EHRClient) -> None:
+    """Two same-DOB / similar-name matches must NOT auto-pick an identity.
+    The dispatcher stays in IDENTIFY_PATIENT with candidates pending."""
+    d = _make_dispatcher(ehr_client, State.IDENTIFY_PATIENT)
+    result = Ok(value={"patients": _TWO_SMITHS})
+    d._record_tool_result("find_patient_by_name_dob", result)
+    d._maybe_transition_from_tool("find_patient_by_name_dob", result)
+    assert d.state is State.IDENTIFY_PATIENT
+    assert d.memory.identified_patient is None
+    assert len(d.memory.pending_identity_candidates) == 2
+
+
+async def test_identify_pick_by_ordinal_resolves(ehr_client: EHRClient) -> None:
+    """'the first one' resolves to candidate[0] and advances to CHOOSE_INTENT."""
+    async with ehr_client:
+        d = Dispatcher(
+            llm=CannedLLM([LLMReply(text="great, book or cancel?")]), ehr_client=ehr_client
+        )
+        d.state = State.IDENTIFY_PATIENT
+        d.memory.pending_identity_candidates = list(_TWO_SMITHS)
+        await d.handle_user_turn("the first one")
+    assert d.memory.identified_patient is not None
+    assert d.memory.identified_patient["id"] == "p1"
+    assert d.memory.pending_identity_candidates == []
+    assert d.state is State.CHOOSE_INTENT
+
+
+async def test_identify_pick_by_number_resolves_second(ehr_client: EHRClient) -> None:
+    """'number two' resolves to candidate[1]."""
+    async with ehr_client:
+        d = Dispatcher(llm=CannedLLM([LLMReply(text="ok!")]), ehr_client=ehr_client)
+        d.state = State.IDENTIFY_PATIENT
+        d.memory.pending_identity_candidates = list(_TWO_SMITHS)
+        await d.handle_user_turn("number two please")
+    assert d.memory.identified_patient["id"] == "p2"
+    assert d.state is State.CHOOSE_INTENT
+
+
+async def test_identify_unparseable_pick_stays_pending(ehr_client: EHRClient) -> None:
+    """If the caller's reply doesn't select a candidate, stay in IDENTIFY so
+    the LLM asks again — never guess an identity."""
+    async with ehr_client:
+        d = Dispatcher(llm=CannedLLM([LLMReply(text="sorry, which one?")]), ehr_client=ehr_client)
+        d.state = State.IDENTIFY_PATIENT
+        d.memory.pending_identity_candidates = list(_TWO_SMITHS)
+        await d.handle_user_turn("um, I'm not totally sure")
+    assert d.memory.identified_patient is None
+    assert len(d.memory.pending_identity_candidates) == 2
+    assert d.state is State.IDENTIFY_PATIENT
+
+
+def test_identify_single_fuzzy_match_still_auto_advances(ehr_client: EHRClient) -> None:
+    """Regression guard: a single match (even fuzzy) keeps the existing
+    auto-advance behavior — only the >1 case is held for disambiguation."""
+    d = _make_dispatcher(ehr_client, State.IDENTIFY_PATIENT)
+    one = [
+        {
+            "id": "p9",
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "dob": "1990-12-10",
+            "similarity": 0.9,
+        }
+    ]
+    result = Ok(value={"patients": one})
+    d._record_tool_result("find_patient_by_phone", result)
+    d._maybe_transition_from_tool("find_patient_by_phone", result)
+    assert d.memory.identified_patient is not None
+    assert d.state is State.CHOOSE_INTENT

@@ -1,0 +1,187 @@
+/* iPhone-style call UI for the Prosper Health voice agent.
+   Renders a single "phone screen" centered on the page. The mouth overlay
+   sits on the lower third of the avatar and is driven from call.js using
+   a WebAudio AnalyserNode on the remote stream — so the bot's actual TTS
+   loudness becomes mouth motion (lightweight, no visemes). */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color: #fff;
+  background: radial-gradient(circle at 30% 10%, #1f2937 0%, #0b1220 60%, #050810 100%);
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+
+.phone {
+  width: 380px;
+  height: 760px;
+  max-height: 95vh;
+  background: linear-gradient(180deg, rgba(20, 26, 38, 0.95) 0%, rgba(10, 14, 22, 0.95) 100%);
+  border-radius: 44px;
+  border: 1.5px solid rgba(255,255,255,0.08);
+  box-shadow:
+    0 30px 80px rgba(0,0,0,0.6),
+    0 0 0 6px rgba(255,255,255,0.02);
+  padding: 18px 24px 30px;
+  display: flex; flex-direction: column; align-items: center;
+  position: relative;
+}
+
+.status-bar {
+  width: 100%;
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 11px; font-weight: 600;
+  color: rgba(255,255,255,0.7);
+  letter-spacing: 0.5px;
+  padding: 4px 6px 18px;
+}
+
+.call-meta {
+  width: 100%;
+  display: flex; flex-direction: column; align-items: center;
+  gap: 8px; margin-bottom: 18px;
+}
+
+.state-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 12px; font-weight: 500;
+  letter-spacing: 0.3px;
+}
+.state-pill .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #6b7280;
+  box-shadow: 0 0 0 0 rgba(107,114,128,0.7);
+}
+.state-pill.connecting .dot { background: #fbbf24; animation: blink 1s ease-in-out infinite; }
+.state-pill.live .dot { background: #10b981; box-shadow: 0 0 0 4px rgba(16,185,129,0.18); }
+.state-pill.ended .dot { background: #ef4444; }
+
+@keyframes blink { 50% { opacity: 0.4 } }
+
+.timer {
+  font-feature-settings: "tnum";
+  font-size: 18px;
+  color: rgba(255,255,255,0.55);
+}
+
+/* ---- Avatar + animated rings ---- */
+
+.avatar-wrap {
+  position: relative;
+  width: 220px; height: 220px;
+  margin: 6px 0 26px;
+  display: flex; align-items: center; justify-content: center;
+}
+
+.ring {
+  position: absolute; inset: 0;
+  border: 2px solid rgba(56,189,248,0.35);
+  border-radius: 50%;
+  opacity: 0;
+}
+.avatar-wrap.live .ring { animation: pulse 2.4s ease-out infinite; }
+.avatar-wrap.live .ring.delay-1 { animation-delay: 0.8s; }
+.avatar-wrap.live .ring.delay-2 { animation-delay: 1.6s; }
+
+@keyframes pulse {
+  0% { transform: scale(0.92); opacity: 0.55; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+
+.avatar {
+  position: relative;
+  width: 180px; height: 180px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: #1f2937;
+  border: 3px solid rgba(255,255,255,0.12);
+  box-shadow: 0 14px 40px rgba(0,0,0,0.5);
+}
+.avatar img, .avatar svg {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+
+/* Animated mouth — a soft dark oval that grows on speech. Sitting on the
+   lower-third of the avatar. Height is driven from JS (--mouth-open) so
+   we get cheap, smooth lip motion without visemes. */
+.mouth {
+  position: absolute;
+  left: 50%; bottom: 26%;
+  width: 36px;
+  height: calc(2px + var(--mouth-open, 0px));
+  background: #1a0f0f;
+  border-radius: 50%;
+  transform: translateX(-50%);
+  transition: height 60ms linear;
+  box-shadow: 0 0 8px rgba(0,0,0,0.6) inset;
+  opacity: 0.8;
+}
+
+/* ---- Callee identity ---- */
+
+.callee { text-align: center; margin-bottom: 28px; }
+.callee .name { font-size: 28px; font-weight: 600; letter-spacing: -0.3px; }
+.callee .role { font-size: 13px; color: rgba(255,255,255,0.55); margin-top: 4px; }
+
+/* ---- Control buttons ---- */
+
+.controls {
+  display: flex; gap: 28px; align-items: center; justify-content: center;
+  margin-top: auto; margin-bottom: 8px;
+}
+.ctrl {
+  width: 60px; height: 60px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.05);
+  color: rgba(255,255,255,0.85);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  transition: background 180ms ease, transform 120ms ease;
+}
+.ctrl:hover:not(:disabled) { background: rgba(255,255,255,0.16); }
+.ctrl:active:not(:disabled) { transform: scale(0.94); }
+.ctrl:disabled { opacity: 0.35; cursor: not-allowed; }
+.ctrl.mute.active { background: #fbbf24; color: #1a1300; }
+.ctrl.hangup { background: #ef4444; color: #fff; width: 70px; height: 70px; }
+.ctrl.hangup:hover:not(:disabled) { background: #dc2626; }
+
+/* ---- Big dial button ---- */
+
+.dial-btn {
+  display: none;
+  align-items: center; gap: 10px;
+  padding: 14px 26px;
+  border-radius: 999px;
+  background: #10b981;
+  border: none;
+  color: #fff;
+  font: inherit; font-weight: 600; font-size: 15px;
+  cursor: pointer;
+  box-shadow: 0 10px 30px rgba(16,185,129,0.35);
+  transition: transform 120ms ease, background 180ms ease;
+  margin: 0 auto 12px;
+}
+.dial-btn:hover { background: #059669; }
+.dial-btn:active { transform: scale(0.97); }
+
+.phone.idle .dial-btn { display: inline-flex; }
+.phone.idle .controls { display: none; }
+
+.hint {
+  font-size: 11px;
+  color: rgba(255,255,255,0.4);
+  text-align: center;
+  margin: 0;
+  letter-spacing: 0.2px;
+}
+.mono { font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; }
+
+#remote-audio { display: none; }

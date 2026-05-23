@@ -26,6 +26,7 @@ EventType = Literal[
     "transcript_turn",
     "outcome",
     "latency_tick",
+    "turn_interrupted",
 ]
 
 # Derived from `EventType` via `get_args` — single source of truth. Adding a
@@ -45,6 +46,7 @@ _REQUIRED_KEYS: Final[dict[EventType, frozenset[str]]] = {
     "transcript_turn": frozenset({"role", "text", "turn_id"}),
     "outcome": frozenset({"outcome", "details"}),
     "latency_tick": frozenset({"phase", "duration_ms"}),
+    "turn_interrupted": frozenset({"turn_id", "state"}),
 }
 
 # Defence-in-depth: any field whose name ends with `_masked` must contain at

@@ -21,6 +21,7 @@ from typing import Any
 from dateutil import parser as dateparser
 
 from prosper.ehr_client import EHRClient, EHRHTTPError
+from prosper.prompts import SPECIALTY_DURATION_TABLE
 from prosper.result import Err, Ok, Result
 
 ToolHandler = Callable[..., Awaitable[Result[dict[str, Any]]]]
@@ -155,20 +156,70 @@ async def create_patient_handler(
     )
 
 
+async def suggest_specialty_handler(
+    client: EHRClient,  # noqa: ARG001 — kept for handler-signature uniformity; mini-LLM uses its own OpenAI client
+    *,
+    symptoms: str,
+) -> Result[dict[str, Any]]:
+    """Map a free-form symptom description to (specialty, duration_minutes).
+
+    Wraps the mini-LLM JSON-mode call in ``llm.classify_symptoms``. The
+    main LLM is expected to call this BEFORE ``list_availability_slots``
+    when the caller described symptoms instead of naming a specialty.
+    """
+    # Lazy import — ``prosper.llm`` pulls in ``prosper.dispatcher`` which
+    # in turn imports this module. Resolving at call time avoids the
+    # circular import that an in-line module-level import would create.
+    from prosper.llm import classify_symptoms
+
+    r = await classify_symptoms(symptoms=symptoms)
+    if r.kind == "err":
+        return r
+    cls = r.value
+    if cls.red_flag:
+        return Err(
+            code="medical_emergency",
+            message=(
+                "Symptoms suggest a possible medical emergency. The agent "
+                "must redirect the caller to 911 or emergency services and "
+                "must NOT proceed with a routine booking."
+            ),
+            retryable=False,
+        )
+    return Ok(
+        value={
+            "specialty": cls.specialty,
+            "duration_minutes": cls.duration_minutes,
+            "confidence": cls.confidence,
+            "follow_up": cls.follow_up,
+        }
+    )
+
+
 async def list_availability_slots_handler(
     client: EHRClient,
     *,
     date: str,
     provider_id: str | None = None,
     specialty: str | None = None,
+    duration_minutes: int = 30,
 ) -> Result[dict[str, Any]]:
     d_r = _parse_dob(date)
     if d_r.kind == "err":
         return Err(code="date_unparseable", message=d_r.message, retryable=True)
     asked = d_r.value
+    if duration_minutes not in (30, 60, 90):
+        return Err(
+            code="invalid_duration",
+            message=f"duration_minutes={duration_minutes} not in (30, 60, 90)",
+            retryable=True,
+        )
     try:
         slots = await client.list_availability(
-            date_=asked, provider_id=provider_id, specialty=specialty
+            date_=asked,
+            provider_id=provider_id,
+            specialty=specialty,
+            duration_minutes=duration_minutes,
         )
     except EHRHTTPError as e:
         return Err(code="ehr_error", message=str(e), retryable=True)
@@ -177,8 +228,8 @@ async def list_availability_slots_handler(
     # never gets a bare "no slots" dead-end. Surface both the asked date
     # (empty) and the next available date so the bot can say "Wednesday's
     # booked solid — Thursday has openings at 10 and 2, either work?". The
-    # specialty filter is preserved on probes so we don't suggest a GP slot
-    # to a caller who asked for a physiotherapist.
+    # specialty + duration filter is preserved on probes so we don't suggest
+    # a 30-min GP slot to a caller who needs a 60-min therapy session.
     next_day_with_slots: dict[str, Any] | None = None
     if not slots:
         from datetime import timedelta
@@ -187,7 +238,10 @@ async def list_availability_slots_handler(
             probe = asked + timedelta(days=offset)
             try:
                 probe_slots = await client.list_availability(
-                    date_=probe, provider_id=provider_id, specialty=specialty
+                    date_=probe,
+                    provider_id=provider_id,
+                    specialty=specialty,
+                    duration_minutes=duration_minutes,
                 )
             except EHRHTTPError:
                 continue
@@ -230,10 +284,22 @@ async def create_appointment_handler(
     *,
     patient_id: str,
     slot_id: str,
+    duration_minutes: int = 30,
     notes: str | None = None,
 ) -> Result[dict[str, Any]]:
+    if duration_minutes not in (30, 60, 90):
+        return Err(
+            code="invalid_duration",
+            message=f"duration_minutes={duration_minutes} not in (30, 60, 90)",
+            retryable=True,
+        )
     try:
-        appt = await client.create_appointment(patient_id=patient_id, slot_id=slot_id, notes=notes)
+        appt = await client.create_appointment(
+            patient_id=patient_id,
+            slot_id=slot_id,
+            duration_minutes=duration_minutes,
+            notes=notes,
+        )
     except EHRHTTPError as e:
         if (
             e.status_code == 409
@@ -241,6 +307,12 @@ async def create_appointment_handler(
             and e.detail.get("code") == "slot_taken"
         ):
             return Err(code="slot_taken_other_patient", message=str(e), retryable=True)
+        if (
+            e.status_code == 409
+            and isinstance(e.detail, dict)
+            and e.detail.get("code") == "no_consecutive_slots"
+        ):
+            return Err(code="no_consecutive_slots", message=str(e), retryable=True)
         if e.status_code == 404:
             return Err(code="patient_or_slot_not_found", message=str(e), retryable=False)
         return Err(code="ehr_error", message=str(e), retryable=True)
@@ -388,15 +460,52 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "suggest_specialty": {
+        "type": "function",
+        "function": {
+            "name": "suggest_specialty",
+            "description": (
+                "Map a caller's symptom description to the best-fit "
+                "specialty AND a recommended visit duration in minutes. "
+                "Call this BEFORE `list_availability_slots` if the caller "
+                "described symptoms ('my stomach hurts', 'I've been "
+                "feeling down') instead of naming a specialty. If they "
+                "already said which provider they want (e.g. 'my "
+                "therapist', 'a psychiatrist'), skip this tool and go "
+                "straight to `list_availability_slots`. Returns "
+                "{specialty, duration_minutes, confidence, follow_up}. "
+                "If `follow_up` is set, ask it verbatim and call this "
+                "tool again with the combined description."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symptoms": {
+                        "type": "string",
+                        "description": (
+                            "Short description (≤200 chars) of what the "
+                            "caller said is wrong. Paraphrase if needed; "
+                            "do not invent symptoms."
+                        ),
+                    },
+                },
+                "required": ["symptoms"],
+            },
+        },
+    },
     "list_availability_slots": {
         "type": "function",
         "function": {
             "name": "list_availability_slots",
             "description": (
-                "Return available 30-minute slots for a given date. Optional "
+                "Return available slots for a given date that can host a "
+                "`duration_minutes` visit (30, 60, or 90). Optional "
                 "`specialty` filter (e.g. 'Therapist', 'Psychiatrist', "
-                "'General Practice', 'Dermatologist', 'Physiotherapist') "
-                "when the caller asks for a specific kind of provider."
+                "'General Practice', 'Dermatologist', 'Physiotherapist'). "
+                "For 60- or 90-min visits the API only returns anchor "
+                "slots whose next consecutive slot(s) are also free "
+                "under the same provider, so picking any returned slot "
+                "is always safe to book."
             ),
             "parameters": {
                 "type": "object",
@@ -414,6 +523,16 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                         "description": (
                             "Filter by provider specialty (case-insensitive). "
                             "Leave empty if the caller did not specify."
+                        ),
+                    },
+                    "duration_minutes": {
+                        "type": "integer",
+                        "enum": [30, 60, 90],
+                        "description": (
+                            "Visit length. Default 30. Use the value the "
+                            "previous `suggest_specialty` call returned, "
+                            "or pick a sensible default per specialty "
+                            "(GP/Dermatologist 30; Therapist/Psychiatrist 60)."
                         ),
                     },
                 },
@@ -448,6 +567,16 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                             "number from the `list_availability_slots` "
                             "result — e.g. '1' for the first slot, '2' for "
                             "the second. Never invent UUIDs."
+                        ),
+                    },
+                    "duration_minutes": {
+                        "type": "integer",
+                        "enum": [30, 60, 90],
+                        "description": (
+                            "Visit length. MUST match what you passed to "
+                            "`list_availability_slots` in this turn — the "
+                            "EHR will reject a 60-min booking on a slot "
+                            "whose adjacent block isn't free. Default 30."
                         ),
                     },
                     "notes": {
@@ -546,9 +675,29 @@ HANDLERS: dict[str, ToolHandler] = {
     "find_patient_by_phone": find_patient_by_phone_handler,
     "find_patient_by_name_dob": find_patient_by_name_dob_handler,
     "create_patient": create_patient_handler,
+    "suggest_specialty": suggest_specialty_handler,
     "list_availability_slots": list_availability_slots_handler,
     "create_appointment": create_appointment_handler,
     "get_upcoming_appointments": get_upcoming_appointments_handler,
     "cancel_appointment": cancel_appointment_handler,
     "reschedule_appointment": reschedule_appointment_handler,
 }
+
+
+# Re-export the specialty/duration mapping so callers (dispatcher / tests /
+# evals) can reach the canonical defaults without re-importing prompts.py.
+__all__ = [
+    "HANDLERS",
+    "SPECIALTY_DURATION_TABLE",
+    "TOOL_SCHEMAS",
+    "ToolHandler",
+    "cancel_appointment_handler",
+    "create_appointment_handler",
+    "create_patient_handler",
+    "find_patient_by_name_dob_handler",
+    "find_patient_by_phone_handler",
+    "get_upcoming_appointments_handler",
+    "list_availability_slots_handler",
+    "reschedule_appointment_handler",
+    "suggest_specialty_handler",
+]

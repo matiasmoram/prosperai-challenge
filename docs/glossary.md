@@ -59,3 +59,27 @@ truth in code.
   `data/audit/`, written by `AuditJSONLWriter` as it drains the bus.
   Source of truth for the `/console/replay/{id}` endpoint
   (`src/prosper/console/audit.py`).
+- **triage / suggest_specialty** — `BOOK_FLOW`-only tool that maps a caller's
+  free-form symptom description to a best-fit specialty + visit duration via a
+  `gpt-4o-mini` JSON-mode call (`llm.classify_symptoms`,
+  `tools.suggest_specialty_handler`, ADR 005). Skipped when the caller names a
+  specialty directly.
+- **SpecialtyClassification** — Frozen dataclass returned by `classify_symptoms`:
+  `specialty`, `duration_minutes`, `confidence`, `follow_up?`, `red_flag`
+  (`src/prosper/llm.py`).
+- **AppointmentSlotLock** — One-row-per-slot table (PK on `slot_id`) that enforces
+  no-double-booking across multi-slot (60/90-min) appointments. A 60-min visit
+  locks two consecutive slots in one transaction (`src/prosper/ehr/models.py`,
+  ADR 005).
+- **duration_minutes** — Visit length in `{30, 60, 90}` carried on `Appointment`
+  and threaded through `list_availability_slots` / `create_appointment`. >30-min
+  bookings require N consecutive free slots under the same provider.
+- **NoConsecutiveSlotsError / no_consecutive_slots** — Raised/returned when a
+  60- or 90-min booking can't find enough adjacent free slots; surfaces as 409
+  the LLM can recover from by offering another time.
+- **medical_emergency** — `Err.code` from `suggest_specialty` when the triage
+  mini-LLM flags a red-flag symptom (chest pain, suicidal ideation, …). The
+  agent redirects to emergency services and never books.
+- **MockTriageClient** — Deterministic keyword-routing stub for the triage
+  mini-LLM, installed via `prosper.llm._TRIAGE_CLIENT_OVERRIDE` so `make
+  mock-eval` stays hermetic (`evals/mock_llm.py`).

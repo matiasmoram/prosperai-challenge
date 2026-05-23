@@ -123,6 +123,23 @@ Priority-ranked improvements that would meaningfully strengthen this submission 
 
 ---
 
+### 3.3 First-Turn Speculative Race (find + availability prefetch) — *deferred*
+
+**Why this matters to Prosper:** On call start the bot asks the caller's name, then runs identity lookup and (later) availability sequentially. A speculative race — fire `find_patient_by_name_dob` and `list_availability_slots` for the next few business days in parallel the moment the name is heard — overlaps EHR I/O with the caller's speech (the MarioW333 pattern). Full design + sequence diagrams + cancellation discipline in `docs/research/speculative_race.md`.
+
+**Shipped already (2026-05-23):** the *fuzzy disambiguation* half — `src/prosper/speculation.py` (`classify_find_result`, `build_disambiguation_message`, `EXACT_THRESHOLD`, `next_n_business_days`) plus dispatcher wiring. When a name+DOB lookup returns more than one candidate the bot now holds in `IDENTIFY_PATIENT`, reads the numbered candidates back, and resolves on the caller's pick (`pending_identity_candidates` + `_resolve_pending_identity`) instead of silently guessing. Name-first greeting shipped in the same pass.
+
+**Deferred (the async prefetch itself):** on the current in-process SQLite EHR a lookup is ~30 ms, so racing it saves <200 ms while adding asyncio task-lifecycle + cancellation complexity in the dispatcher core. Revisit when the EHR moves out-of-process / remote (round-trips in the 100–300 ms range), where the overlap pays for the complexity. `next_n_business_days` is already in `speculation.py` ready for the availability fan-out.
+
+- Launch `T_find` + N×`T_avail` as `asyncio.Task`s on the GREETING→IDENTIFY transition; cache results in a `SpeculationStore` on `SessionMemory`.
+- Short-circuit `_execute_tool` for find/availability when a cached result exists; drain+cancel pending tasks on `no_match` / call end via a `_cancel_and_drain` helper (2 s guard).
+- `create_patient` stays payload-prep only (no speculative HTTP) — our EHR has no name-based dedupe, so a speculative write could create a duplicate patient.
+
+**Files to touch:** `src/prosper/speculation.py`, `src/prosper/dispatcher.py`, `tests/test_speculation.py`, `evals/scenarios.py`
+**Effort:** L | **Risk:** med (asyncio cancellation discipline; see design doc §5, §11)
+
+---
+
 ## 4. EHR Depth
 
 ### 4.1 Provider Preference Capture and Routing

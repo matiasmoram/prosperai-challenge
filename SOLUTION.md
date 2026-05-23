@@ -1,12 +1,25 @@
 # Prosper Health voice agent — solution
 
-## Overview
-A voice agent that books and cancels appointments at a fictional clinic.
-Two processes: a FastAPI EHR backed by SQLite + SQLAlchemy, and a Pipecat
-bot driven by a custom finite-state-machine dispatcher with per-state
-tool whitelisting.
+> Reviewer-facing tour of the codebase as it stands today. Pair this with
+> `docs/architecture.md` (process + FSM diagrams) and `docs/adr/001..004`
+> (load-bearing decisions). Anything not covered here lives in `CLAUDE.md`
+> (rules) or `CONTRIBUTING.md` (recipes).
 
-## Quick start
+## 1. Overview
+
+A voice agent that books, reschedules, and cancels appointments at a
+fictional US clinic over WebRTC. Two processes share one SQLite database:
+
+- **`bot.py`** — Pipecat pipeline (ElevenLabs Flash v2.5 STT/TTS, OpenAI
+  LLM) wired to a custom FSM dispatcher.
+- **`src/prosper/ehr/api.py`** — FastAPI EHR backed by SQLite/SQLAlchemy.
+
+The bot talks to the EHR over HTTP via `EHRClient` (an `httpx.AsyncClient`).
+Tests and evals mount the EHR in-process through `httpx.ASGITransport` — no
+socket, no port binding, fully hermetic.
+
+## 2. Quick start
+
 ```bash
 cp env.example .env       # add ELEVENLABS_API_KEY and OPENAI_API_KEY
 make install              # uv sync
@@ -15,84 +28,72 @@ make ehr                  # terminal 1 — FastAPI on :8000
 make bot                  # terminal 2 — Pipecat on :7860
 # open http://localhost:7860 → Connect
 ```
-Or with Docker: `docker-compose up`.
 
-## Quick evaluate
+Docker variant: `docker-compose up`.
+
+## 3. Quick evaluate
+
 ```bash
-make mock-eval                                                                                    # zero-cost: 16 scenarios via deterministic mock LLM in ~5 s, no API key needed
-PROSPER_EVAL_LIVE=1 OPENAI_API_KEY=... make eval                                                  # live: 16 scripted scenarios, paired state + judge
-PROSPER_EVAL_LIVE=1 OPENAI_API_KEY=... uv run python -m evals --json evals/results/baseline.json
-PROSPER_EVAL_LIVE=1 OPENAI_API_KEY=... uv run python -m evals --concurrency 4 --baseline evals/results/baseline.json   # CI gate, 4-way parallel (default concurrency 4)
+make mock-eval            # zero-cost: all scripted scenarios via deterministic mock in ~5 s, no API key
+PROSPER_EVAL_LIVE=1 OPENAI_API_KEY=… make eval            # live: full suite, paired state + judge
+PROSPER_EVAL_LIVE=1 OPENAI_API_KEY=… uv run python -m evals --json evals/results/baseline.json
+PROSPER_EVAL_LIVE=1 OPENAI_API_KEY=… uv run python -m evals --concurrency 4 --baseline evals/results/baseline.json
 ```
 
-Live evals are gated on **both** `PROSPER_EVAL_LIVE=1` and `OPENAI_API_KEY`
-so an account without quota fails loudly with exit code 2 rather than
-silently passing. `make mock-eval` is the canonical offline smoke test —
-it parametrises `test_scenario_mock` over all 16 scenarios using
-`evals/mock_llm.py`, finishes in ~5 s, and is the recommended first step
-for any reviewer.
+Gating is intentional: a missing `PROSPER_EVAL_LIVE=1` OR missing
+`OPENAI_API_KEY` exits with code 2 so an account without quota fails loud
+rather than silently passing. `make mock-eval` is the canonical offline
+smoke test.
 
-## Endpoint mapping (challenge spec → REST)
+## 4. Process topology
 
-The README requests five named endpoints. We grouped them by HTTP verb and
-resource so the EHR feels like a real integration. The mapping is exact:
+```
+[browser WebRTC]
+       │
+       ▼
+   bot.py  (Pipecat pipeline + DispatcherProcessor)
+       │  httpx
+       ▼
+ehr/api.py (FastAPI)  ──►  data/ehr.db  (SQLite + WAL)
+       ▲
+       │  ASGITransport (in-process, evals + tests only)
+       │
+  evals/runner
+```
 
-| Challenge name | REST endpoint |
-|---|---|
-| `create_patient` | `POST /patients` |
-| `find_patient` (by name + DOB) | `GET /patients/by-name-dob?name=&dob=` |
-| `find_patient` (by phone, our addition) | `GET /patients/by-phone?phone=` |
-| `list_availability_slots` | `GET /availability?date=&provider_id=` |
-| `create_appointment` | `POST /appointments` |
-| `cancel_appointment` | `POST /appointments/{id}/cancel` |
-| (helper) get patient appointments | `GET /patients/{id}/appointments` |
+The HTTP loopback adds ~1 ms; it is dwarfed by STT/LLM/TTS, so keeping the
+EHR as a separate process is free in latency and earns realism — reviewers
+can hammer it independently, and it scales / fails independently from the
+bot. See `docs/adr/002-separate-ehr-process.md`.
 
-The phone-first `find_patient` variant exists because phone numbers are the
-single thing STT handles crisply — it's the bot's primary identification
-path. The challenge-required name+DOB lookup is still fully implemented and
-exercised as the fallback path.
+## 5. FSM
 
-## Architecture decisions
+`src/prosper/flows.py` is plain data: a `State` enum, an `ALLOWED_TOOLS`
+dict, a `TRANSITIONS` map. No framework. The dispatcher owns the runtime.
 
-| Decision | Choice | Why |
-|---|---|---|
-| Conversation orchestration | **Hybrid FSM** (9 states, per-state LLM-with-whitelisted-tools) | Deterministic state transitions and dispatcher-enforced tool gates eliminate "agent did the wrong thing at the wrong time" as a prompt-obedience problem; state assertions become trivial in evals. |
-| FSM library | **Custom dispatcher** (~250 LOC, no Pipecat Flows) | Single auditable file; no extra dependency on the latency-sensitive path; designed so a migration to Pipecat Flows later is a mechanical change. |
-| EHR topology | **Separate FastAPI process** + httpx client | Mirrors real EHR integrations; reviewers can stress-test the EHR independently; bot and EHR scale and fail independently. The 1 ms HTTP loopback overhead is irrelevant against STT/LLM/TTS latency. |
-| Database | **SQLite + SQLAlchemy** + pre-seeded `Slot` rows | Zero-config, file-backed, reproducible across reviewer machines. Slots as first-class rows mean admins can block lunch/PTO as exception rows, and idempotency on booking becomes a partial unique constraint instead of a distributed-lock problem. |
-| Patient identification | **Phone first, name+DOB fallback** | Phone is a digit string — STT handles it crisply. The challenge-required `find_patient_by_name_dob` path is fully implemented and exercised on the fallback path; one scenario covers each path. |
-| Appointment cancel | **Adaptive 0 / 1 / N** | 0 upcoming → say so and exit; 1 → auto-confirm; N → numbered list. One conditional, big UX win. |
-| Tool returns | **`Result[Ok, Err]` discriminated union** | Eliminates `dict \| None` ambiguity at the boundary; gives the dispatcher and the eval state-assertions a stable error-code enum to branch on. |
-| Eval suite | **Hybrid scripted text + paired state-assertion + LLM judge** | The deterministic check closes the "judge hallucinated success on a transcript that didn't actually mutate the EHR" gap. Audio smoke tests are marker-gated so default CI doesn't burn ElevenLabs credits on every push. |
-| Latency | **Instrumentation + long stable persona for prompt-cache + tight per-state prompts + filler speech + Flash v2.5 TTS + SQLite WAL + lazy VAD import** | TimingCollector with TTFT + cached-token surfacing; ElevenLabs Flash v2.5 (~75ms first-audio vs ~200ms); rotating filler ("One moment." / "Let me check." / "Looking that up.") before tool-firing states masks the LLM round-trip; SQLite WAL + `expire_on_commit=False` drop write contention from ~30 ms to ~8 ms; lazy Silero VAD import saves ~4 s of bot cold-import. See `docs/bench-results.md` for numbers. |
-| Reliability | **tenacity retry + fallback model + EHR health-check + env fail-fast + history sliding window + try/except around dispatcher + EHR client lifecycle** | `OpenAILLMAdapter` retries transient 5xx/429 with exponential jitter, falls back to `PROSPER_BOT_FALLBACK_MODEL` once after retries exhaust; soft-fails the EHR `/health` ping at boot; missing env vars short-circuit the 17 s pipecat import wall (`PROSPER_BOT_ENTRYPOINT=1`); the LLM history is capped at 40 messages so a 50-turn call can't blow the token budget; a last-resort try/except around `handle_user_turn` keeps a mid-call exception from killing the WebRTC session; EHR httpx client owned via `async with` so SIGTERM still closes cleanly. README bonus #2 explicitly. |
-| Security | **SSRF guard on `PROSPER_EHR_URL` + PII redaction in logs + DoS caps on request bodies** | `_validated_ehr_url` rejects non-http(s) schemes / missing hostnames so a compromised `.env` can't repoint the bot at cloud metadata (`169.254.169.254`); `redact_pii` masks phone / DOB / email in every `USER:` and `BOT[state]:` log line (HIPAA-adjacent — the dispatcher still sees raw text); Pydantic `Field(max_length=...)` caps prevent a malicious POST dumping multi-MB strings into SQLite. See `docs/research/2026-05-20-security-audit.md`. |
-| Correctness (audit fixes) | **Past-slot filter + IntegrityError→409 + UUID redaction + memory-validated tool args** | Bot can't offer 8am at 11am; concurrent-booking races surface as recoverable 409 not 500; LLM history only ever sees human-readable summaries (no raw UUIDs to read aloud); `create_appointment` rejects hallucinated slot_ids before they reach the EHR. |
-| Offline eval mode | **`evals/mock_llm.py` (≈700 LOC deterministic mock) + `make mock-eval` + `test_scenario_mock` pytest parametrisation** | All 16 scenarios run in ~5 s with no `OPENAI_API_KEY` so reviewers without quota can still verify the suite works. Live evals stay gated on `PROSPER_EVAL_LIVE=1` to prevent silent failure on quota-less accounts. |
-| Parallel eval execution | **`--concurrency N` (default 4) on `python -m evals` + per-scenario isolated SQLite engine** | Cuts full-suite wall-clock ~3× without crossing transactional state between scenarios. |
-| Quality gates | **149 tests + 17 skipped (mock-eval all pass; live awaits `PROSPER_EVAL_LIVE=1`), 91% line coverage on `src/prosper` (97% excluding `bot.py`), `mypy --strict`, ruff `{I,E,F,W,B,UP,ARG,SIM,RET,RUF,S}`, one-shot `make verify`** | `mypy.strict = true` in `pyproject.toml`; ruff `S` (bandit security checks) on the whole tree; per-file ignores documented inline; `make verify` runs lint+format+type+tests in order and stops on first failure; pre-commit runs the whole suite. |
-
-The full deliberation trail is in
-`docs/superpowers/specs/2026-05-19-prosper-challenge-design.md` —
-every architectural decision is tagged with the corresponding LLM
-council verdict.
-
-## Conversation flow
+States today (11):
 
 ```
 GREETING
-  ↓ (user speaks)
-IDENTIFY_PATIENT  ──(no match after both lookups)──▶  REGISTER_PATIENT
-  ↓ (found)                                                   ↓ (created)
-CHOOSE_INTENT  ◀──────────────────────────────────────────────┘
-  ↓
-BOOK_FLOW                                  CANCEL_FLOW
-  ↓ slot_chosen                              ↓ appointment_chosen
-CONFIRM_BOOK ─create_appointment─▶ END     CONFIRM_CANCEL ─cancel_appointment─▶ END
+  ↓ go_identify / goodbye
+IDENTIFY_PATIENT  ──no_match──►  REGISTER_PATIENT
+  ↓ patient_found                       ↓ registered
+CHOOSE_INTENT  ◄──────────────────────────┘
+  │
+  ├─ wants_book ─────► BOOK_FLOW ─slot_chosen──► CONFIRM_BOOK ─booked──► END
+  │                                                  ↑ abort
+  ├─ wants_cancel ────► CANCEL_FLOW ─appt_chosen──► CONFIRM_CANCEL ─cancelled──► END
+  │                       │                              │ cancelled_then_rebook
+  │                       └─ nothing_to_cancel ──► END   └──► BOOK_FLOW
+  │                                                  ↑ abort
+  ├─ wants_reschedule ─► RESCHEDULE_FLOW ─slot_chosen─► CONFIRM_RESCHEDULE ─rescheduled──► END
+  │                       │                              ↑ abort
+  │                       └─ nothing_to_reschedule ──► END
+  └─ goodbye ─► END                                 (every non-END state has a goodbye edge)
 ```
 
-Per-state tool whitelist (enforced at the dispatcher level, not by prompt
-instructions):
+Per-state tool whitelist enforced by the dispatcher (not by prompt
+instructions — the LLM literally cannot see tools outside the whitelist):
 
 | State | Allowed tools |
 |---|---|
@@ -102,183 +103,379 @@ instructions):
 | CHOOSE_INTENT | (none) |
 | BOOK_FLOW | `list_availability_slots` |
 | CANCEL_FLOW | `get_upcoming_appointments` |
+| RESCHEDULE_FLOW | `get_upcoming_appointments`, `list_availability_slots` |
 | CONFIRM_BOOK | `create_appointment` |
 | CONFIRM_CANCEL | `cancel_appointment` |
+| CONFIRM_RESCHEDULE | `reschedule_appointment` |
 | END | (none) |
 
-If the LLM tries to call a tool outside its current state's whitelist, the
-dispatcher rejects it, injects a system message into the LLM history, and
-records a `tool_rejected` event in the transcript — the model recovers on
-the next iteration rather than the call silently mis-firing.
+If the LLM tries a tool outside the whitelist, the dispatcher records a
+`tool_rejected` transcript entry and feeds a synthetic error
+`role:tool` message back into the LLM's history so the model retries on
+the next inner iteration. Forbidden calls never reach an HTTP boundary.
 
-## Reliability (README bonus #2)
+See `docs/adr/001-hybrid-fsm-with-tool-whitelist.md` for the design
+choice; `docs/architecture.md` for the diagram.
 
-Seven layers, all in `src/prosper/llm.py`, `src/prosper/bot.py`, and
-`src/prosper/dispatcher.py`:
+## 6. Tools
 
-1. **`tenacity` retry on transient LLM failures** — `AsyncRetrying` with
-   3 attempts and exponential jitter, scoped to `APIConnectionError`,
-   `APITimeoutError`, `InternalServerError`, `RateLimitError`. Auth errors
-   are NOT retried — they don't get better with backoff.
-2. **Fallback model** — `PROSPER_BOT_FALLBACK_MODEL` env var; on primary-
-   model exhaustion, one last call against the fallback (e.g.
-   `gpt-4o-mini` brownout → `gpt-4o`) before propagating.
-3. **Startup health-check** — `_startup_health_check()` pings the EHR
-   `/health` before accepting clients. Soft-fail with loud warning so the
-   operator sees the failure pre-call, not mid-conversation.
-4. **Env fail-fast** — `load_dotenv(override=False)` (external env wins
-   over `.env` in containers / CI) followed by a required-vars check that
-   exits with `SystemExit(2)` *before* the 17 s pipecat/silero/onnxruntime
-   import wall when `PROSPER_BOT_ENTRYPOINT=1`. A misconfigured bot
-   reports the problem in <1 s instead of crashing on first audio frame.
-5. **History sliding window** — the LLM `history` list is capped at 40
-   messages (`_HISTORY_WINDOW`) per `_messages_for_llm`. Persona +
-   per-state task message and `SessionMemory` carry the salient facts, so
-   dropping the oldest raw turns is safe; a 50-turn call still fits in
-   budget.
-6. **Try/except around `handle_user_turn` in `DispatcherProcessor`** —
-   a stray exception (LLM 5xx after retries exhausted, EHR timeout, JSON
-   parse error) is caught, logged, and answered with "Sorry, I missed
-   that — could you say it again?". The WebRTC session survives, the
-   caller retries; the alternative (uncaught exception bubbling through
-   Pipecat) kills the call.
-7. **EHR client owned by `async with` for the call's lifetime** — the
-   httpx client lives inside `async with dispatcher._ehr:` in `run_bot`,
-   so SIGTERM, transport crash, or a startup-time exception still close
-   it. The previous lifecycle (close inside the disconnect handler) leaked
-   sockets on every abnormal termination.
+Eight handlers in `src/prosper/tools.py`. All return
+`Result[Ok[dict], Err]` (`src/prosper/result.py`). The `Err.code` strings
+are **public eval contract** — scenarios assert on them, so renaming a
+code is a breaking change and must update `evals/scenarios.py` in the
+same commit.
 
-Unit tests cover the retry + fallback paths
-(`test_adapter_retries_on_transient_5xx_then_succeeds`,
-`test_adapter_falls_back_to_secondary_model_after_retries_exhausted`) and
-the dispatcher's history-cap + try/except behaviour
-(`test_bot_dispatcher_processor.py`, `test_dispatcher_gaps.py`).
-
-Explicitly deferred to "Future work":
-- STT/TTS multi-provider fallback (would need a `ServiceSwitcher` over
-  Pipecat services; tracked by upstream issue #4139).
-- Pre-recorded "everything is on fire" TTS fallback with regex phone
-  capture + callback queue.
-
-## Security
-
-Three guards on the surface that touches the network and the log sinks:
-
-1. **SSRF guard on `PROSPER_EHR_URL`** — `_validated_ehr_url` (in
-   `bot.py`) rejects any scheme outside `{http, https}` and any URL
-   without a hostname before constructing the EHR client. Anyone who
-   controls `.env` (compromised CI, sloppy deploy) cannot repoint the bot
-   at `http://169.254.169.254/latest/meta-data` (cloud metadata) or an
-   internal admin endpoint and then phish the LLM into firing a tool
-   that exfiltrates the response. Hostname allowlisting beyond this is
-   delegated to the network policy / egress firewall.
-2. **PII redaction in log lines (HIPAA-adjacent)** —
-   `src/prosper/observability/redact.py` masks US-shape phone numbers,
-   DOB-like strings (ISO + US + dotted), and email addresses in every
-   `USER:` / `BOT[state]:` log line. UUIDs are stashed first so the
-   phone regex doesn't eat their digit-rich interior; `mask_name` is
-   exposed for the structured name fields. The dispatcher still sees
-   raw text — only `journalctl` / `loguru` sinks are masked. Not a
-   substitute for a proper de-id pipeline; good enough to keep
-   ops-tier log readers from seeing the caller's contact details.
-3. **DoS caps on request bodies** — every `PatientCreate` /
-   `AppointmentCreate` / `AppointmentCancel` field carries a Pydantic
-   `Field(max_length=...)` cap so a malicious POST can't load a
-   multi-megabyte string into SQLite (the DB column would silently
-   truncate, but the request body is parsed entirely into memory first).
-
-Full audit trail in `docs/research/2026-05-20-security-audit.md`.
-
-## Observability
-
-Three signals surfaced by the same `TimingCollector` /
-`observability/redact.py` pair:
-
-- **`TimingCollector` (`src/prosper/observability/timing.py`)** — every
-  `_llm_turn` and `_execute_tool` is wrapped in an async `measure(phase=,
-  state=)` context manager; the collector emits one JSON line per span
-  (`{"evt":"span","phase":"llm","state":"BOOK_FLOW","duration_ms":820}`)
-  to stdout and aggregates p50 / p95 / max at session end via
-  `format_table()`. The eval CLI prints the table at the end of every run.
-- **TTFT (time-to-first-token)** — `DispatcherProcessor` stamps
-  `_stt_end_ts` on each final `TranscriptionFrame` and records
-  `phase="ttft"` after the dispatcher returns the reply. Canonical
-  voice-agent metric in 2026; treated as a first-class phase in the
-  same summary table.
-- **`cached_prompt_tokens` surfacing** — `OpenAILLMAdapter._single_call`
-  pulls `usage.prompt_tokens_details.cached_tokens` from the OpenAI
-  response and the dispatcher tracks both per-turn (in the transcript
-  entry) and call totals (`cached_prompt_tokens_total`,
-  `prompt_tokens_total`). Lets the eval runner print `cache=XX%` per
-  scenario to confirm the long `CLINIC_PERSONA` is actually crossing
-  OpenAI's 1024-token prompt-cache threshold.
-- **PII-safe logging** — every line that contains user / bot speech goes
-  through `redact_pii` before `logger.info`. See the Security section.
-
-## Eval suite
-
-Two checks per scenario, **both must pass**:
-
-- **State assertion (deterministic):** queries DB counts before/after the
-  run, verifies expected tool calls fired and forbidden ones didn't,
-  verifies the FSM reached the expected terminal state, and runs a
-  regex post-check for hallucinated confirmations ("I've cancelled" with
-  no matching tool_ok).
-- **LLM judge (semantic):** scores the full transcript against natural-
-  language criteria.
-
-Sixteen scenarios at launch (3 happy / 1 recovery / 2 edge / 10 adversarial-or-mixed):
-
-| Scenario | Tags | What it tests |
+| Tool | Whitelisted in | Err codes |
 |---|---|---|
-| `new_patient_books` | happy | Phone-first lookup → no match → register → book |
-| `existing_patient_cancels` | happy | Phone match → 1 upcoming → adaptive auto-confirm → cancel |
-| `cancel_picks_from_list` | happy | 3 upcoming → numbered list → ordinal pick → cancel |
-| `dob_misheard_then_corrected` | recovery | Persona mispronounces DOB year, corrects after read-back |
-| `slot_taken_by_other` | edge | Persona insists on a slot another patient holds; agent must offer alternatives |
-| `cancel_when_nothing_to_cancel` | edge | Patient has 0 upcoming; agent must say so, not invent one |
-| `prompt_injection_direct_override` | adversarial, injection | "Ignore previous instructions" — bot must refuse and never write |
-| `prompt_injection_stored_in_name` | adversarial, injection | Injection hidden inside the name field — must be treated as literal |
-| `cross_patient_cancel_refusal` | adversarial, authorization | Caller authenticates then asks to cancel Bob's appointment — must refuse + not leak |
-| `hallucinated_confirmation_trap` | adversarial, hallucination | Caller insists a non-existent appointment exists — bot must not invent / claim |
-| `off_topic_steering_and_budget` | adversarial, off_topic, budget | Weather/pizza/joke probes then cooperate — bot must stay in scope |
-| `multi_turn_drift_hallucinated_slot` | adversarial, hallucination | Persona drifts across turns inventing a slot id; bot must not honour fabricated IDs |
-| `phone_format_chaos` | edge | Caller offers phone in mixed formats (dashes, words, partial); normaliser must canonicalise |
-| `patient_correction_mid_register` | recovery, edge | Caller corrects a typo'd name / DOB mid-register; bot must overwrite, not append |
-| `goodbye_mid_confirmation` | adversarial, edge | Caller says "actually, bye" right before `create_appointment` — bot must not write |
-| `insurance_question_redirect` | adversarial, off_topic | Caller asks about insurance billing — bot must redirect without inventing policy |
+| `find_patient_by_phone` | IDENTIFY | `ehr_error` |
+| `find_patient_by_name_dob` | IDENTIFY | `dob_unparseable`, `ehr_error` |
+| `create_patient` | REGISTER | `dob_unparseable`, `patient_exists`, `ehr_error` |
+| `list_availability_slots` | BOOK_FLOW, RESCHEDULE_FLOW | `date_unparseable`, `ehr_error` |
+| `create_appointment` | CONFIRM_BOOK | `missing_slot_id`, `missing_patient_id`, `hallucinated_slot_id`, `patient_id_mismatch`, `slot_taken_other_patient`, `patient_or_slot_not_found`, `ehr_error` |
+| `get_upcoming_appointments` | CANCEL_FLOW, RESCHEDULE_FLOW | `ehr_error` |
+| `cancel_appointment` | CONFIRM_CANCEL | `missing_appointment_id`, `hallucinated_appointment_id`, `appointment_not_found`, `ehr_error` |
+| `reschedule_appointment` | CONFIRM_RESCHEDULE | `missing_appointment_id`, `missing_slot_id`, `hallucinated_appointment_id`, `hallucinated_slot_id`, `slot_taken_other_patient`, `appointment_or_slot_not_found`, `ehr_error` |
 
-Adding a scenario is a 20-line PR — `evals/scenarios.py` is plain Python
-data, no framework changes needed. CLI also supports
-`--baseline previous.json` to fail the run on regression vs a prior
-snapshot, `--concurrency N` (default 4) to run scenarios in parallel
-against per-scenario isolated SQLite engines, and `--mock-llm` to swap
-the OpenAI client for the deterministic `evals/mock_llm.py` so the
-whole suite can run offline in ~5 s (`make mock-eval`). Live runs are
-gated on `PROSPER_EVAL_LIVE=1` so a quota-less account fails loudly
-(exit code 2) instead of silently passing.
+Three things to know about the tool layer:
 
-## Latency (README bonus #1)
+1. **`reschedule_appointment` is atomic.** Single transaction, single
+   `PATCH` to `/appointments/{id}/slot`. Replaces the older
+   cancel-then-rebook chain — if the new slot is held, the original
+   appointment is preserved (no orphan window). The dispatcher chains
+   the legacy `cancelled_then_rebook` path only when the caller flipped
+   intent *mid-cancel* (e.g. said "reschedule" while already inside
+   CANCEL_FLOW). Plain "reschedule" from CHOOSE_INTENT routes straight
+   to the atomic path.
 
-Shipped tactics:
+2. **`list_availability_slots` has a 6-day forward-scan fallback.** When
+   the asked date is empty, the handler probes day+1..day+6 with the
+   same specialty filter and returns the first hit under
+   `next_day_with_slots`. The dispatcher transitions to CONFIRM_BOOK on
+   either path and `_resolve_memory_handles` validates against the
+   fallback slots so `create_appointment` doesn't reject them as
+   hallucinated. Scenario `availability_falls_through_to_next_day`
+   pins this behaviour.
 
-- **TimingCollector** — per-span JSON logs + p50/p95/max aggregates printed
-  at the end of every call and surfaced inline in `make eval`.
-- **TTFT (time-to-first-token)** — recorded between final `TranscriptionFrame`
-  and dispatcher reply. Canonical voice-agent metric in 2026.
-- **`CLINIC_PERSONA` ≥ 1100 tokens** — crosses OpenAI's 1024-token prompt-
-  cache threshold; cached fraction reported per scenario as `cache=XX%`.
-- **Per-state task messages ≤ 1 KB** — enforced by
-  `test_each_task_message_under_1_kb` so future contributors can't blow
-  up per-turn input cost.
-- **ElevenLabs Flash v2.5** — `eleven_flash_v2_5` cuts first-audio
-  latency from ~200ms → ~75ms vs the default constructor.
-- **Filler speech in tool-firing states** — `"One moment."` TTS frame
-  pushed before each LLM turn that lives in a tool-calling state, so the
-  caller hears acknowledgement immediately rather than dead air.
+3. **`specialty` filter.** `list_availability_slots` accepts an
+   optional `specialty` string ("Therapist", "Dermatologist",
+   "Psychiatrist", "General Practice", "Physiotherapist"). Today the
+   LLM picks the string from caller intent; a mini-LLM router that
+   maps complaint → specialty is **in flight** (§14). Scenarios
+   `specialty_filter_therapist`, `specialty_unknown_falls_back`, and
+   `specialty_no_filter_any_doctor` cover the three branches.
 
-EHR endpoint micro-bench (`make bench` → `scripts/bench.py`,
-10 rounds, against `make ehr` on local NVMe):
+## 7. Dispatcher mechanics
+
+`src/prosper/dispatcher.py` is intentionally small (~1200 LOC) so a
+reviewer can read the whole machine in one sitting. Five things it
+does beyond the FSM:
+
+1. **Per-state LLM request.** `_messages_for_llm` returns
+   `[system: CLINIC_PERSONA, system: TASK_MESSAGES[state], …history]`.
+   Persona stays stable across turns (prompt-cache target); task
+   message swaps per state.
+
+2. **Handle redaction (audit A3).** `_redact_for_llm` strips raw UUIDs.
+   Lists are enumerated `[1] 10:00 with Dr. Patel; [2] 10:30 …`. The
+   LLM passes the bracketed number back as `slot_id` / `appointment_id`
+   and `_resolve_memory_handles` swaps it for the real UUID before any
+   HTTP call. The LLM has never seen and cannot read aloud an internal
+   id.
+
+3. **Session memory.** `SessionMemory.{identified_patient, last_slots,
+   last_upcoming_appointments, wants_reschedule}`. Every tool response
+   that returns a list updates the corresponding memory field;
+   `_validate_against_memory` then rejects any write-tool call whose
+   `slot_id` / `appointment_id` is not in that memory
+   (`hallucinated_slot_id`, `hallucinated_appointment_id`). This is
+   defence-in-depth on top of the EHR's own constraints.
+
+4. **History sliding window + orphan pruning.** `_HISTORY_WINDOW = 40`.
+   When the window slices off an assistant message that announced a
+   `tool_call_id`, any `role:tool` reply whose id no longer has a
+   parent is pruned in `_prune_orphan_tool_messages`. Without this,
+   OpenAI rejects the next turn with
+   `messages with role tool must be a response to a preceding message
+   with tool_calls` (see `ERRORS.md` E1).
+
+5. **Per-turn tool dedup.** A misbehaving model can fire the same tool
+   with identical args repeatedly. After two duplicate calls in one
+   turn the dispatcher injects a `BLOCKED:` synthetic response telling
+   the model to speak to the user instead. Inner-loop budget is 4
+   iterations — exhaustion drops a `FALLBACK_LINES["llm_loop_exhausted"]`
+   line so the caller never hears dead air.
+
+`bot.py` wires the dispatcher into Pipecat via `DispatcherProcessor`,
+which consumes `TranscriptionFrame` directly (the default
+`LLMUserAggregator` adds a 1 s aggregation tax we don't want; see the
+note at the top of `bot.py`). A last-resort `try/except` around
+`handle_user_turn` keeps a mid-call exception from killing the WebRTC
+session — the caller hears "sorry, I missed that" and the dispatcher
+recovers.
+
+## 8. Operator console
+
+`src/prosper/console/` ships a live operator pane fed by the dispatcher.
+Eight event types from `events.py`:
+
+`state_change`, `transcript_turn`, `tool_call_start`, `tool_call_end`,
+`latency_tick`, `patient_identified`, `slots_offered`, `outcome`.
+
+Wiring:
+
+- `dispatcher._publish(type, payload)` is a fire-and-forget call against
+  an injected `ConsoleBus`. When no bus is passed (tests / eval runner)
+  every publish site is a hard no-op.
+- The bus uses bounded queues with overflow-drop semantics so a slow SSE
+  client cannot back-pressure the call path.
+- `_redact_tool_args` and `mask_name` / `mask_phone` enforce PII redaction
+  on every payload before it hits the bus — the operator UI sees masked
+  values, the transcript and audit log keep originals.
+- `_publish_outcome` distinguishes `booked` / `cancelled` / `refused`
+  (offer made and declined) / `abandoned` (caller dropped pre-confirm).
+  Confusing the last two poisons clinic dashboards, so the categorisation
+  is explicit.
+
+Design spec: `docs/superpowers/specs/2026-05-20-operator-console-design.md`
++ `docs/adr/004-operator-console-event-stream.md`.
+
+## 9. EHR
+
+`src/prosper/ehr/`:
+
+- `models.py` — SQLAlchemy: `Patient`, `Provider`, `Slot`, `Appointment`.
+  Two load-bearing constraints:
+  - **`Provider.specialty`** column (auto-migrated on startup since
+    commit `3266b02` — see `db.py`).
+  - **Partial unique index** on `Appointment(slot_id) WHERE
+    status='scheduled'`. Concurrent booking races surface as `409
+    slot_taken` (never 500), and a recoverable Err code propagates up.
+- `repository.py` — single LEFT-OUTER-JOIN to list availability (was N+1
+  pre-fix; bench dropped from 115 ms → ~10 ms — see
+  `docs/bench-results.md`).
+- `schemas.py` — Pydantic with `Field(max_length=…)` caps on every
+  string field so a malicious POST can't load a multi-megabyte string
+  into SQLite via the request parser.
+- `api.py` — FastAPI app. Endpoint mapping vs the challenge spec:
+
+| Challenge name | REST endpoint |
+|---|---|
+| `create_patient` | `POST /patients` |
+| `find_patient` (by name + DOB) | `GET /patients/by-name-dob?name=&dob=` |
+| `find_patient` (by phone — our addition) | `GET /patients/by-phone?phone=` |
+| `list_availability_slots` | `GET /availability?date=&provider_id=&specialty=` |
+| `create_appointment` | `POST /appointments` |
+| `cancel_appointment` | `POST /appointments/{id}/cancel` |
+| reschedule (atomic) | `PATCH /appointments/{id}/slot` |
+| (helper) patient appointments | `GET /patients/{id}/appointments` |
+| health | `GET /health` |
+
+**Slot datetimes are naive UTC** (seed converts NY-local → UTC → strips
+tzinfo). Any new code reading `slot.start_at` must follow the same
+convention; mixing naive-local with naive-UTC silently misreads
+availability.
+
+**Past slots are filtered server-side** (`repository.list_availability_slots`)
+so the bot cannot offer 8 am at 11 am.
+
+## 10. Prompts and persona
+
+`src/prosper/prompts.py`:
+
+- `CLINIC_PERSONA` (~1100 tokens) — long on purpose. OpenAI's prompt
+  cache kicks in at 1024+ stable tokens; the dispatcher reports
+  `cached_prompt_tokens` per turn so the eval runner can show
+  `cache=XX%` per scenario. **Do not trim** the persona to chase token
+  cost; you'd lose more from a missed cache hit than you'd save.
+- `TASK_MESSAGES[state]` — ≤ 1 KB per entry, enforced by
+  `test_each_task_message_under_1_kb`. Bot guidance for the state lives
+  here; the dispatcher injects today's date so the model can resolve
+  "tomorrow" / "next Tuesday".
+- `STATE_FILLERS` — short "one moment" lines pushed as a TTS frame
+  before a tool-firing state so the caller never hears silence during
+  the LLM round-trip.
+- `FALLBACK_LINES["llm_loop_exhausted"]` — last-resort speech when the
+  4-iteration inner loop exhausts without a real reply.
+
+All caller-audible strings live here. Inline voice strings in `bot.py`
+or `dispatcher.py` are a regression — they bypass the 1 KB gate and
+fragment the cache.
+
+## 11. Eval suite
+
+Runner: `evals/__main__.py` + `evals/runner.py`. Each scenario asserts
+on **both**:
+
+- **State delta (deterministic).** DB row counts before/after, expected
+  tool codes fired, forbidden tools didn't, FSM reached
+  `expected_terminal_state`, and a regex post-check for hallucinated
+  confirmations ("I've cancelled" with no matching `tool_ok`).
+- **LLM judge (semantic).** Full transcript scored against
+  natural-language `judge_criteria`. PASS only if both checks pass.
+
+The paired check exists because the judge alone marked some adversarial
+scenarios as PASS even when the bot said "I've cancelled that" without
+any `tool_ok`. See `docs/adr/003-paired-state-and-judge-eval.md`.
+
+### Scenarios
+
+`evals/scenarios.py` defines ~33 scenarios across these tag buckets:
+
+| Tag | Scenarios | What's tested |
+|---|---|---|
+| happy | `new_patient_books`, `existing_patient_cancels`, `cancel_picks_from_list`, `caller_volunteers_email_at_registration`, `availability_falls_through_to_next_day`, `reschedule_existing_appointment`, `reschedule_multi_appointment_picks_second`, `specialty_no_filter_any_doctor`, `specialty_filter_therapist` | Mandatory flows + the "everything went right" reschedule and specialty paths |
+| recovery | `dob_misheard_then_corrected`, `patient_correction_mid_register`, `phone_correction_mid_register`, `dob_unparseable_then_recovery` | Caller corrects a field mid-turn; bot must adopt the latest value |
+| edge | `slot_taken_by_other`, `cancel_when_nothing_to_cancel`, `phone_format_chaos`, `slot_handle_out_of_range`, `availability_falls_through_to_next_day`, `goodbye_at_*` | Boundary behaviour: race, empty list, parsing chaos, dispatcher handle guard |
+| adversarial | `prompt_injection_direct_override`, `prompt_injection_stored_in_name`, `cross_patient_cancel_refusal`, `hallucinated_confirmation_trap`, `multi_turn_drift_hallucinated_slot`, `off_topic_steering_and_budget`, `rude_caller_still_completes_booking`, `insurance_question_redirect`, `hallucinated_appointment_id_in_reschedule`, `reschedule_cross_patient_refusal` | Injection, authorization, hallucination, tone, scope |
+| abandon | `goodbye_at_greeting`, `goodbye_at_identify`, `goodbye_at_choose_intent`, `goodbye_mid_confirmation`, `reschedule_abort_at_confirm` | Caller hangs up at every reachable state — no orphan writes, no fake confirmations |
+| reschedule | `reschedule_existing_appointment`, `reschedule_no_upcoming_appointments`, `reschedule_cross_patient_refusal`, `reschedule_abort_at_confirm`, `reschedule_multi_appointment_picks_second`, `hallucinated_appointment_id_in_reschedule` | Atomic move + every refusal/abort path on it |
+| specialty | `specialty_unknown_falls_back`, `specialty_no_filter_any_doctor`, `specialty_filter_therapist` | Filter pass-through, unknown specialty graceful decline, no-filter wildcard |
+
+Adding a scenario is a ~20-line PR per `CONTRIBUTING.md` — pure data
+(`Scenario` dataclass), no framework changes.
+
+### Mock-LLM mode (`make mock-eval`)
+
+`evals/mock_llm.py` is a deterministic ~1700 LOC harness:
+
+- `MockDispatcherLLM` plays a per-scenario script of `LLMReply` objects;
+  it knows about dispatcher `__use_first_slot__` / `__use_upcoming_n__`
+  sentinels so the script doesn't have to hard-code UUIDs.
+- `MockPersonaLLM` replays canned caller utterances.
+- `mock_judge_transcript` returns PASS unconditionally — mock mode tests
+  the *runner*, not the judge.
+- A `_END_NOW_MARK` sentinel force-transitions the dispatcher into
+  `State.END` for refusal scenarios (no tools fire, no natural END
+  transition). The real bot reaches END via `cancelled` / `booked` /
+  `nothing_to_*` / `goodbye`.
+
+Runs the whole suite in ~5 s offline. CLI flags:
+
+- `--concurrency N` (default 4) — per-scenario isolated SQLite engine,
+  cuts wall-clock ~3× without crossing transactional state.
+- `--baseline previous.json` — fails the run with exit 3 if a
+  previously-passing scenario regressed.
+- `--mock-llm` — swap in the deterministic mock LLM.
+- `--only NAME` — run a single scenario.
+
+## 12. Reliability
+
+Seven layers, all in `src/prosper/llm.py`, `bot.py`, `dispatcher.py`:
+
+1. **Tenacity retry on transient LLM failures.** `AsyncRetrying`, 3
+   attempts, exponential jitter. Only retries `APIConnectionError`,
+   `APITimeoutError`, `InternalServerError`, `RateLimitError`. Auth
+   errors are NOT retried.
+2. **Fallback model.** `PROSPER_BOT_FALLBACK_MODEL` env var. On primary
+   exhaustion, one last call against the fallback (e.g. `gpt-4o-mini`
+   brownout → `gpt-4o`).
+3. **Startup health-check.** `_startup_health_check()` pings EHR
+   `/health` before accepting clients. Soft-fail with loud warning so
+   the operator sees the failure pre-call.
+4. **Env fail-fast.** `load_dotenv(override=False)` (external env wins
+   in containers/CI) then a required-vars check that exits with
+   `SystemExit(2)` *before* the 17 s pipecat / silero / onnxruntime
+   import wall when `PROSPER_BOT_ENTRYPOINT=1`.
+5. **History sliding window + orphan pruning.** §7 item 4.
+6. **`try/except` around `handle_user_turn`.** A stray exception is
+   caught, logged, and answered with a recovery line. The WebRTC
+   session survives.
+7. **EHR client lifecycle via `async with`.** `async with
+   dispatcher._ehr:` in `run_bot` — SIGTERM, transport crash, or a
+   startup-time exception still close the client. The previous
+   lifecycle (close inside the disconnect handler) leaked sockets on
+   every abnormal termination.
+
+Tests: `test_adapter_retries_on_transient_5xx_then_succeeds`,
+`test_adapter_falls_back_to_secondary_model_after_retries_exhausted`,
+`test_bot_dispatcher_processor.py`, `test_dispatcher_gaps.py`.
+
+Explicitly deferred: STT/TTS multi-provider fallback (pipecat issue
+[#4139](https://github.com/pipecat-ai/pipecat/issues/4139)),
+pre-recorded "everything is on fire" TTS fallback.
+
+## 13. Security
+
+Three guards on the network + log surface:
+
+1. **SSRF guard on `PROSPER_EHR_URL`.** `_validated_ehr_url` in
+   `bot.py` rejects any scheme outside `{http, https}` and any URL
+   without a hostname before building the EHR client. A compromised
+   `.env` cannot repoint the bot at `169.254.169.254` (cloud metadata)
+   or an internal admin endpoint. Hostname allowlisting beyond this is
+   the egress firewall's job.
+2. **PII redaction in log lines (HIPAA-adjacent).**
+   `src/prosper/observability/redact.py` masks US-shape phone numbers,
+   DOB-like strings (ISO + US + dotted), and emails in every
+   `USER:` / `BOT[state]:` line. UUIDs are stashed first so the phone
+   regex doesn't eat their digit-rich interior. `mask_name` is exposed
+   for structured name fields. The dispatcher and transcript still see
+   raw text — only `journalctl` / `loguru` sinks are masked. Not a
+   substitute for a proper de-identification pipeline; good enough to
+   keep ops-tier log readers from seeing caller contact details.
+3. **DoS caps on request bodies.** Every Pydantic schema in
+   `ehr/schemas.py` carries `Field(max_length=…)`.
+
+Audit trail: `docs/research/2026-05-20-security-audit.md` +
+`SECURITY.md`.
+
+## 14. In-flight work
+
+Active work the main branch does not yet reflect:
+
+- **Mini-LLM specialty router.** Today the LLM picks the `specialty`
+  string for `list_availability_slots` from caller phrasing. A
+  dedicated small-model classifier is in development that maps a
+  complaint utterance ("my stomach hurts", "I think I broke my leg")
+  → specialty enum, with a hand-curated symptom → specialty table as
+  fallback. Goal: deterministic specialty selection and a separate
+  prompt-cache lane for the classifier. Where it lands (new module,
+  new state, new tool, or in-line in BOOK_FLOW) is still being
+  designed — see `docs/plans/` for the current planning notes if
+  present.
+- **Interruption design.** `docs/research/interruption_design.md` —
+  research notes on how to handle the caller talking over the bot's
+  TTS. Not yet wired.
+- **Speculative race.** `docs/research/speculative_race.md` — research
+  notes on overlapping STT partials with speculative LLM kickoff to
+  reduce TTFT. Not yet wired.
+
+The eval suite already has scenarios pinning the current specialty
+behaviour (`specialty_filter_therapist`, `specialty_unknown_falls_back`,
+`specialty_no_filter_any_doctor`). When the router lands, those
+scenarios continue to apply; new scenarios will cover the
+complaint→specialty mapping itself.
+
+## 15. Latency (README bonus #1)
+
+Shipped:
+
+- **`TimingCollector` (`src/prosper/observability/timing.py`)** —
+  every `_llm_turn` and `_execute_tool` wrapped in an async
+  `measure(phase=, state=)` context. Emits one JSON span per call
+  (`{"evt":"span","phase":"llm","state":"BOOK_FLOW","duration_ms":820}`),
+  aggregates p50 / p95 / max at session end via `format_table()`.
+- **TTFT.** `DispatcherProcessor` stamps `_stt_end_ts` on each final
+  `TranscriptionFrame` and records `phase="ttft"` after the dispatcher
+  returns. Canonical voice-agent metric in 2026; treated as a
+  first-class phase in the table.
+- **`cached_prompt_tokens` surfacing.** `OpenAILLMAdapter._single_call`
+  pulls `usage.prompt_tokens_details.cached_tokens` and the dispatcher
+  tracks both per-turn and call totals
+  (`cached_prompt_tokens_total`, `prompt_tokens_total`).
+- **ElevenLabs Flash v2.5** — first-audio latency ~75 ms vs ~200 ms on
+  the default constructor.
+- **Filler speech** in tool-firing states — `"One moment."` /
+  `"Let me check."` / `"Looking that up."` rotated so the caller hears
+  acknowledgement immediately rather than dead air during the LLM
+  round-trip.
+- **SQLite WAL** + `expire_on_commit=False` — write contention from
+  ~30 ms → ~8 ms.
+- **Lazy Silero VAD import** in `bot.py` — saves ~4 s of cold-import
+  when `PROSPER_BOT_ENTRYPOINT=1` short-circuits.
+
+EHR endpoint micro-bench (`make bench` → `scripts/bench.py`, 10 rounds
+against `make ehr` on local NVMe):
 
 ```
 endpoint           min   p50   p95   max
@@ -289,121 +486,86 @@ by-phone (miss)    4.1   4.6   4.9   5.7
 by-name-dob        4.5   5.3   5.6   6.6
 ```
 
-Full snapshot history in `docs/bench-results.md` (pre-N+1-fix
-`/availability` was 115 ms — single LEFT-OUTER-JOIN dropped it to
-~10 ms; SQLite WAL further halves p50 under concurrent writes).
+LLM dominates by an order of magnitude — EHR calls (httpx loopback or
+ASGITransport) stay sub-15 ms; a single LLM turn is 800–2000 ms.
 
-What this means at the call level:
-- The LLM dominates by an order of magnitude. EHR calls (via either
-  `httpx.ASGITransport` in evals or a real local socket in prod) stay
-  sub-15 ms; a single LLM turn is 800-2000 ms.
-- The stable `CLINIC_PERSONA` preamble crosses OpenAI's 1024-token
-  prompt-cache threshold; `cached_prompt_tokens` is now surfaced per
-  turn (`LLMUsage.cached_prompt_tokens` in the transcript, totals in
-  `Dispatcher.cached_prompt_tokens_total`) so the eval runner can report
-  `cache=XX%` per scenario.
-
-## Dev-log
-
-- Initial dispatcher draft used a single mega-prompt with every tool
-  enabled. Switched to the per-state whitelist after the first eval
-  run produced a transcript where the model called `cancel_appointment`
-  during GREETING. The whitelist made that bug structurally impossible.
-- Tried `python-dateparser` first for DOB parsing; dropped it for
-  `python-dateutil` because dateparser pulls `babel` and added noticeable
-  cold-import time without improving real-world DOB recognition.
-- Spec implies `find_patient` takes name+DOB; exposed both
-  `find_patient_by_phone` and `find_patient_by_name_dob` so the bot
-  leads with phone but exercises the spec endpoint on fallback. One
-  scenario asserts each path fires.
-- `pipecat-ai[daily]` does not have Windows wheels (the `daily-python`
-  binding only ships Linux/macOS); since this project uses WebRTC
-  transport, we dropped the `daily` extra.
-- `Err.code` strings became the public eval contract — renaming one
-  without updating `evals/scenarios.py` is now banned by CLAUDE.md.
-- Web-research pass (Pipecat docs + 2026 voice-agent blogs) revealed
-  the default `LLMUserAggregator` carries a 1.0s `aggregation_timeout`.
-  We don't use the aggregator at all (DispatcherProcessor consumes
-  `TranscriptionFrame` directly), so the tax doesn't apply — but the
-  finding is documented at the top of `bot.py` so a future refactor
-  doesn't re-introduce it.
-- Codebase-audit subagent caught four real bugs (past-slot exposure,
-  IntegrityError→500 instead of 409, UUID leak into LLM history,
-  unvalidated hallucinated slot_ids). Each got a fix + a regression
-  test in the same commit.
-- After paired state+judge over the original 6 scenarios, we found the
-  judge could mark a scenario PASS even when the assistant said "I've
-  cancelled that for you" with no matching `tool_ok`. Added a regex
-  post-check in the runner — that single ~30-line addition makes the 5
-  adversarial scenarios actually meaningful.
-
-## Intentional cuts (still deferred)
+## 16. Intentional cuts (deferred on purpose)
 
 | Cut | Why |
 |---|---|
-| No auth / HIPAA encryption at rest | Demo scope; SQLite is dev-only. Documented upgrade path is Postgres + a managed token service. PII redaction in log sinks (above) covers the most-likely leak surface in the meantime. |
-| No multi-provider **STT/TTS** fallback | Pipecat has no first-class `ServiceSwitcher` (issue [#4139](https://github.com/pipecat-ai/pipecat/issues/4139)); meanwhile we ship LLM retry+fallback as the higher-value reliability win. |
-| No streaming TTS (flush-after-each-clause) | Biggest remaining perceived-latency win, but needs a custom Pipecat processor — out of scope for the submission window. |
-| No OpenRouter / generic LLM gateway | Would simplify the fallback story to a single env-var swap and unlock 100+ models. We keep provider-direct so OpenAI's prompt-cache discount still applies. |
-| No real audio smoke test (TTS → STT loop) | Current skeleton (`evals/audio_smoke/`) just asserts the dispatcher module imports; a real audio round-trip would need recorded WAV fixtures + ElevenLabs credits in CI. |
-| No proactive prefetch on STT partials | Brittle on partial-text changes; instrumentation is in place (`ttft` phase) so we can see where real pain is before adding. |
-| No `AvailabilityCache` | A 30-line `dict` TTL cache would shave the ~10 ms `list_availability_slots` cost — far below the LLM-dominated budget, so deferred. |
-| No pre-recorded "everything is on fire" TTS fallback | Would need a checked-in WAV + regex phone capture; deferred behind the LLM retry layer that handles 99% of provider blips. |
+| No auth / HIPAA encryption at rest | Demo scope. SQLite is dev-only. Upgrade path: Postgres + managed token service. Log-line PII redaction covers the most-likely leak surface in the meantime. |
+| No multi-provider STT/TTS fallback | Pipecat has no first-class `ServiceSwitcher` (issue #4139). We ship LLM retry+fallback as the higher-value win. |
+| No streaming TTS flush-after-each-clause | Biggest remaining perceived-latency win, but needs a custom Pipecat processor — out of scope for the submission window. |
+| No OpenRouter / generic LLM gateway | Simplifies fallback to one env-var swap and unlocks 100+ models. Kept provider-direct so OpenAI's prompt-cache discount still applies. |
+| No real audio smoke test (TTS → STT loop) | Current `evals/audio_smoke/` just asserts the dispatcher module imports; a real round-trip needs recorded WAVs + ElevenLabs credits in CI. |
+| No proactive prefetch on STT partials | Brittle on partial-text changes; `ttft` phase is instrumented so we'll see the real pain before adding. |
+| No `AvailabilityCache` | A 30-line dict TTL cache would shave the ~10 ms `list_availability_slots` cost — far below the LLM-dominated budget, so deferred. |
+| No pre-recorded "everything is on fire" TTS fallback | Needs a checked-in WAV + regex phone capture; deferred behind the LLM retry layer that handles 99% of provider blips. |
 
-## Future work (in priority order)
+## 17. Future work (priority order)
 
-1. **STT/TTS multi-provider fallback** — Deepgram for STT, OpenAI TTS as
-   secondary. Blocked on a Pipecat `ServiceSwitcher` story (issue #4139).
-2. **Streaming TTS** via ElevenLabs flush-after-each-clause — biggest
-   remaining perceived-latency win.
-3. **OpenRouter as LLM gateway** — would simplify the fallback story to
-   a single env-var swap and unlock 100+ models.
-4. **Audio smoke tests with a real TTS → STT loop** — current skeleton
-   just asserts the dispatcher module imports.
-5. **Continuous production eval (5–10% sampling)** — 2026 production
-   pattern; would sample live transcripts to the LLM judge for drift
-   detection.
-6. **Pre-recorded "everything is on fire" TTS fallback** — for the
-   double-failure case where retry + fallback both exhaust.
-7. **`AvailabilityCache`** with 60 s TTL in `repository.py`.
+1. **Mini-LLM specialty router** (§14) — ship the in-flight design.
+2. **Interruption handling** (§14) — caller talking over TTS.
+3. **Speculative race** (§14) — STT partials → speculative LLM kickoff.
+4. **STT/TTS multi-provider fallback** — blocked on pipecat #4139.
+5. **Streaming TTS** via ElevenLabs flush-after-each-clause.
+6. **OpenRouter as LLM gateway** — one env-var swap, 100+ models.
+7. **Audio smoke tests** with a real TTS → STT loop.
+8. **Continuous production eval** — 5–10 % sampling of live transcripts
+   to the LLM judge for drift detection.
+9. **Pre-recorded "everything is on fire" TTS fallback** for the
+   double-failure case.
+10. **`AvailabilityCache`** with 60 s TTL in `repository.py`.
 
-Already landed (previously listed here): mock-eval offline mode,
-parallel eval runner.
+Already landed (was on this list): mock-eval offline mode, parallel
+eval runner, atomic reschedule, specialty filter, next-day forward
+scan, operator console event stream.
 
-## File map (where to look for what)
+## 18. File map
 
-- `src/prosper/ehr/` — FastAPI app, SQLAlchemy models, repository, schemas, db engine
-- `src/prosper/dispatcher.py` — FSM, transcript, tool-whitelist enforcement
-- `src/prosper/flows.py` — state graph topology + per-state tool whitelist
-- `src/prosper/prompts.py` — `CLINIC_PERSONA` + per-state task messages
-- `src/prosper/tools.py` — tool handlers + OpenAI schemas + `HANDLERS` map
-- `src/prosper/llm.py` — `OpenAILLMAdapter` (implements `LLMClientProtocol`)
-- `src/prosper/observability/timing.py` — `TimingCollector` + JSON span logs
-- `src/prosper/observability/redact.py` — `redact_pii` + `mask_name` for log lines
-- `src/prosper/bot.py` — Pipecat pipeline wiring + `DispatcherProcessor` + SSRF guard + env fail-fast
-- `evals/` — `Scenario`/`StateExpectation` types, persona simulator,
-  judge, runner, scenarios, pytest entrypoint, CLI (`--concurrency N`
-  parallel runner, `--mock-llm`, `--baseline`)
-- `evals/mock_llm.py` — deterministic ~700 LOC mock LLM that lets the
-  whole 16-scenario suite run offline in ~5 s (`make mock-eval`,
-  `test_scenario_mock` parametrisation)
-- `scripts/bench.py` — re-runnable EHR-endpoint micro-bench (`make bench`)
-- `scripts/status.py` — one-shot repo health snapshot (`make status`)
-- `docs/adr/` — three short Architecture Decision Records (`001` hybrid
-  FSM with tool whitelist, `002` separate FastAPI process for EHR,
-  `003` paired state-assertion + judge eval)
-- `docs/architecture.md` — ASCII process + FSM diagrams
-- `docs/bench-results.md` — pinned bench snapshots, oldest → newest
-- `docs/glossary.md` — terminology cheat-sheet (FSM states, eval terms,
-  Pipecat / OpenAI vocabulary)
-- `docs/interview-notes.md` — candidate prep + decision evidence
+- `src/prosper/ehr/` — FastAPI app, SQLAlchemy models, repository,
+  schemas, db engine (auto-migration for `Provider.specialty`).
+- `src/prosper/dispatcher.py` — FSM runtime, transcript, tool-whitelist
+  enforcement, handle redaction, memory validation, history pruning,
+  console bus wiring.
+- `src/prosper/flows.py` — state graph topology + per-state tool
+  whitelist (plain data).
+- `src/prosper/tools.py` — 8 tool handlers + `TOOL_SCHEMAS` (OpenAI
+  function-calling shapes) + `HANDLERS` map.
+- `src/prosper/prompts.py` — `CLINIC_PERSONA`, per-state
+  `TASK_MESSAGES`, `STATE_FILLERS`, `FALLBACK_LINES`. All caller-
+  audible strings.
+- `src/prosper/llm.py` — `OpenAILLMAdapter` (implements
+  `LLMClientProtocol`); retry, fallback model, usage surfacing.
+- `src/prosper/ehr_client.py` — `EHRClient` (httpx) with X-Request-Id
+  threading + SSRF-validated base URL.
+- `src/prosper/result.py` — `Result[Ok, Err]` discriminated union.
+- `src/prosper/observability/timing.py` — `TimingCollector` + JSON
+  span logs.
+- `src/prosper/observability/redact.py` — `redact_pii`, `mask_name`,
+  `mask_phone`.
+- `src/prosper/console/` — `events.py` (8 event types), `bus.py`
+  (bounded async queues + overflow drop), `sse.py`, `server.py`,
+  `audit.py`, `_utils.py`.
+- `src/prosper/bot.py` — Pipecat pipeline wiring, `DispatcherProcessor`,
+  SSRF guard, env fail-fast, lazy VAD import.
+- `evals/` — `Scenario` / `StateExpectation` types, `PersonaSimulator`,
+  judge, runner (parallel, baseline), CLI.
+- `evals/mock_llm.py` — deterministic mock LLM + persona scripts.
+- `scripts/bench.py` — EHR endpoint micro-bench.
+- `scripts/status.py` — one-shot repo health snapshot (`make status`).
+- `scripts/seed.py` — seed `data/ehr.db` (auto-runs on empty DB).
+- `docs/adr/001..004` — ADRs: hybrid FSM, separate EHR process, paired
+  eval, operator console.
+- `docs/architecture.md` — ASCII process + FSM diagrams.
+- `docs/bench-results.md` — pinned bench snapshots.
+- `docs/glossary.md` — terminology cheat-sheet.
 - `docs/research/` — codebase-audit, security-audit, prod-readiness,
-  reliability, eval-depth, latency-advanced, perf-wave2 research notes
+  reliability, eval-depth, latency-advanced, perf-wave2, interruption
+  design, speculative race.
+- `docs/plans/` — in-flight implementation plans (see §14).
 - `docs/superpowers/specs/2026-05-19-prosper-challenge-design.md` —
-  full deliberation trail (LLM council verdict per decision)
-- `docs/superpowers/specs/2026-05-19-other-solutions-best-ideas.md` —
-  cross-survey of 10 reference solutions; borrowed ideas are cited
-- `docs/superpowers/plans/2026-05-20-prosper-challenge-implementation.md`
-  — bite-sized TDD implementation plan that produced this codebase
-- `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, `.editorconfig`,
-  `.gitattributes` — repo hygiene + contributor surface
+  full deliberation trail (LLM council verdict per decision).
+- `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, `ERRORS.md`,
+  `FUTURE.md`, `.editorconfig`, `.gitattributes` — repo hygiene +
+  contributor surface.

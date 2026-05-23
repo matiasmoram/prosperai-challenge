@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>Prosper Health · Call</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/call/static/call.css">
+</head>
+<body>
+  <div class="phone">
+    <div class="status-bar">
+      <span class="signal">●●●●</span>
+      <span class="carrier">Prosper Health</span>
+      <span class="battery">100%</span>
+    </div>
+
+    <div class="call-meta">
+      <div class="state-pill" id="state-pill"><span class="dot"></span><span id="state-text">Idle</span></div>
+      <div class="timer" id="timer">00:00</div>
+    </div>
+
+    <div class="avatar-wrap" id="avatar-wrap">
+      <div class="ring"></div>
+      <div class="ring delay-1"></div>
+      <div class="ring delay-2"></div>
+      <div class="avatar">
+        <!-- Drop a real photo at src/prosper/console/static/call/avatar.jpg
+             (square, ~512x512). The <img> below falls back to the SVG
+             silhouette if the file is missing — so the UI never breaks. -->
+        <img id="avatar-img" src="/call/static/avatar.jpg"
+             alt="Sarah, Prosper Health assistant"
+             onerror="this.style.display='none';document.getElementById('avatar-fallback').style.display='block';">
+        <svg id="avatar-fallback" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" style="display:none">
+          <defs>
+            <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#fde2c4"/>
+              <stop offset="100%" stop-color="#f3c89d"/>
+            </linearGradient>
+          </defs>
+          <rect width="200" height="200" fill="#1f2937"/>
+          <circle cx="100" cy="78" r="38" fill="url(#g)"/>
+          <path d="M30 200 C 30 140, 170 140, 170 200 Z" fill="url(#g)"/>
+        </svg>
+        <!-- Animated mouth overlay. Positioned over the lower-third of the
+             avatar. The height attr is driven from JS via the live audio
+             analyser → bot speech becomes mouth motion. -->
+        <div class="mouth" id="mouth"></div>
+      </div>
+    </div>
+
+    <div class="callee">
+      <div class="name">Sarah</div>
+      <div class="role">Prosper Health · Patient Care</div>
+    </div>
+
+    <div class="controls">
+      <button class="ctrl mute" id="btn-mute" title="Mute mic" disabled>
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>
+        </svg>
+      </button>
+      <button class="ctrl hangup" id="btn-hangup" title="End call">
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
+          <path d="M21 15.46l-5.27-.61a1 1 0 0 0-.83.27l-2.36 2.36a15 15 0 0 1-6.59-6.59L8.31 8.5a1 1 0 0 0 .27-.83L7.97 2.4a1 1 0 0 0-1-.86H3.6a1 1 0 0 0-1 1.05A18 18 0 0 0 19.46 21.4a1 1 0 0 0 1.05-1v-3.94a1 1 0 0 0-.51-1z" transform="rotate(135 12 12)"/>
+        </svg>
+      </button>
+      <button class="ctrl speaker" id="btn-speaker" title="Speaker on/off" disabled>
+        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
+        </svg>
+      </button>
+    </div>
+
+    <button class="dial-btn" id="btn-dial">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+        <path d="M21 15.46l-5.27-.61a1 1 0 0 0-.83.27l-2.36 2.36a15 15 0 0 1-6.59-6.59L8.31 8.5a1 1 0 0 0 .27-.83L7.97 2.4a1 1 0 0 0-1-.86H3.6a1 1 0 0 0-1 1.05A18 18 0 0 0 19.46 21.4a1 1 0 0 0 1.05-1v-3.94a1 1 0 0 0-.51-1z"/>
+      </svg>
+      <span>Tap to call Sarah</span>
+    </button>
+
+    <p class="hint" id="hint">Bot must be running on <span class="mono" id="bot-origin">http://127.0.0.1:7860</span>.</p>
+  </div>
+
+  <audio id="remote-audio" autoplay playsinline></audio>
+  <script>window.PROSPER_BOT_ORIGIN = "http://127.0.0.1:7860";</script>
+  <script src="/call/static/call.js"></script>
+</body>
+</html>

@@ -140,13 +140,18 @@ def build_router(
 
 
 def mount_static_on_app(app: object) -> None:
-    """Mount the console static assets at `/console/static` on a FastAPI app.
+    """Mount console + call-UI static assets on a FastAPI app.
 
     APIRouter.mount does not inherit the router's prefix; to serve
     `/console/static/console.js` correctly in production, callers must
     mount the static dir directly on the parent FastAPI application
     *after* `include_router`. This helper keeps the path string in one
     place so the URL never drifts from what the front-end requests.
+
+    The call UI (`/call` landing + `/call/static/*` assets) is a sibling
+    surface served from the same uvicorn process — it's a custom WebRTC
+    front-end that talks directly to the Pipecat runner on :7860, giving
+    a phone-call look-and-feel instead of the prebuilt UI.
     """
     if not _STATIC_DIR.exists():
         return
@@ -154,12 +159,26 @@ def mount_static_on_app(app: object) -> None:
     # only have a duck-typed `app` (e.g. tests with a stub).
     from fastapi import FastAPI
 
-    if isinstance(app, FastAPI):
+    if not isinstance(app, FastAPI):
+        return
+    app.mount(
+        "/console/static",
+        StaticFiles(directory=str(_STATIC_DIR)),
+        name="console-static",
+    )
+
+    call_dir = _STATIC_DIR / "call"
+    if call_dir.exists():
         app.mount(
-            "/console/static",
-            StaticFiles(directory=str(_STATIC_DIR)),
-            name="console-static",
+            "/call/static",
+            StaticFiles(directory=str(call_dir)),
+            name="call-static",
         )
+
+        @app.get("/call", include_in_schema=False)
+        async def call_root() -> FileResponse:
+            """Serve the call-style WebRTC front-end."""
+            return FileResponse(call_dir / "index.html")
 
 
 def _validate_session_id_or_raise(session_id: str) -> None:

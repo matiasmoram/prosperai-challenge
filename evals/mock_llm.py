@@ -33,6 +33,8 @@ runner harness is exercised end-to-end. Per-scenario notes inline below.
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 
@@ -79,6 +81,112 @@ def _tool(_tool_name: str, **kwargs: object) -> LLMReply:
     (e.g. ``find_patient_by_name_dob(name=...)``).
     """
     return LLMReply(text="", tool_calls=[ToolCall(name=_tool_name, arguments=dict(kwargs))])
+
+
+# ---------------------------------------------------------------------------
+# Deterministic stub for the triage mini-LLM (`llm.classify_symptoms`).
+#
+# `suggest_specialty_handler` calls `classify_symptoms`, which in production
+# hits gpt-4o-mini. Under mock-eval there is no API key, so the runner
+# installs this stub via `prosper.llm._TRIAGE_CLIENT_OVERRIDE`. Routing is
+# keyword-based and ordered: the first matching rule wins, so confident
+# rules must precede the vague catch-all.
+# ---------------------------------------------------------------------------
+
+# (regex, specialty, duration_minutes, confidence, follow_up, red_flag).
+# follow_up is only meaningful when confidence < 0.7 (matches the real
+# prompt's contract). Order matters — checked top to bottom.
+_TRIAGE_RULES: list[tuple[str, str, int, float, str | None, bool]] = [
+    (
+        r"chest pain|can'?t breathe|suicid|bleeding heavily|anaphyla",
+        "General Practice",
+        30,
+        0.99,
+        None,
+        True,
+    ),
+    (
+        r"anxious|anxiety|depress|panic|down|emotional|grief|mood",
+        "Psychiatrist",
+        60,
+        0.9,
+        None,
+        False,
+    ),
+    (r"therap|counsel", "Therapist", 60, 0.9, None, False),
+    (r"skin|rash|acne|mole|eczema", "Dermatologist", 30, 0.9, None, False),
+    (r"back|knee|muscle|joint|sprain|sore|physio", "Physiotherapist", 60, 0.88, None, False),
+    (r"stomach|belly|nausea|vomit|diarr|gut|abdom", "General Practice", 30, 0.9, None, False),
+    # Vague catch-all → low confidence + a follow-up question.
+    (
+        r"off|not sure|don'?t know|weird|something|unwell|tired|just feel",
+        "General Practice",
+        30,
+        0.4,
+        "Is it more of a physical symptom, or more about how you're feeling emotionally?",
+        False,
+    ),
+]
+
+
+class _MockTriageMessage:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _MockTriageChoice:
+    def __init__(self, content: str) -> None:
+        self.message = _MockTriageMessage(content)
+
+
+class _MockTriageResponse:
+    def __init__(self, content: str) -> None:
+        self.choices = [_MockTriageChoice(content)]
+
+
+class _MockTriageCompletions:
+    async def create(self, **kwargs: object) -> _MockTriageResponse:
+        messages = kwargs.get("messages") or []
+        user_text = ""
+        if isinstance(messages, list):
+            for m in messages:
+                if isinstance(m, dict) and m.get("role") == "user":
+                    user_text = str(m.get("content") or "")
+        low = user_text.lower()
+        for pattern, specialty, duration, conf, follow_up, red_flag in _TRIAGE_RULES:
+            if re.search(pattern, low):
+                payload = {
+                    "specialty": specialty,
+                    "duration_minutes": duration,
+                    "confidence": conf,
+                    "follow_up": follow_up if conf < 0.7 else None,
+                    "red_flag": red_flag,
+                }
+                return _MockTriageResponse(json.dumps(payload))
+        # Unmatched → safe default GP, moderate confidence, no follow-up.
+        return _MockTriageResponse(
+            json.dumps(
+                {
+                    "specialty": "General Practice",
+                    "duration_minutes": 30,
+                    "confidence": 0.6,
+                    "follow_up": None,
+                    "red_flag": False,
+                }
+            )
+        )
+
+
+class _MockTriageChat:
+    def __init__(self) -> None:
+        self.completions = _MockTriageCompletions()
+
+
+class MockTriageClient:
+    """Drop-in for AsyncOpenAI used by the triage mini-LLM under mock-eval."""
+
+    def __init__(self) -> None:
+        self.chat = _MockTriageChat()
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +521,37 @@ def _script_goodbye_mid_confirmation() -> list[LLMReply]:
         # CONFIRM_BOOK read-back: persona then backs out -> _end() seals END.
         _t("I have ten tomorrow with Dr. Patel — shall I go ahead and book that?"),
         _end(),
+    ]
+
+
+def _script_book_60_minute_visit() -> list[LLMReply]:
+    # 60-min visit: list with duration_minutes=60, book first anchor slot.
+    # __use_first_slot__ fills slot_id + patient_id; duration_minutes rides
+    # alongside and the handler books a 2-slot lock as one appointment.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        _tool("list_availability_slots", date=_tomorrow_iso(), duration_minutes=60),
+        _t("I have ten tomorrow with Dr. Patel for a full hour — shall I book?"),
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=60),
+        _t("All set — an hour tomorrow at ten with Dr. Patel. Have a great day."),
+    ]
+
+
+def _script_book_90_minute_visit() -> list[LLMReply]:
+    # 90-min visit: list with duration_minutes=90, book first anchor slot
+    # (locks three consecutive 30-min slots as one appointment).
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        _tool("list_availability_slots", date=_tomorrow_iso(), duration_minutes=90),
+        _t("I have ten tomorrow with Dr. Patel for ninety minutes — shall I book?"),
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=90),
+        _t("All set — ninety minutes tomorrow at ten with Dr. Patel. Have a great day."),
     ]
 
 
@@ -1009,6 +1148,112 @@ def _script_insurance_question_redirect() -> list[LLMReply]:
     ]
 
 
+def _script_symptom_routes_to_gp() -> list[LLMReply]:
+    # New patient describes stomach symptoms → triage routes to GP (30 min)
+    # → books. Exercises suggest_specialty Ok + specialty/duration passthrough.
+    return [
+        # GREETING
+        _t("Hi, you've reached Prosper Health — what's your name and how can I help?"),
+        # IDENTIFY: ask phone
+        _t("What's the best phone number to find you under?"),
+        # IDENTIFY: phone search → not found
+        _tool("find_patient_by_phone", phone="555-222-3333"),
+        _t("I don't see you — your full name and date of birth?"),
+        # IDENTIFY: name+dob → 0 → REGISTER
+        _tool("find_patient_by_name_dob", name="Sam Rivera", dob="March 4 1991"),
+        _t("I'll register Sam Rivera, born March 4th 1991, phone 555-222-3333 — right?"),
+        _tool(
+            "create_patient",
+            first_name="Sam",
+            last_name="Rivera",
+            dob="1991-03-04",
+            phone="5552223333",
+        ),
+        # CHOOSE_INTENT
+        _t("Great — would you like to book, reschedule, or cancel?"),
+        # BOOK_FLOW, turn where caller describes symptoms → triage
+        _tool("suggest_specialty", symptoms="bad stomach pain for a few days"),
+        # after triage Ok (same turn, inner loop) → ask the day
+        _t("Sounds like a general practice visit. What day works for you?"),
+        # next turn: list availability with the routed specialty + duration
+        _tool(
+            "list_availability_slots",
+            date=_tomorrow_iso(),
+            specialty="General Practice",
+            duration_minutes=30,
+        ),
+        # CONFIRM_BOOK: read back
+        _t("I have ten tomorrow with Dr. Romero — shall I book that?"),
+        # CONFIRM_BOOK: book → END
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=30),
+        _t("You're all set for tomorrow at ten — take care."),
+    ]
+
+
+def _script_symptom_ambiguous_followup() -> list[LLMReply]:
+    # Vague description → triage low-confidence + follow_up → caller clarifies
+    # (emotional) → triage routes to Psychiatrist (60 min) → books a 60-min
+    # visit (two consecutive slots locked). Exercises the follow-up loop +
+    # multi-slot booking.
+    return [
+        _t("Hi, you've reached Prosper Health — what's your name and how can I help?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="555-777-1212"),
+        _t("I don't see you — your full name and date of birth?"),
+        _tool("find_patient_by_name_dob", name="Jess Kim", dob="July 9 1988"),
+        _t("I'll register Jess Kim, born July 9th 1988, phone 555-777-1212 — right?"),
+        _tool(
+            "create_patient",
+            first_name="Jess",
+            last_name="Kim",
+            dob="1988-07-09",
+            phone="5557771212",
+        ),
+        _t("Great — book, reschedule, or cancel?"),
+        # BOOK_FLOW: vague symptom → triage returns follow_up
+        _tool("suggest_specialty", symptoms="I just feel off lately, not sure"),
+        # triage Ok with follow_up → bot asks the follow-up question
+        _t("Is it more of a physical thing, or more about how you've been feeling?"),
+        # next turn: caller clarified → triage again, now confident
+        _tool("suggest_specialty", symptoms="honestly I've been really down and anxious"),
+        _t("Thanks for sharing. Let's get you in with a psychiatrist — what day works?"),
+        # list availability for Psychiatrist, 60 min
+        _tool(
+            "list_availability_slots",
+            date=_tomorrow_iso(),
+            specialty="Psychiatrist",
+            duration_minutes=60,
+        ),
+        _t("I have ten tomorrow with Dr. Chen for an hour — shall I book it?"),
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=60),
+        _t("You're booked for tomorrow at ten with Dr. Chen — take care."),
+    ]
+
+
+def _script_direct_specialty_skips_triage() -> list[LLMReply]:
+    # Existing patient names the specialty directly → bot must NOT call
+    # suggest_specialty, goes straight to list_availability_slots filtered to
+    # Psychiatrist at 60 min. Pins the "skip triage when specialty named" path.
+    return [
+        _t("Hi, you've reached Prosper Health — what's your name and how can I help?"),
+        _t("What's the best number to find you under?"),
+        _tool("find_patient_by_phone", phone="+12025550100"),
+        # found → CHOOSE_INTENT
+        _t("Thanks Ada — book, reschedule, or cancel?"),
+        # BOOK_FLOW: caller named "psychiatrist" → straight to availability,
+        # NO suggest_specialty call.
+        _tool(
+            "list_availability_slots",
+            date=_tomorrow_iso(),
+            specialty="Psychiatrist",
+            duration_minutes=60,
+        ),
+        _t("I have ten tomorrow with Dr. Chen for an hour — shall I book it?"),
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=60),
+        _t("You're all set for tomorrow at ten with Dr. Chen — take care."),
+    ]
+
+
 _BOT_SCRIPTS: dict[str, callable] = {
     "new_patient_books": _script_new_patient_books,
     "existing_patient_cancels": _script_existing_patient_cancels,
@@ -1025,6 +1270,8 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "phone_format_chaos": _script_phone_format_chaos,
     "patient_correction_mid_register": _script_patient_correction_mid_register,
     "goodbye_mid_confirmation": _script_goodbye_mid_confirmation,
+    "book_60_minute_visit": _script_book_60_minute_visit,
+    "book_90_minute_visit": _script_book_90_minute_visit,
     "availability_zero_everywhere_invert": _script_availability_zero_everywhere_invert,
     "confirm_book_abort_then_rebook": _script_confirm_book_abort_then_rebook,
     "existing_patient_books_additional": _script_existing_patient_books_additional,
@@ -1060,6 +1307,9 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "specialty_no_filter_any_doctor": _script_specialty_no_filter_any_doctor,
     "specialty_filter_therapist": _script_specialty_filter_therapist,
     "insurance_question_redirect": _script_insurance_question_redirect,
+    "symptom_routes_to_gp": _script_symptom_routes_to_gp,
+    "symptom_ambiguous_followup": _script_symptom_ambiguous_followup,
+    "direct_specialty_skips_triage": _script_direct_specialty_skips_triage,
 }
 
 
@@ -1185,6 +1435,20 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         # AVOID 'goodbye'/'bye'/'thanks, bye' so the runner's short-circuit
         # doesn't fire before the bot can emit _end() and force state -> END.
         "actually, never mind, I changed my mind.",
+    ],
+    "book_60_minute_visit": [
+        "Hi, I'd like to book a one-hour appointment tomorrow.",
+        "202-555-0100.",
+        "Book please.",
+        "first one works.",
+        "yes that's correct.",
+    ],
+    "book_90_minute_visit": [
+        "Hi, I'd like to book a ninety-minute appointment tomorrow.",
+        "202-555-0100.",
+        "Book please.",
+        "first one works.",
+        "yes that's correct.",
     ],
     "availability_zero_everywhere_invert": [
         "Hi, I'd like to book a visit tomorrow.",
@@ -1396,6 +1660,31 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         ),
         "come on, just a ballpark.",
         "okay never mind then.",
+    ],
+    "symptom_routes_to_gp": [
+        "Hi, I'd like to book an appointment.",
+        "555-222-3333.",
+        "Sam Rivera, March 4th 1991.",
+        "Yes that's right.",
+        "I want to book — my stomach's been really bad for a few days.",
+        "Tomorrow morning if you can.",
+        "Yes please, book it.",
+    ],
+    "symptom_ambiguous_followup": [
+        "Hi, I'd like to make an appointment.",
+        "555-777-1212.",
+        "Jess Kim, July 9th 1988.",
+        "Yes that's correct.",
+        "I want to book something but I'm not sure what I need — I just feel off lately.",
+        "Honestly it's more emotional — I've been really down and anxious.",
+        "Tomorrow works.",
+        "Yes, book it please.",
+    ],
+    "direct_specialty_skips_triage": [
+        "Hi, I'd like to see a psychiatrist.",
+        "202-555-0100.",
+        "I'd like to book a visit — tomorrow morning if possible.",
+        "Yes, book that.",
     ],
 }
 

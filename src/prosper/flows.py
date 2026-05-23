@@ -33,7 +33,7 @@ ALLOWED_TOOLS: dict[State, set[str]] = {
     State.IDENTIFY_PATIENT: {"find_patient_by_phone", "find_patient_by_name_dob"},
     State.REGISTER_PATIENT: {"create_patient"},
     State.CHOOSE_INTENT: set(),
-    State.BOOK_FLOW: {"list_availability_slots"},
+    State.BOOK_FLOW: {"list_availability_slots", "suggest_specialty"},
     State.CANCEL_FLOW: {"get_upcoming_appointments"},
     # Reschedule needs BOTH lookups in one state so the bot can pick the
     # old appointment AND the new slot before committing. The atomic

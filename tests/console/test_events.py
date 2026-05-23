@@ -17,8 +17,8 @@ from prosper.console.events import (
 
 
 def test_event_types_set_is_frozen_and_complete() -> None:
-    """The closed event-type set must contain exactly the 8 documented types."""
-    assert len(EVENT_TYPES) == 8
+    """The closed event-type set must contain exactly the 9 documented types."""
+    assert len(EVENT_TYPES) == 9
     expected = {
         "state_change",
         "tool_call_start",
@@ -28,6 +28,7 @@ def test_event_types_set_is_frozen_and_complete() -> None:
         "transcript_turn",
         "outcome",
         "latency_tick",
+        "turn_interrupted",
     }
     assert set(EVENT_TYPES) == expected
 

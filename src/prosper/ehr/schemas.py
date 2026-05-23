@@ -57,6 +57,9 @@ class SlotList(BaseModel):
 class AppointmentCreate(BaseModel):
     patient_id: str = Field(min_length=1, max_length=36)
     slot_id: str = Field(min_length=1, max_length=36)
+    # Visit length in minutes; must be one of {30, 60, 90}. Repository's
+    # CheckConstraint validates again at the DB boundary.
+    duration_minutes: int = Field(default=30)
     notes: str | None = Field(default=None, max_length=500)
 
 
@@ -66,6 +69,8 @@ class AppointmentCancel(BaseModel):
 
 class AppointmentReschedule(BaseModel):
     new_slot_id: str = Field(min_length=1, max_length=36)
+    # Optional duration override. ``None`` means "keep the current duration".
+    new_duration_minutes: int | None = Field(default=None)
 
 
 class AppointmentOut(BaseModel):
@@ -78,6 +83,7 @@ class AppointmentOut(BaseModel):
     end_at: datetime
     provider_id: str
     provider_name: str
+    duration_minutes: int = 30
     notes: str | None = None
 
 

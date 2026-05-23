@@ -135,6 +135,39 @@ def _setup_existing_patient_three_appts_for_reschedule(session: Session) -> None
         repo.create_appointment(session, patient_id=patient.id, slot_id=s.id)
 
 
+def _seed_triage_providers(session: Session) -> None:
+    """A GP (30-min visits) and a Psychiatrist (needs 60-min = 2 consecutive
+    slots) each with a run of back-to-back morning slots tomorrow. Lets the
+    triage scenarios book both a single-slot GP visit and a two-slot
+    psychiatry visit out of the same seed."""
+    gp = Provider(name="Dr. Romero", timezone="UTC", specialty="General Practice")
+    psych = Provider(name="Dr. Chen", timezone="UTC", specialty="Psychiatrist")
+    session.add_all([gp, psych])
+    session.commit()
+    start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    for prov in (gp, psych):
+        for i in range(4):  # 4 consecutive 30-min slots → supports up to 90 min
+            session.add(
+                Slot(
+                    provider_id=prov.id,
+                    start_at=start + timedelta(minutes=30 * i),
+                    end_at=start + timedelta(minutes=30 * (i + 1)),
+                )
+            )
+    session.commit()
+
+
+def _setup_triage_new_patient(session: Session) -> None:
+    _seed_triage_providers(session)
+
+
+def _setup_triage_existing_patient(session: Session) -> None:
+    _seed_triage_providers(session)
+    _seed_existing_patient(session)  # Ada Lovelace, phone +12025550100
+
+
 def _setup_multi_specialty(session: Session) -> None:
     """Two providers across different specialties, each with 2 morning slots
     tomorrow. Exercises the `specialty` filter on `list_availability_slots`."""
@@ -620,6 +653,66 @@ SCENARIOS: list[Scenario] = [
             "the bot ended the call politely after the caller said goodbye",
         ],
         max_turns=18,
+    ),
+    Scenario(
+        name="book_60_minute_visit",
+        tags=frozenset({"happy", "duration"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You need a SIXTY-MINUTE visit. Open VERBATIM: 'Hi, I'd like "
+            "to book a one-hour appointment tomorrow.' Provide phone. "
+            "When the bot offers a slot, pick the first one VERBATIM "
+            "'first one works'. Confirm VERBATIM 'yes that\\'s correct'. "
+            "End VERBATIM: 'thanks, goodbye.'"
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # One appointment row even though the 60-min visit locks two
+            # consecutive 30-min slots.
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot booked a single appointment for the longer visit",
+            "the bot did not double-book or create two separate appointments",
+        ],
+        max_turns=14,
+    ),
+    Scenario(
+        name="book_90_minute_visit",
+        tags=frozenset({"happy", "duration"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You need a NINETY-MINUTE visit. Open VERBATIM: 'Hi, I'd like "
+            "to book a ninety-minute appointment tomorrow.' Provide phone. "
+            "When the bot offers a slot, pick the first one VERBATIM "
+            "'first one works'. Confirm VERBATIM 'yes that\\'s correct'. "
+            "End VERBATIM: 'thanks, goodbye.'"
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # One appointment row; the 90-min visit locks three consecutive
+            # 30-min slots under the hood.
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot booked a single appointment for the 90-minute visit",
+            "the bot did not create multiple appointments for the one request",
+        ],
+        max_turns=14,
     ),
     Scenario(
         name="availability_zero_everywhere_invert",
@@ -1556,5 +1649,105 @@ SCENARIOS: list[Scenario] = [
             "no appointment was booked or cancelled during this call",
         ],
         max_turns=10,
+    ),
+    Scenario(
+        name="symptom_routes_to_gp",
+        tags=frozenset({"happy", "triage"}),
+        persona=(
+            "You are a NEW caller named Sam Rivera, DOB 4 March 1991, phone "
+            "555-222-3333. You do NOT know which kind of doctor you need — "
+            "you just describe your symptom. Open VERBATIM: 'Hi, I'd like to "
+            "book an appointment.' Give phone, then name and DOB when asked. "
+            "When asked what the visit is for, say VERBATIM: 'I want to book "
+            "— my stomach's been really bad for a few days.' Accept the kind "
+            "of provider the bot recommends. When it asks what day, say "
+            "'tomorrow morning'. Pick the first slot it offers and say "
+            "VERBATIM 'yes please, book it' at confirmation. End VERBATIM: "
+            '"thanks, goodbye."'
+        ),
+        setup=_setup_triage_new_patient,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "create_patient",
+                "suggest_specialty",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot called suggest_specialty after the caller described a symptom",
+            "the bot routed the caller to general practice (not a random specialty)",
+            "the booking was completed for the recommended provider",
+        ],
+        max_turns=18,
+    ),
+    Scenario(
+        name="symptom_ambiguous_followup",
+        tags=frozenset({"recovery", "triage"}),
+        persona=(
+            "You are a NEW caller named Jess Kim, DOB 9 July 1988, phone "
+            "555-777-1212. Open VERBATIM: 'Hi, I'd like to make an "
+            "appointment.' Give phone, then name and DOB when asked. When "
+            "asked what the visit is for, be VAGUE first — say VERBATIM: "
+            "'I'm not totally sure what I need — I just feel off lately.' "
+            "When the bot asks a clarifying question, answer VERBATIM: "
+            "'Honestly it's more emotional — I've been really down and "
+            "anxious.' Accept the provider it recommends, say 'tomorrow' for "
+            "the day, pick the first slot, and confirm VERBATIM 'yes, book "
+            'it please\'. End VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_triage_new_patient,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "create_patient",
+                "suggest_specialty",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot asked a clarifying follow-up question after the vague first description",
+            "the bot only committed to a specialty after the caller clarified",
+            "exactly one appointment was booked",
+        ],
+        max_turns=20,
+    ),
+    Scenario(
+        name="direct_specialty_skips_triage",
+        tags=frozenset({"happy", "triage"}),
+        persona=(
+            "You are Ada Lovelace, an EXISTING patient, phone 202-555-0100. "
+            "You already know you want a psychiatrist. Open VERBATIM: 'Hi, "
+            "I'd like to see a psychiatrist.' Give your phone when asked. "
+            "When the bot offers a time, pick the first one and confirm "
+            "VERBATIM 'yes, book that'. Do NOT describe any symptoms — you "
+            'named the specialty up front. End VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_triage_existing_patient,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["suggest_specialty"],
+        ),
+        judge_criteria=[
+            "the bot did NOT call suggest_specialty (the caller named the specialty directly)",
+            "the bot offered a psychiatrist slot",
+            "the booking was completed",
+        ],
+        max_turns=14,
     ),
 ]

@@ -199,11 +199,22 @@ def create_app(engine: Engine | None = None) -> FastAPI:
         date: date_t = Query(...),
         provider_id: str | None = Query(default=None),
         specialty: str | None = Query(default=None),
+        duration_minutes: int = Query(default=30),
         session: Session = Depends(session_dep),
     ) -> SlotList:
-        slots = repo.list_available_slots(
-            session, date_=date, provider_id=provider_id, specialty=specialty
-        )
+        try:
+            slots = repo.list_available_slots(
+                session,
+                date_=date,
+                provider_id=provider_id,
+                specialty=specialty,
+                duration_minutes=duration_minutes,
+            )
+        except repo.InvalidDurationError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_duration", "duration": e.duration},
+            ) from e
         return SlotList(slots=[_slot_to_out(s) for s in slots])
 
     @app.post("/appointments", response_model=AppointmentOut, status_code=201)
@@ -220,12 +231,27 @@ def create_app(engine: Engine | None = None) -> FastAPI:
                 session,
                 patient_id=payload.patient_id,
                 slot_id=payload.slot_id,
+                duration_minutes=payload.duration_minutes,
                 notes=payload.notes,
             )
         except repo.SlotTakenError as e:
             raise HTTPException(
                 status_code=409,
                 detail={"code": "slot_taken", "owner_patient_id": e.owner_patient_id},
+            ) from e
+        except repo.NoConsecutiveSlotsError as e:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "no_consecutive_slots",
+                    "anchor_slot_id": e.anchor_slot_id,
+                    "slots_needed": e.slots_needed,
+                },
+            ) from e
+        except repo.InvalidDurationError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_duration", "duration": e.duration},
             ) from e
         return _appt_to_out(appt)
 
@@ -261,6 +287,7 @@ def create_app(engine: Engine | None = None) -> FastAPI:
                 session,
                 appointment_id=appointment_id,
                 new_slot_id=payload.new_slot_id,
+                new_duration_minutes=payload.new_duration_minutes,
             )
         except repo.AppointmentNotFoundError as e:
             raise HTTPException(status_code=404, detail={"code": "appointment_not_found"}) from e
@@ -268,6 +295,20 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=409,
                 detail={"code": "slot_taken", "owner_patient_id": e.owner_patient_id},
+            ) from e
+        except repo.NoConsecutiveSlotsError as e:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "no_consecutive_slots",
+                    "anchor_slot_id": e.anchor_slot_id,
+                    "slots_needed": e.slots_needed,
+                },
+            ) from e
+        except repo.InvalidDurationError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_duration", "duration": e.duration},
             ) from e
         return _appt_to_out(appt)
 

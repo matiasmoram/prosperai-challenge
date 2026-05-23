@@ -252,6 +252,30 @@ async def test_live_stream_http_validates_session_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_call_ui_endpoints_served(tmp_path: Path) -> None:
+    """`build_app` must serve the custom call UI under `/call`.
+
+    Verifies the landing page + at least one static asset is reachable. The
+    landing page is the entry point for the WebRTC-direct front-end that
+    bypasses the Pipecat prebuilt UI.
+    """
+    from prosper.console.server import build_app
+
+    audit = AuditJSONLWriter(root=tmp_path)
+    bus = ConsoleBus()
+    app = build_app(bus, audit)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://t") as client:
+        landing = await client.get("/call")
+        assert landing.status_code == 200
+        assert b"Sarah" in landing.content, "call UI should render the avatar name"
+
+        css = await client.get("/call/static/call.css")
+        assert css.status_code == 200
+        assert b"avatar" in css.content
+
+
+@pytest.mark.asyncio
 async def test_embedded_uvicorn_serves_console(tmp_path: Path) -> None:
     """Integration test: `console.server.run` binds uvicorn on a free port.
 

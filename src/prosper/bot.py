@@ -77,9 +77,10 @@ from prosper.console.bus import ConsoleBus
 from prosper.console.server import run as run_console_server
 from prosper.dispatcher import Dispatcher
 from prosper.ehr_client import EHRClient
-from prosper.flows import State
+from prosper.flows import ALLOWED_TOOLS, State
 from prosper.llm import OpenAILLMAdapter
 from prosper.observability.redact import redact_pii
+from prosper.observers import TTSAudibleObserver
 
 _ALLOWED_EHR_SCHEMES = {"http", "https"}
 
@@ -124,7 +125,37 @@ def _validated_ehr_url() -> str:
 _STATE_FILLERS: dict[State, str] = {
     State[name]: text for name, text in prompts.STATE_FILLERS.items()
 }
-_TOOL_FIRING_STATES = frozenset(_STATE_FILLERS)
+
+# Latency-gated filler emission. Earlier revisions pushed a per-state
+# filler unconditionally before every dispatcher turn. That made the bot
+# say "One moment. Looking you up — this can take a few seconds." in front
+# of a 30 ms local SQLite lookup — artificial dead air the caller doesn't
+# need. The gate below predicts the next turn's latency from
+# ``dispatcher.timing.summary()`` (p95 per tool, warm) plus an LLM
+# baseline and only emits the filler if the prediction exceeds
+# ``FILLER_LATENCY_THRESHOLD_MS``. Cold start (no history) falls back to
+# ``DEFAULT_TOOL_LATENCY_MS`` so the first slow turn still gets a filler.
+LLM_BASELINE_LATENCY_MS = 300
+DEFAULT_TOOL_LATENCY_MS = 500
+FILLER_LATENCY_THRESHOLD_MS = 700
+
+
+def _should_emit_filler(dispatcher: Dispatcher, state: State) -> bool:
+    """Predict whether the next turn will be slow enough to need a filler."""
+    tools = ALLOWED_TOOLS.get(state, set())
+    if not tools:
+        return False
+    summary = dispatcher.timing.summary()
+    if not isinstance(summary, dict):
+        # Defensive: a stubbed timing collector in tests may return a
+        # non-dict. Treat as cold-start → emit the filler.
+        return True
+    worst_tool_ms = max(
+        float(summary.get(f"tool:{name}", {}).get("p95", DEFAULT_TOOL_LATENCY_MS)) for name in tools
+    )
+    predicted_ms = LLM_BASELINE_LATENCY_MS + worst_tool_ms
+    return predicted_ms >= FILLER_LATENCY_THRESHOLD_MS
+
 
 # NOTE on pipecat aggregation_timeout (web research finding, 2026):
 # Pipecat's default LLMUserAggregator carries a 1.0s aggregation_timeout that
@@ -240,9 +271,10 @@ class DispatcherProcessor(FrameProcessor):
         # HIPAA-adjacent: redact phone / DOB / email from log sinks. The
         # dispatcher still sees the raw text — only the log line is masked.
         logger.info("USER: {}", redact_pii(user_text))
-        filler = _STATE_FILLERS.get(self._dispatcher.state)
-        if filler is not None:
-            await self.push_frame(TTSSpeakFrame(filler))
+        if _should_emit_filler(self._dispatcher, self._dispatcher.state):
+            filler = _STATE_FILLERS.get(self._dispatcher.state)
+            if filler is not None:
+                await self.push_frame(TTSSpeakFrame(filler))
         try:
             reply = await self._dispatcher.handle_user_turn(user_text)
         # last-resort guard for live calls; mid-pipeline crash would kill the WebRTC session
@@ -376,6 +408,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         # connecting" forever even when audio is flowing.
         rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
 
+        # Interrupt-aware history: the observer sits downstream of TTS so it
+        # sees every TTSTextFrame the engine emits. When VAD fires a
+        # StartInterruptionFrame, the buffered text is handed to the
+        # dispatcher so history[-1] gets truncated + marked. See
+        # ``observers.TTSAudibleObserver`` and ``docs/research/interruption_design.md``.
+        tts_observer = TTSAudibleObserver(
+            on_interrupt=dispatcher.mark_last_assistant_interrupted,
+        )
+
         pipeline = Pipeline(
             [
                 transport.input(),
@@ -383,6 +424,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
                 stt,
                 dispatcher_processor,
                 tts,
+                tts_observer,
                 transport.output(),
             ]
         )
@@ -443,10 +485,10 @@ async def bot(runner_args: RunnerArguments) -> None:
             # VAD tuning for naturalness:
             # - stop_secs=1.2: longer silence threshold so the bot doesn't
             #   jump in during natural pauses between digits / sentences.
-            # - min_volume=0.4: was 0.6 — softer voices were getting missed,
+            # - min_volume=0.3: softer voices were getting missed at 0.4+,
             #   the bot would then talk over the caller because it never
             #   saw a user_started_speaking event to interrupt the TTS.
-            # - confidence=0.6: matched lower volume tier for better recall.
+            # - confidence=0.5: matched lower volume tier for better recall.
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
                     confidence=0.5,

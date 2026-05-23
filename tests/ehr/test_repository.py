@@ -446,3 +446,253 @@ def test_find_patient_by_name_dob_includes_exact_threshold(session: Session) -> 
     assert len(results) == 1
     _, similarity = results[0]
     assert similarity == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Multi-slot bookings (variable visit duration) — see ADR 005.
+# ---------------------------------------------------------------------------
+
+
+def _seed_consecutive(session: Session, provider: Provider, count: int) -> list[Slot]:
+    """N back-to-back 30-min slots for one provider, starting tomorrow 9am-ish."""
+    start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
+    slots: list[Slot] = []
+    for i in range(count):
+        s = Slot(
+            provider=provider,
+            start_at=start + timedelta(minutes=30 * i),
+            end_at=start + timedelta(minutes=30 * (i + 1)),
+        )
+        session.add(s)
+        slots.append(s)
+    session.commit()
+    return slots
+
+
+def test_availability_60min_requires_free_adjacent(session: Session) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 3)  # 9:00, 9:30, 10:00
+    day = slots[0].start_at.date()
+    # All three anchors can host 30-min; only the first two can host 60-min
+    # (each needs its successor free): 9:00→needs 9:30, 9:30→needs 10:00,
+    # 10:00→needs 10:30 which doesn't exist.
+    thirty = repo.list_available_slots(session, date_=day, duration_minutes=30)
+    sixty = repo.list_available_slots(session, date_=day, duration_minutes=60)
+    assert len(thirty) == 3
+    assert {s.id for s in sixty} == {slots[0].id, slots[1].id}
+
+
+def test_availability_90min_requires_two_free_adjacent(session: Session) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 4)  # 9:00, 9:30, 10:00, 10:30
+    day = slots[0].start_at.date()
+    ninety = repo.list_available_slots(session, date_=day, duration_minutes=90)
+    # Only 9:00 and 9:30 have two successors each.
+    assert {s.id for s in ninety} == {slots[0].id, slots[1].id}
+
+
+def test_create_60min_locks_two_slots_and_removes_them_from_availability(
+    session: Session,
+) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 4)
+    patient = Patient(
+        first_name="Ada",
+        last_name="Lovelace",
+        name_normalized="ada lovelace",
+        dob=date(1990, 12, 10),
+        phone="+12025550100",
+    )
+    session.add(patient)
+    session.commit()
+    appt = repo.create_appointment(
+        session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=60
+    )
+    assert appt.duration_minutes == 60
+    day = slots[0].start_at.date()
+    # Both the anchor (9:00) and adjacent (9:30) are now locked, so a 30-min
+    # search should only see 10:00 and 10:30.
+    remaining = repo.list_available_slots(session, date_=day, duration_minutes=30)
+    assert {s.id for s in remaining} == {slots[2].id, slots[3].id}
+
+
+def test_create_60min_with_no_adjacent_raises_no_consecutive(session: Session) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 1)  # only 9:00, no 9:30
+    patient = Patient(
+        first_name="Ada",
+        last_name="Lovelace",
+        name_normalized="ada lovelace",
+        dob=date(1990, 12, 10),
+        phone="+12025550100",
+    )
+    session.add(patient)
+    session.commit()
+    with pytest.raises(repo.NoConsecutiveSlotsError):
+        repo.create_appointment(
+            session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=60
+        )
+
+
+def test_create_invalid_duration_raises(session: Session) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 2)
+    patient = Patient(
+        first_name="Ada",
+        last_name="Lovelace",
+        name_normalized="ada lovelace",
+        dob=date(1990, 12, 10),
+        phone="+12025550100",
+    )
+    session.add(patient)
+    session.commit()
+    with pytest.raises(repo.InvalidDurationError):
+        repo.create_appointment(
+            session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=45
+        )
+
+
+def test_second_patient_cannot_book_locked_adjacent_slot(session: Session) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 2)  # 9:00, 9:30
+    p1 = Patient(
+        first_name="Ada",
+        last_name="Lovelace",
+        name_normalized="ada lovelace",
+        dob=date(1990, 12, 10),
+        phone="+12025550100",
+    )
+    p2 = Patient(
+        first_name="Grace",
+        last_name="Hopper",
+        name_normalized="grace hopper",
+        dob=date(1906, 12, 9),
+        phone="+12025550111",
+    )
+    session.add_all([p1, p2])
+    session.commit()
+    # p1 books 60 min → locks 9:00 + 9:30.
+    repo.create_appointment(session, patient_id=p1.id, slot_id=slots[0].id, duration_minutes=60)
+    # p2 tries to book the now-locked 9:30 as a 30-min anchor → slot taken.
+    with pytest.raises(repo.SlotTakenError):
+        repo.create_appointment(session, patient_id=p2.id, slot_id=slots[1].id, duration_minutes=30)
+
+
+def test_cancel_releases_all_locks(session: Session) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 2)
+    patient = Patient(
+        first_name="Ada",
+        last_name="Lovelace",
+        name_normalized="ada lovelace",
+        dob=date(1990, 12, 10),
+        phone="+12025550100",
+    )
+    session.add(patient)
+    session.commit()
+    appt = repo.create_appointment(
+        session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=60
+    )
+    repo.cancel_appointment(session, appointment_id=appt.id)
+    day = slots[0].start_at.date()
+    # Both slots freed again.
+    freed = repo.list_available_slots(session, date_=day, duration_minutes=30)
+    assert {s.id for s in freed} == {slots[0].id, slots[1].id}
+
+
+def test_create_60min_idempotent_same_patient(session: Session) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 2)
+    patient = Patient(
+        first_name="Ada",
+        last_name="Lovelace",
+        name_normalized="ada lovelace",
+        dob=date(1990, 12, 10),
+        phone="+12025550100",
+    )
+    session.add(patient)
+    session.commit()
+    a1 = repo.create_appointment(
+        session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=60
+    )
+    a2 = repo.create_appointment(
+        session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=60
+    )
+    assert a1.id == a2.id
+
+
+def test_reschedule_failure_preserves_original_locks(session: Session) -> None:
+    """Regression (prober SEV-high): a reschedule whose new chain can't be
+    resolved must roll back the pre-emptive lock release so the original
+    booking survives — appointment keeps its anchor AND its lock row."""
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 2)  # 9:00, 9:30 only
+    patient = Patient(
+        first_name="Ada",
+        last_name="Lovelace",
+        name_normalized="ada lovelace",
+        dob=date(1990, 12, 10),
+        phone="+12025550100",
+    )
+    session.add(patient)
+    session.commit()
+    # Book a 30-min appt at 9:00.
+    appt = repo.create_appointment(
+        session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=30
+    )
+    # Try to reschedule it to a 90-min visit anchored at 9:30 — impossible,
+    # only 9:30 (+ nothing after) exists → NoConsecutiveSlotsError.
+    with pytest.raises(repo.NoConsecutiveSlotsError):
+        repo.reschedule_appointment(
+            session,
+            appointment_id=appt.id,
+            new_slot_id=slots[1].id,
+            new_duration_minutes=90,
+        )
+    # Original booking must be intact: still anchored at 9:00, still 30 min,
+    # and its lock row must still exist (slot 9:00 unavailable to others).
+    session.expire_all()
+    refreshed = session.get(repo.Appointment, appt.id) if hasattr(repo, "Appointment") else None
+    # repo doesn't re-export Appointment; query via models import already at top.
+    from prosper.ehr.models import Appointment, AppointmentSlotLock
+
+    refreshed = session.get(Appointment, appt.id)
+    assert refreshed is not None
+    assert refreshed.slot_id == slots[0].id
+    assert refreshed.duration_minutes == 30
+    lock = session.execute(
+        select_lock := __import__("sqlalchemy").select(AppointmentSlotLock).where(
+            AppointmentSlotLock.appointment_id == appt.id
+        )
+    ).scalar_one_or_none()
+    assert lock is not None
+    assert lock.slot_id == slots[0].id
+
+
+def test_create_same_patient_same_anchor_different_duration_returns_existing(
+    session: Session,
+) -> None:
+    """Regression (prober SEV-med): same patient re-booking the same anchor
+    at a different duration is idempotent (returns the existing row), NOT a
+    misleading slot_taken_other_patient against themselves."""
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 3)
+    patient = Patient(
+        first_name="Ada",
+        last_name="Lovelace",
+        name_normalized="ada lovelace",
+        dob=date(1990, 12, 10),
+        phone="+12025550100",
+    )
+    session.add(patient)
+    session.commit()
+    a30 = repo.create_appointment(
+        session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=30
+    )
+    a60 = repo.create_appointment(
+        session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=60
+    )
+    assert a60.id == a30.id
+    assert a60.duration_minutes == 30  # unchanged — duration change is a reschedule

@@ -31,7 +31,12 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from evals.judge import judge_transcript
-from evals.mock_llm import MockDispatcherLLM, MockPersonaLLM, mock_judge_transcript
+from evals.mock_llm import (
+    MockDispatcherLLM,
+    MockPersonaLLM,
+    MockTriageClient,
+    mock_judge_transcript,
+)
 from evals.sim import PersonaSimulator
 from evals.types import Scenario, ScenarioResult
 from prosper.dispatcher import Dispatcher
@@ -243,6 +248,13 @@ async def run_scenario(
             mock_llm = MockDispatcherLLM(scenario.name)
             dispatcher = Dispatcher(llm=mock_llm, ehr_client=ehr)
             mock_llm.attach(dispatcher)
+            # The triage tool (`suggest_specialty`) calls the mini-LLM via
+            # ``prosper.llm.classify_symptoms``; under mock-eval there is no
+            # API key, so install a deterministic stub. Set on the module so
+            # ``_get_triage_client`` returns it for every triage call this run.
+            import prosper.llm as _prosper_llm
+
+            _prosper_llm._TRIAGE_CLIENT_OVERRIDE = MockTriageClient()
         else:
             dispatcher = Dispatcher(
                 llm=OpenAILLMAdapter(

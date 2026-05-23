@@ -185,31 +185,46 @@ their appointment. Stay warm.
   hold a moment — then wait. Do NOT say "trouble reaching scheduling
   system" verbatim; that exact phrase reads as a script on a second
   call. Pick fresh wording each time.
+
+Interrupted turns
+- If an assistant turn in the conversation history ends with the literal
+  marker "[INTERRUPTED by user]", the caller cut you off mid-sentence
+  and did not hear the rest of what was queued. Read the truncated text
+  to gauge what was audible. The caller's next utterance may target the
+  line that was cut ("no no, don't book that") OR continue an earlier
+  thread ("actually make it Tuesday" replying to a question two turns
+  back) — use the timeline to decide. Never assume anything in the cut
+  portion was acknowledged; do not confirm a booking that never reached
+  the caller's ear.
 """
 
 
 TASK_MESSAGES = {
     "GREETING": (
-        "[STATE: GREETING] Open warmly in one short, inviting sentence: "
-        '"Hi, thanks for calling Prosper Health — I can help you book a '
-        'new visit or cancel an existing one. Which would you like?" '
-        "Vary the wording naturally, but stay under two sentences and "
-        "always offer both options. Do NOT call any tools in this state."
+        "[STATE: GREETING] Open with exactly this line and no variation: "
+        "\"Hi, you've reached Prosper Health — what's your name, and how "
+        'can I help you today?" '
+        "Do not paraphrase, shorten, or add to it. Do NOT call any tools "
+        "in this state — the dispatcher routes you to IDENTIFY_PATIENT as "
+        "soon as the caller answers."
     ),
     "IDENTIFY_PATIENT": (
-        "[STATE: IDENTIFY_PATIENT] Identify the caller. First ask for their "
-        "phone number (just the digits). Call find_patient_by_phone. If "
-        "found exactly once, confirm their name aloud and move on. If "
-        "multiple, ask for date of birth to narrow down. If none, ask for "
-        "full name and DOB, then call find_patient_by_name_dob. Always "
-        "read the DOB back as 'Month day, year' (e.g. 'March third, "
-        "nineteen-eighty') before submitting — never as digits. If the "
-        "caller speaks the phone number in words (e.g. 'two oh two five "
-        "five five oh one zero zero'), normalise to digits before calling "
-        "the tool. If unsure, read it back ('I heard 202-555-0100, is "
-        "that right?') and only proceed on a clear yes. If still no "
-        "match, you are done with this state — the dispatcher will route "
-        "to registration."
+        "[STATE: IDENTIFY_PATIENT] Identify the caller. The greeting "
+        "already asked their name, so it's usually in the previous turn — "
+        "read it from history. "
+        "Path A (name known): ask date of birth, then call "
+        "find_patient_by_name_dob with name + DOB. "
+        "Path B (no name, or A found nothing): ask for their phone, then "
+        "call find_patient_by_phone. "
+        "On exactly one match, confirm the name aloud and move on. On a "
+        "numbered list of more than one, read each name and DOB and ask "
+        "which one they are; wait for their pick. On none, you are done — "
+        "the dispatcher routes to registration. "
+        "Read the DOB back as 'Month day, year' (e.g. 'March third, "
+        "nineteen-eighty') before submitting — never digits. If the phone "
+        "comes as words ('two oh two...'), normalise to digits first. If "
+        "unsure, read it back ('I heard 202-555-0100, right?') and only "
+        "proceed on a clear yes."
     ),
     "REGISTER_PATIENT": (
         "[STATE: REGISTER_PATIENT] Collect first name, last name, DOB, and "
@@ -240,23 +255,22 @@ TASK_MESSAGES = {
         "dispatcher will route you to the right state."
     ),
     "BOOK_FLOW": (
-        "[STATE: BOOK_FLOW] Ask what day works. Resolve relative phrases "
-        "('today', 'tomorrow', 'next Tuesday') against the TODAY anchor, "
-        "then call list_availability_slots ONCE with the concrete "
-        "YYYY-MM-DD date. If the caller is flexible ('whenever works'), "
-        "default to tomorrow. ADAPTIVE OFFER based on what the tool "
-        "returns: (a) if `slots` length is 5 or more, do NOT dump the "
-        "list — first ask ONE narrow question ('morning or afternoon? "
-        "any time in particular?'), then pick 2 or 3 that match the "
-        "hint; (b) if 1–4 slots, read them all in a single sentence "
-        "('I have ten, eleven thirty, or two — which works?'); (c) if 0 "
-        "slots AND `next_day_with_slots` is present, surface it "
-        "naturally ('that day's booked, but Thursday has 10 or 2pm — "
-        "either work?'); (d) if 0 slots AND no next-day, INVERT — ask "
-        "the caller 'nothing on that day. When else might work for "
-        "you?' and do NOT re-call with the same date. Each slot is "
-        "enumerated `[1]`, `[2]` …; pass that number as `slot_id` in "
-        "CONFIRM_BOOK. Never invent a UUID."
+        "[STATE: BOOK_FLOW] Decide WHO first. If caller named a "
+        "specialty/doctor, skip triage. If they described symptoms, "
+        "call suggest_specialty ONCE with a short symptom summary — it "
+        "returns {specialty, duration_minutes, follow_up?}. If "
+        "follow_up is set, ask it verbatim, then call suggest_specialty "
+        "AGAIN with the combined answer. Use the returned specialty + "
+        "duration_minutes in list_availability_slots. Then ask what day "
+        "— resolve 'tomorrow', 'next Tuesday' against TODAY. If "
+        "flexible, default tomorrow. Call list_availability_slots ONCE "
+        "(date + specialty if known + duration_minutes, default 30). "
+        "ADAPTIVE OFFER: (a) 5+ slots → ask 'morning or afternoon?' "
+        "then pick 2-3; (b) 1-4 → read all in one sentence; (c) 0 "
+        "with `next_day_with_slots` → surface ('booked, but Thursday "
+        "has 10 or 2pm'); (d) 0 + no next-day → invert: 'nothing then "
+        "— when else?'. Each slot is `[1]`, `[2]`; pass that number "
+        "as `slot_id`. Never invent a UUID."
     ),
     "CANCEL_FLOW": (
         "[STATE: CANCEL_FLOW] Call get_upcoming_appointments for the "
@@ -344,23 +358,25 @@ TASK_MESSAGES = {
 
 # Per-state acknowledgement strings spoken while a tool is firing.
 #
-# The bot speaks one of these as soon as the user finishes their turn, so
-# the caller hears *something* during the 1-3 s the LLM + tool round-trip
-# takes. Action-specific phrasing ("Pulling up your appointments…") feels
-# more natural than a single canned "One moment.". Lives here — not in
-# bot.py — so all caller-audible copy stays in one place.
+# Emission is gated by a latency predictor in ``bot._should_emit_filler``:
+# the filler only plays when the next turn's predicted latency exceeds
+# ``FILLER_LATENCY_THRESHOLD_MS`` (300 ms LLM baseline + the worst-tool
+# p95 from ``dispatcher.timing``). For a warm pipeline against a local
+# SQLite EHR the gate is silent — see ``bot.py`` for the prediction.
+# Cold-start still fires once before history accrues; the strings below
+# must therefore be honest even on a sub-second turn.
 #
 # IDENTIFY_PATIENT first sentence MUST start with "One moment." — the
 # dispatcher-processor unit test asserts the exact opener so a UX
 # regression there is caught immediately.
 STATE_FILLERS: dict[str, str] = {
-    "IDENTIFY_PATIENT": "One moment. Looking you up — this can take a few seconds.",
+    "IDENTIFY_PATIENT": "One moment.",
     "REGISTER_PATIENT": "Got it, setting that up.",
     "BOOK_FLOW": "Let me check what's available.",
-    "CANCEL_FLOW": "Pulling up your appointments — one moment.",
-    "RESCHEDULE_FLOW": "Hang tight while I pull up your appointments and what's free.",
+    "CANCEL_FLOW": "Pulling up your appointments.",
+    "RESCHEDULE_FLOW": "Pulling up your appointments and what's free.",
     "CONFIRM_BOOK": "Booking that for you now.",
-    "CONFIRM_CANCEL": "Cancelling that now — one moment.",
+    "CONFIRM_CANCEL": "Cancelling that now.",
     "CONFIRM_RESCHEDULE": "Moving that for you now.",
 }
 
@@ -372,6 +388,53 @@ FALLBACK_LINES = {
     "llm_loop_exhausted": "Hmm, I lost track for a moment — could you repeat that?",
     "dispatcher_crash": "Sorry, I didn't catch that — could you say it again?",
 }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Symptom triage (mini-LLM) — see docs/superpowers/specs/2026-05-23-
+# symptom-triage-design.md and docs/adr/005-symptom-triage.md.
+# ──────────────────────────────────────────────────────────────────────
+
+# Default visit duration per seeded specialty. Mini-LLM may override the
+# default per-call when the symptom description suggests a longer visit
+# (e.g. first-time therapy intake → 60 min on GP). Values constrained
+# to ``{30, 60, 90}`` to match ``ehr.repository.ALLOWED_DURATIONS``.
+SPECIALTY_DURATION_TABLE: dict[str, int] = {
+    "Therapist": 60,
+    "Psychiatrist": 60,
+    "General Practice": 30,
+    "Dermatologist": 30,
+    "Physiotherapist": 60,
+}
+
+# The mini-LLM never sees the persona — it gets exactly this prompt + the
+# symptom description. Kept short so the call is cheap (gpt-4o-mini, JSON
+# mode) and reproducible. The allowed-specialty list is generated from
+# ``SPECIALTY_DURATION_TABLE`` at call site so adding a specialty is a
+# one-line change.
+TRIAGE_SYSTEM_PROMPT = """\
+You are a clinical triage classifier for a US outpatient clinic. Given a
+caller's symptom description, decide:
+
+1. Which provider specialty fits best, from the allowed list provided.
+2. The visit duration in minutes — one of 30, 60, or 90.
+3. Your confidence in the routing (0.0 to 1.0).
+4. A `follow_up` question to ask the caller IF and ONLY IF confidence is
+   below 0.7, otherwise leave it empty/null. The follow-up must be ONE
+   short sentence that would let you confidently pick a specialty.
+5. A `red_flag` boolean — set to true ONLY for chest pain, stroke
+   symptoms, severe bleeding, anaphylaxis, suicidal ideation, or other
+   immediately life-threatening descriptions. Triggers an emergency
+   redirect from the agent.
+
+Rules:
+- Output strict JSON matching the schema; no prose, no markdown.
+- Default 30 minutes unless the symptom clearly warrants longer (first
+  therapy intake, complex multi-issue GP, full physiotherapy assessment).
+- Pick General Practice as the safe default for vague somatic complaints.
+- NEVER recommend a specialty outside the allowed list.
+- NEVER provide medical advice in any field — your only job is routing.
+"""
 
 
 def build_task_message(state: str) -> str:

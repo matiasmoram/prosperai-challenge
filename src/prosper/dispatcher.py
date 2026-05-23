@@ -34,6 +34,7 @@ from prosper.observability.redact import mask_name, mask_phone
 from prosper.observability.timing import TimingCollector
 from prosper.prompts import CLINIC_PERSONA, FALLBACK_LINES, build_task_message
 from prosper.result import Err, Result, is_err, is_ok
+from prosper.speculation import build_disambiguation_message, classify_find_result
 from prosper.tools import HANDLERS, TOOL_SCHEMAS
 
 
@@ -86,6 +87,19 @@ class SessionMemory:
     # ``cancel_appointment`` we then auto-transition into BOOK_FLOW instead
     # of ending the call, so the same call can swap out an appointment.
     wants_reschedule: bool = False
+    # Latest output of ``suggest_specialty`` for this call. The dispatcher
+    # records these for audit / operator-console + lets the LLM reach for
+    # them when calling ``list_availability_slots`` / ``create_appointment``
+    # without restating the values every turn. ``None`` means the caller
+    # never went through triage.
+    recommended_specialty: str | None = None
+    recommended_duration_minutes: int | None = None
+    # When a name+DOB lookup returns more than one candidate (same DOB,
+    # similar names — the "John Smith vs Jon Smith" case), we stash the
+    # candidates here and stay in IDENTIFY_PATIENT so the LLM can ask the
+    # caller which one they are. Resolved (and cleared) once the caller
+    # picks. Empty list = no pending disambiguation.
+    pending_identity_candidates: list[dict[str, Any]] = field(default_factory=list)
 
 
 _AFFIRM = re.compile(
@@ -167,6 +181,46 @@ def _maybe_handle_index(candidate: Any) -> int | None:
     return int(match.group(1)) - 1
 
 
+# Ordinal words → 0-based index, for picking from a short disambiguation
+# list ("the first one", "second please"). Only the first few — caller is
+# choosing between 2-3 candidates, never a long list.
+_ORDINAL_WORDS: Final[dict[str, int]] = {
+    "first": 0,
+    "second": 1,
+    "third": 2,
+    "fourth": 3,
+    "last": -1,
+}
+_PICK_NUMBER_RE = re.compile(
+    r"\b(?:number|option|the)?\s*#?\s*(\d{1,2})\b|\b(one|two|three|four)\b", re.I
+)
+_SPOKEN_NUMBERS: Final[dict[str, int]] = {"one": 1, "two": 2, "three": 3, "four": 4}
+
+
+def _pick_candidate_index(user_text: str, count: int) -> int | None:
+    """Map a caller's pick utterance to a 0-based candidate index, or None.
+
+    Handles ordinals ("first"/"second"/"last"), digits ("2", "number 1"),
+    and spoken numbers ("two"). Bounded to ``count`` so a stray digit
+    (e.g. part of a DOB) can't select an out-of-range candidate. Returns
+    None when nothing parses — the caller will be asked again.
+    """
+    if count <= 0:
+        return None
+    lowered = user_text.lower()
+    for word, idx in _ORDINAL_WORDS.items():
+        if re.search(rf"\b{word}\b", lowered):
+            resolved = count - 1 if idx == -1 else idx
+            return resolved if 0 <= resolved < count else None
+    match = _PICK_NUMBER_RE.search(lowered)
+    if match is not None:
+        raw = match.group(1) or match.group(2)
+        n = _SPOKEN_NUMBERS.get(raw, None) if raw in _SPOKEN_NUMBERS else int(raw)
+        if n is not None and 1 <= n <= count:
+            return n - 1
+    return None
+
+
 # Sentinel used as `from_state` in the very first state_change event when the
 # call begins. Module-level constant so the value lives in one place — the
 # frontend reads the spec, not the dispatcher source.
@@ -213,9 +267,12 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
         patients = value.get("patients", [])
         if not patients:
             return "no patient found"
-        return "matched patients: " + "; ".join(
-            f"{p['first_name']} {p['last_name']} (DOB {p['dob']})" for p in patients[:3]
-        )
+        if len(patients) > 1:
+            # Numbered, UUID-free candidate list so the LLM can read them
+            # back and the caller can pick by number / name.
+            return build_disambiguation_message(patients)
+        p = patients[0]
+        return f"matched patient: {p['first_name']} {p['last_name']} (DOB {p['dob']})"
     if name == "create_patient":
         return (
             f"patient registered: {value['first_name']} {value['last_name']} "
@@ -227,6 +284,23 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
         return "appointment cancelled"
     if name == "reschedule_appointment":
         return f"rescheduled to {value['start_at']} with {value['provider_name']}"
+    if name == "suggest_specialty":
+        # Render the triage recommendation as a single readable line so the
+        # main LLM can act on it next turn. ``follow_up`` (if present) is
+        # what the main LLM should ask the caller verbatim before
+        # calling suggest_specialty again. Confidence is exposed so the
+        # main LLM can decide to ask the follow-up vs commit.
+        specialty = value.get("specialty", "?")
+        duration = value.get("duration_minutes", 30)
+        confidence = value.get("confidence", 0.0)
+        follow_up = value.get("follow_up")
+        base = (
+            f"triage: specialty={specialty}, duration_minutes={duration}, "
+            f"confidence={confidence:.2f}"
+        )
+        if follow_up:
+            return base + f"; ask the caller: {follow_up!r}"
+        return base
     return "ok"
 
 
@@ -363,6 +437,37 @@ class Dispatcher:
         )
         self._maybe_transition_from_user_text(user_text)
         return await self._llm_turn()
+
+    def mark_last_assistant_interrupted(self, spoken_text: str) -> None:
+        """Truncate the last assistant history entry to the audible portion
+        and append ``[INTERRUPTED by user]`` so the next LLM call sees an
+        honest timeline.
+
+        Called by ``observers.TTSAudibleObserver`` when a ``StartInterruptionFrame``
+        propagates downstream. ``spoken_text`` is what TTS received to
+        synthesize before the interrupt — a best-effort estimate of what
+        the caller actually heard (see Pipecat issue #4466 for the gap
+        between "received" and "rendered to audio").
+        """
+        if not self.history:
+            return
+        last = self.history[-1]
+        if last.get("role") != "assistant":
+            return
+        content = str(last.get("content") or "")
+        marker = " [INTERRUPTED by user]"
+        if marker in content:
+            return
+        truncated = spoken_text.strip()
+        last["content"] = f"{truncated}…{marker}" if truncated else f"[NOT HEARD]{marker}"
+        self._publish(
+            "turn_interrupted",
+            {
+                "turn_id": self.turn_id,
+                "spoken_text": truncated,
+                "state": self.state.value,
+            },
+        )
 
     async def _llm_turn(self) -> str:
         tools = [TOOL_SCHEMAS[name] for name in sorted(ALLOWED_TOOLS[self.state])]
@@ -773,6 +878,12 @@ class Dispatcher:
                 )
                 if self.memory.last_slots:
                     self._publish_slots_offered(self.memory.last_slots)
+            elif name == "suggest_specialty":
+                # Remember the triage recommendation so list_availability_slots
+                # / create_appointment can default to it, and the operator
+                # console can show what the caller was routed to.
+                self.memory.recommended_specialty = result.value.get("specialty")
+                self.memory.recommended_duration_minutes = result.value.get("duration_minutes")
             elif name == "get_upcoming_appointments":
                 self.memory.last_upcoming_appointments = result.value["appointments"]
             elif name in ("find_patient_by_phone", "find_patient_by_name_dob"):
@@ -866,6 +977,13 @@ class Dispatcher:
         if self.state is State.GREETING:
             self._transition("go_identify")
             return
+        # Disambiguation pending: the caller is choosing between candidates
+        # we read back last turn. Resolve their pick before any other intent
+        # parsing so "the first one" / "number two" lands on a patient
+        # rather than being mistaken for a booking intent.
+        if self.state is State.IDENTIFY_PATIENT and self.memory.pending_identity_candidates:
+            self._resolve_pending_identity(user_text)
+            return
         # Track reschedule intent from ANY state — caller can say "move my
         # appointment" mid-call. The flag triggers the cancel→rebook
         # auto-transition once `cancel_appointment` returns Ok.
@@ -894,6 +1012,24 @@ class Dispatcher:
         ):
             self._transition("abort")
 
+    def _resolve_pending_identity(self, user_text: str) -> None:
+        """Resolve a pending name+DOB disambiguation from the caller's pick.
+
+        Maps "the first one" / "number two" / "two" to a stored candidate,
+        sets it as the identified patient, clears the pending list, and
+        advances to CHOOSE_INTENT. If the pick can't be parsed, leaves the
+        candidates in place so the LLM asks again.
+        """
+        candidates = self.memory.pending_identity_candidates
+        idx = _pick_candidate_index(user_text, len(candidates))
+        if idx is None:
+            return
+        chosen = candidates[idx]
+        self.memory.identified_patient = chosen
+        self.memory.pending_identity_candidates = []
+        self._publish_patient_identified(chosen)
+        self._transition("patient_found")
+
     def _maybe_transition_from_tool(self, tool_name: str, result: Result[dict[str, Any]]) -> None:
         if self.state is State.IDENTIFY_PATIENT and tool_name in (
             "find_patient_by_phone",
@@ -901,7 +1037,17 @@ class Dispatcher:
         ):
             if is_ok(result):
                 patients = result.value.get("patients", [])
-                if len(patients) == 1:
+                outcome = classify_find_result(
+                    patients, fuzzy=(tool_name == "find_patient_by_name_dob")
+                )
+                if outcome == "found_fuzzy_multiple":
+                    # More than one candidate — do NOT auto-advance under a
+                    # guessed identity. Hold the candidates and stay in
+                    # IDENTIFY_PATIENT; the LLM reads them back (see the
+                    # disambiguation note injected in _record_tool_result)
+                    # and the caller's pick resolves it next turn.
+                    self.memory.pending_identity_candidates = patients
+                elif len(patients) == 1:
                     self._transition("patient_found")
                 elif tool_name == "find_patient_by_name_dob" and not patients:
                     self._transition("no_match")
@@ -1220,6 +1366,12 @@ def _redact_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     if tool_name == "reschedule_appointment":
         # Both ids are EHR UUIDs (no PII). Pass through.
         return {k: args[k] for k in ("appointment_id", "slot_id") if k in args}
+    if tool_name == "suggest_specialty":
+        # `symptoms` is free-form caller speech and is PHI by definition
+        # ("I've had chest pain for two days"). The durable operator-console
+        # audit log must not persist it; the clinician-only transcript keeps
+        # the unredacted version for follow-up.
+        return {"symptoms": "[SYMPTOMS]" if args.get("symptoms") else "(none)"}
     # Remaining tools (list_availability_slots, get_upcoming_appointments,
     # etc.) take only safe scalar args (date, provider_id) — pass through.
     return dict(args)

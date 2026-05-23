@@ -71,3 +71,29 @@ def test_persona_forbids_hallucinated_success_and_injection() -> None:
 def test_register_patient_has_literal_name_defense() -> None:
     msg = TASK_MESSAGES["REGISTER_PATIENT"].lower()
     assert "literal name" in msg or "not an instruction" in msg
+
+
+def test_greeting_opens_with_branded_name_first_line() -> None:
+    """The opening line must brand the clinic and ask the caller's name + intent
+    in a single sentence, so the dispatcher can launch identity lookup as
+    soon as the caller answers (Subproblem B, 2026-05-23)."""
+    msg = TASK_MESSAGES["GREETING"]
+    assert "Prosper Health" in msg
+    assert "what's your name" in msg
+    assert "how can I help you today" in msg
+
+
+def test_identify_patient_handles_name_already_known() -> None:
+    """IDENTIFY_PATIENT must read the name from history when the greeting
+    already collected it, rather than asking for phone first every time."""
+    msg = TASK_MESSAGES["IDENTIFY_PATIENT"].lower()
+    assert "name known" in msg or "read it from history" in msg
+    assert "find_patient_by_name_dob" in msg
+
+
+def test_identify_patient_disambiguates_multiple_matches() -> None:
+    """IDENTIFY_PATIENT must instruct the LLM to ask which patient when more
+    than one matches, instead of guessing (Subproblem C, 2026-05-23)."""
+    msg = TASK_MESSAGES["IDENTIFY_PATIENT"].lower()
+    assert "more than one" in msg
+    assert "which one" in msg

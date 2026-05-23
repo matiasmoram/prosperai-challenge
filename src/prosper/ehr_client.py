@@ -161,8 +161,9 @@ class EHRClient:
         date_: date,
         provider_id: str | None = None,
         specialty: str | None = None,
+        duration_minutes: int = 30,
     ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"date": date_.isoformat()}
+        params: dict[str, Any] = {"date": date_.isoformat(), "duration_minutes": duration_minutes}
         if provider_id is not None:
             params["provider_id"] = provider_id
         if specialty is not None:
@@ -175,6 +176,7 @@ class EHRClient:
         *,
         patient_id: str,
         slot_id: str,
+        duration_minutes: int = 30,
         notes: str | None = None,
     ) -> dict[str, Any]:
         return cast(
@@ -182,7 +184,12 @@ class EHRClient:
             await self._request(
                 "POST",
                 "/appointments",
-                json={"patient_id": patient_id, "slot_id": slot_id, "notes": notes},
+                json={
+                    "patient_id": patient_id,
+                    "slot_id": slot_id,
+                    "duration_minutes": duration_minutes,
+                    "notes": notes,
+                },
             ),
         )
 
@@ -206,12 +213,16 @@ class EHRClient:
         *,
         appointment_id: str,
         new_slot_id: str,
+        new_duration_minutes: int | None = None,
     ) -> dict[str, Any]:
+        body: dict[str, Any] = {"new_slot_id": new_slot_id}
+        if new_duration_minutes is not None:
+            body["new_duration_minutes"] = new_duration_minutes
         return cast(
             "dict[str, Any]",
             await self._request(
                 "PATCH",
                 f"/appointments/{appointment_id}",
-                json={"new_slot_id": new_slot_id},
+                json=body,
             ),
         )
