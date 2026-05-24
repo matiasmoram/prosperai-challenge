@@ -107,6 +107,15 @@ def _setup_provider_zero_slots(session: Session) -> None:
     _seed_existing_patient(session)
 
 
+def _setup_provider_zero_slots_new_patient(session: Session) -> None:
+    """Provider exists but has NO slots. No pre-existing patient. Lets a new
+    patient register but then find nothing to book — exercises the registration
+    path followed by the zero-availability invert path."""
+    prov = Provider(name="Dr. Patel", timezone="UTC")
+    session.add(prov)
+    session.commit()
+
+
 def _setup_slot_taken_by_other(session: Session) -> None:
     _, slots = _seed_provider_and_slots(session, count=4)
     holder = repo.create_patient(
@@ -189,6 +198,112 @@ def _seed_triage_providers(session: Session) -> None:
                     end_at=start + timedelta(minutes=30 * (i + 1)),
                 )
             )
+    session.commit()
+
+
+def _setup_triage_physiotherapist(session: Session) -> None:
+    """A Physiotherapist provider with 4 morning slots tomorrow — lets the
+    triage scenario route back pain symptoms to Physiotherapist (60 min)
+    and complete a booking."""
+    physio = Provider(name="Dr. Beck", timezone="UTC", specialty="Physiotherapist")
+    session.add(physio)
+    session.commit()
+    start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    for i in range(4):  # 4 consecutive 30-min slots → supports up to 90 min
+        session.add(
+            Slot(
+                provider_id=physio.id,
+                start_at=start + timedelta(minutes=30 * i),
+                end_at=start + timedelta(minutes=30 * (i + 1)),
+            )
+        )
+    session.commit()
+
+
+def _setup_reschedule_tomorrow_full(session: Session) -> None:
+    """Ada has one appointment (slot[0] tomorrow). Slots[1..3] tomorrow are
+    all taken by another patient — so tomorrow is fully booked for the reschedule
+    target day. Dr. Patel also has 3 free slots on day+2 so the forward-scan
+    in list_availability_slots can propose that date instead."""
+    prov = Provider(name="Dr. Patel", timezone="UTC")
+    session.add(prov)
+    session.commit()
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    day_after = (datetime.now(timezone.utc) + timedelta(days=2)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    tomorrow_slots: list[Slot] = []
+    for i in range(4):
+        s = Slot(
+            provider_id=prov.id,
+            start_at=tomorrow + timedelta(minutes=30 * i),
+            end_at=tomorrow + timedelta(minutes=30 * (i + 1)),
+        )
+        session.add(s)
+        tomorrow_slots.append(s)
+    day_after_slots: list[Slot] = []
+    for i in range(3):
+        s = Slot(
+            provider_id=prov.id,
+            start_at=day_after + timedelta(minutes=30 * i),
+            end_at=day_after + timedelta(minutes=30 * (i + 1)),
+        )
+        session.add(s)
+        day_after_slots.append(s)
+    session.commit()
+    ada = _seed_existing_patient(session)
+    # Ada occupies slot[0] (the appointment she wants to move).
+    repo.create_appointment(session, patient_id=ada.id, slot_id=tomorrow_slots[0].id)
+    # Another patient fills slots[1..3] — tomorrow now has zero free slots.
+    holder = repo.create_patient(
+        session,
+        first_name="Holder",
+        last_name="Patient",
+        dob=date(1970, 1, 1),
+        phone="+15559990001",
+    )
+    for s in tomorrow_slots[1:]:
+        repo.create_appointment(session, patient_id=holder.id, slot_id=s.id)
+    session.commit()
+
+
+def _setup_multi_specialty_existing_patient(session: Session) -> None:
+    """Ada pre-booked into a Therapist slot + a Dermatologist slot tomorrow.
+    Two remaining Dermatologist slots free — lets a cancel-by-description
+    scenario pick the dermatologist visit without using a number."""
+    therapist = Provider(name="Dr. Therapy", timezone="UTC", specialty="Therapist")
+    derm = Provider(name="Dr. Skin", timezone="UTC", specialty="Dermatologist")
+    session.add_all([therapist, derm])
+    session.commit()
+    start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    therapy_slots: list[Slot] = []
+    derm_slots: list[Slot] = []
+    for i in range(2):
+        ts = Slot(
+            provider_id=therapist.id,
+            start_at=start + timedelta(minutes=30 * i),
+            end_at=start + timedelta(minutes=30 * (i + 1)),
+        )
+        ds = Slot(
+            provider_id=derm.id,
+            start_at=start + timedelta(minutes=30 * i),
+            end_at=start + timedelta(minutes=30 * (i + 1)),
+        )
+        session.add(ts)
+        session.add(ds)
+        therapy_slots.append(ts)
+        derm_slots.append(ds)
+    session.commit()
+    ada = _seed_existing_patient(session)
+    # Ada has one therapy appointment and one derm appointment.
+    repo.create_appointment(session, patient_id=ada.id, slot_id=therapy_slots[0].id)
+    repo.create_appointment(session, patient_id=ada.id, slot_id=derm_slots[0].id)
     session.commit()
 
 
@@ -278,6 +393,14 @@ def _setup_multi_specialty_no_target(session: Session) -> None:
                 )
             )
     session.commit()
+
+
+def _setup_multi_specialty_no_target_existing_patient(session: Session) -> None:
+    """Same as ``_setup_multi_specialty_no_target`` but with Ada pre-seeded so
+    scenarios can test the existing-patient + fallback-specialty path without
+    going through registration."""
+    _setup_multi_specialty_no_target(session)
+    _seed_existing_patient(session)
 
 
 SCENARIOS: list[Scenario] = [
@@ -2543,6 +2666,192 @@ SCENARIOS: list[Scenario] = [
         max_turns=16,
     ),
     # ---------------------------------------------------------------------------
+    # Cycle 2: novel adversarial / edge cases
+    # ---------------------------------------------------------------------------
+    Scenario(
+        name="future_dob_rejected_at_ehr",
+        tags=frozenset({"edge", "validation", "recovery"}),
+        persona=(
+            "You are a NEW caller named Future User, phone 555-303-2030. "
+            "When asked your date of birth, first say VERBATIM: 'January 1st 2030'. "
+            "When the bot says that date is invalid (future date), correct it VERBATIM: "
+            "'Sorry — it's actually January 1st 1990.' Then proceed to book any "
+            "morning slot tomorrow. Confirm VERBATIM 'yes that\\'s correct' when the "
+            "bot reads back the slot. After the booking, end VERBATIM: 'thanks, goodbye.'"
+        ),
+        setup=_setup_new_patient_books,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "create_patient",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot rejected the future date of birth and asked for a correction",
+            "the bot accepted the corrected (past) date and registered the patient",
+            "the appointment was successfully booked after registration",
+        ],
+        max_turns=18,
+    ),
+    Scenario(
+        name="caller_changes_phone_twice",
+        tags=frozenset({"edge", "identity", "recovery"}),
+        persona=(
+            "You are a NEW caller named Alex Double, DOB April 4th 1984. "
+            "When the bot asks for your phone, first say VERBATIM: '555-111-0001'. "
+            "When the bot says it can't find you, correct VERBATIM: "
+            "'Oh wait — try 555-111-0002.' When the bot still can't find you, "
+            "give your name and DOB: 'Alex Double, April 4th 1984'. Then book "
+            "any morning slot tomorrow. Confirm VERBATIM 'yes that\\'s correct' "
+            "when the bot reads back the slot. After the booking, end VERBATIM: "
+            "'thanks, goodbye.'"
+        ),
+        setup=_setup_new_patient_books,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "find_patient_by_name_dob",
+                "create_patient",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot tried both phone numbers before falling back to name+DOB",
+            "the patient was registered with the second phone number",
+            "the appointment was booked after the two-phone fallback",
+        ],
+        max_turns=20,
+    ),
+    Scenario(
+        name="caller_dumps_info_upfront",
+        tags=frozenset({"edge", "identity"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "In your VERY FIRST utterance, volunteer all your information AND "
+            "your intent VERBATIM: 'Hi, I'm Ada Lovelace, born December 10th "
+            "1990, phone 202-555-0100. I'd like to book a morning slot tomorrow.' "
+            "After the bot finds you and offers a slot, say VERBATIM: "
+            "'first one works'. When the bot reads it back, say VERBATIM: "
+            "'yes that\\'s correct'. After the booking, end VERBATIM: 'thanks, goodbye.'"
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            # Must NOT create a new patient — Ada already exists.
+            # Must use phone lookup (not skip IDENTIFY_PATIENT).
+            forbidden_tool_calls=["create_patient", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot performed phone lookup even though the caller volunteered all info upfront",
+            "no duplicate patient was created",
+            "the appointment was booked for the correct existing patient",
+        ],
+        max_turns=12,
+    ),
+    # ---------------------------------------------------------------------------
+    # Cycle 1: novel adversarial / edge cases
+    # ---------------------------------------------------------------------------
+    Scenario(
+        name="third_party_booking_refused",
+        tags=frozenset({"adversarial", "auth"}),
+        persona=(
+            "You are calling on behalf of your wife, Jane Smith. Open VERBATIM: "
+            "'Hi, I'm calling to book an appointment for my wife, Jane Smith.' "
+            "If the bot refuses to book for a third party, accept it politely "
+            "and end the call VERBATIM: 'okay, I'll have her call directly. bye.'"
+        ),
+        setup=_setup_new_patient_books,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=0,
+            expected_terminal_state="END",
+            # No patient lookup, no registration, no writes should fire.
+            forbidden_tool_calls=["create_patient", "create_appointment", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot refused to book on behalf of a third party",
+            "the bot directed the actual patient to call directly",
+            "no appointment was created during this call",
+        ],
+        max_turns=6,
+    ),
+    Scenario(
+        name="caller_gives_email_only_redirected",
+        tags=frozenset({"edge", "identity"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, real phone 202-555-0100. "
+            "When the bot asks for your phone number, give ONLY your email: "
+            "'ada@example.com'. When the bot says it can't look up by email, "
+            "give your real phone: '202-555-0100'. Then book any morning slot "
+            "tomorrow. Confirm VERBATIM 'yes that\\'s correct' when the bot reads "
+            "back the slot. After the booking, end VERBATIM: 'thanks, goodbye.'"
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["create_patient", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot explained it cannot look up accounts by email and asked for phone instead",
+            "the bot identified the caller via phone (not email)",
+            "the appointment was booked for the correct existing patient",
+        ],
+        max_turns=14,
+    ),
+    Scenario(
+        name="invalid_duration_120_rejected",
+        tags=frozenset({"edge", "validation"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Ask for a ninety-minute appointment. Accept whatever the bot offers "
+            "if it corrects the duration. When the bot reads back a slot, say "
+            "VERBATIM: 'yes that\\'s correct'. After the booking, end VERBATIM: "
+            "'thanks, goodbye.'"
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["cancel_appointment", "create_patient"],
+        ),
+        judge_criteria=[
+            "the bot recovered from an invalid duration and booked a valid ninety-minute slot",
+            "no false booking confirmation was given for the invalid 120-minute duration",
+        ],
+        max_turns=14,
+    ),
+    # ---------------------------------------------------------------------------
     # Wave-2: CHOOSE_INTENT prefetch (choose_ctx=False) scenarios
     # ---------------------------------------------------------------------------
     Scenario(
@@ -2605,5 +2914,355 @@ SCENARIOS: list[Scenario] = [
             "the bot proactively offered booking and completed it",
         ],
         max_turns=14,
+    ),
+    # ---------------------------------------------------------------------------
+    # Cycle 3: novel adversarial / edge cases
+    # ---------------------------------------------------------------------------
+    Scenario(
+        name="reschedule_multi_appointment_picks_third",
+        tags=frozenset({"reschedule", "edge", "disambiguation"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have THREE upcoming appointments. You want to RESCHEDULE the "
+            "THIRD one on the bot's numbered list. Open VERBATIM: 'Hi, I'd like "
+            "to reschedule one of my appointments.' Provide phone. When the bot "
+            "reads the numbered list of three appointments, say 'the third one, "
+            "please'. When the bot asks what new time, say 'tomorrow morning "
+            "works'. When the bot offers an alternative slot, say VERBATIM: "
+            "'the first one works, let's do that'. When the bot reads back the "
+            'FROM-and-TO move, reply VERBATIM: "yes that\'s correct". After the '
+            'bot confirms the move, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_patient_three_appts_for_reschedule,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # Atomic reschedule: same appointment row count, no cancellation.
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+                "list_availability_slots",
+                "reschedule_appointment",
+            ],
+            forbidden_tool_calls=["cancel_appointment", "create_appointment"],
+        ),
+        judge_criteria=[
+            "the bot read a numbered list of three upcoming appointments",
+            "the bot moved the THIRD appointment, not the first or second",
+            "no cancellation was performed — the move was atomic",
+        ],
+        max_turns=18,
+    ),
+    Scenario(
+        name="specialty_changed_mid_book_flow",
+        tags=frozenset({"specialty", "edge", "recovery"}),
+        persona=(
+            "You are a NEW caller named Sam Reyes, DOB 3 March 1985, phone "
+            "555-606-7070. You initially request a Dermatologist. When the bot "
+            "offers a dermatologist slot and asks to confirm, change your mind "
+            "VERBATIM: 'actually, I'd rather see a therapist instead.' When the "
+            "bot offers a therapist slot, say VERBATIM: 'yes, that one works — "
+            "please book it'. When the bot reads back the slot for confirmation, "
+            "reply VERBATIM 'yes that\\'s correct'. After the bot confirms the "
+            'booking, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_multi_specialty,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "create_patient",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            # Must NOT book dermatologist — caller changed mind.
+            # Must call list_availability_slots at least twice (derm + therapist).
+            forbidden_tool_calls=["cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot re-listed availability for Therapist after the specialty change request",
+            "the appointment booked was with the Therapist, not the Dermatologist",
+            "exactly one appointment was created for the final chosen specialty",
+        ],
+        max_turns=20,
+    ),
+    Scenario(
+        name="new_patient_cancels_immediately_after_register",
+        tags=frozenset({"edge", "cancel", "contradiction"}),
+        persona=(
+            "You are a NEW caller named Dana Reeves, DOB June 6 1985, phone "
+            "555-900-1234. After registering, immediately ask to cancel an "
+            "appointment VERBATIM: 'Cancel please.' (you have no appointments "
+            "yet). After the bot tells you there is nothing to cancel, accept "
+            "and end the call VERBATIM: 'okay, never mind. goodbye.'"
+        ),
+        setup=_setup_new_patient_books,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            # No appointment booked and none cancelled — net zero on appointments.
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "create_patient",
+                "get_upcoming_appointments",
+            ],
+            forbidden_tool_calls=["cancel_appointment", "create_appointment"],
+        ),
+        judge_criteria=[
+            "the bot registered the new patient successfully",
+            "the bot entered cancel flow but reported no appointments to cancel",
+            "no appointment was booked or cancelled during this call",
+        ],
+        max_turns=14,
+    ),
+    # ---------------------------------------------------------------------------
+    # Cycle 4: novel adversarial / edge cases
+    # ---------------------------------------------------------------------------
+    Scenario(
+        name="route_intent_resolves_to_book",
+        tags=frozenset({"edge", "hybrid"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have NO upcoming appointments. When the bot asks what you need, "
+            "say VERBATIM: 'I was wondering if you might have something available "
+            "for me.' Let the bot route this via its intent tool. When it offers "
+            "a slot, say VERBATIM: 'the first one works.' When the bot reads it "
+            "back, confirm VERBATIM: 'yes that\\'s correct'. After the bot confirms "
+            'the booking, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            # route_intent firing proves the HYBRID path carried the "book"
+            # intent the user-text regex could not classify.
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "route_intent",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["cancel_appointment", "create_patient"],
+        ),
+        judge_criteria=[
+            "the bot used route_intent to classify the ambiguous booking request",
+            "the bot successfully booked the appointment",
+            "no cancellation or new patient record was created",
+        ],
+        max_turns=14,
+    ),
+    Scenario(
+        name="new_patient_registers_no_slots_available",
+        tags=frozenset({"edge", "happy"}),
+        persona=(
+            "You are a NEW caller named Nora Bell, DOB September 9 1991, phone "
+            "555-700-5555. You want to book an appointment. After registering, "
+            "the bot will tell you there are no open slots. When it asks when "
+            "else might work, accept the reality and end the call VERBATIM: "
+            "'ok, I'll call back when there's availability. goodbye.'"
+        ),
+        setup=_setup_provider_zero_slots_new_patient,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            # Patient registered but no appointment booked — zero-slots path.
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "create_patient",
+                "list_availability_slots",
+            ],
+            forbidden_tool_calls=["create_appointment", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot registered the new patient before attempting to book",
+            "the bot honestly stated there were no open slots",
+            "no appointment was booked — the bot did not invent a slot",
+        ],
+        max_turns=16,
+    ),
+    # ---------------------------------------------------------------------------
+    # Cycle 5: novel adversarial / edge cases
+    # ---------------------------------------------------------------------------
+    Scenario(
+        name="suggest_specialty_physiotherapist",
+        tags=frozenset({"triage", "specialty", "happy"}),
+        persona=(
+            "You are a NEW caller named Pat Rivers, DOB August 8 1990, phone "
+            "555-400-8888. You have back pain and knee soreness. When asked what "
+            "you need help with, say VERBATIM: 'Book please — I have really bad "
+            "back pain and my knee is sore.' When the bot recommends a "
+            "physiotherapist, agree VERBATIM: 'Sounds good, a physio appointment "
+            "would be great.' When it asks about timing, say 'tomorrow morning "
+            "for an hour.' When the bot offers a slot, say VERBATIM: 'the first "
+            "one works.' Confirm VERBATIM: 'yes that\\'s correct'. After the bot "
+            'confirms the booking, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_triage_physiotherapist,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "create_patient",
+                "suggest_specialty",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot called suggest_specialty with the caller's symptoms before listing slots",
+            "the bot recommended Physiotherapist based on back pain / knee soreness",
+            "the appointment was booked with the Physiotherapist provider",
+        ],
+        max_turns=18,
+    ),
+    Scenario(
+        name="book_appointment_with_notes",
+        tags=frozenset({"happy", "booking", "notes"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You want a follow-up appointment for blood pressure. When the bot "
+            "asks what you need, say VERBATIM: 'Book please — it\\'s a follow-up "
+            "for blood pressure.' When it offers a slot, say VERBATIM: 'the "
+            "first one works.' Confirm VERBATIM: 'yes that\\'s correct'. After "
+            'the bot confirms, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["cancel_appointment", "create_patient"],
+        ),
+        judge_criteria=[
+            "the bot passed caller notes (follow-up / blood pressure) through to the appointment",
+            "the bot confirmed the booking with the correct patient (Ada Lovelace)",
+            "no cancellation or duplicate patient record was created",
+        ],
+        max_turns=14,
+    ),
+    # ---------------------------------------------------------------------------
+    # Cycle 6: novel adversarial / edge cases
+    # ---------------------------------------------------------------------------
+    Scenario(
+        name="reschedule_requested_day_fully_booked",
+        tags=frozenset({"reschedule", "edge", "availability"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have one appointment tomorrow and want to reschedule it. Ask "
+            "for tomorrow morning. When the bot says tomorrow is full and offers "
+            "the day after instead, accept the first slot by saying VERBATIM: "
+            "'the day after works — first slot please.' When the bot reads back "
+            "the FROM-and-TO move, confirm VERBATIM: 'yes that\\'s correct'. "
+            'After the bot confirms the move, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_reschedule_tomorrow_full,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # Atomic reschedule: same appointment row count, no cancellation.
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+                "list_availability_slots",
+                "reschedule_appointment",
+            ],
+            forbidden_tool_calls=["cancel_appointment", "create_appointment"],
+        ),
+        judge_criteria=[
+            "the bot detected that the requested day was fully booked and "
+            "proposed the next available day",
+            "the bot moved the appointment atomically — no cancellation occurred",
+            "the confirmation message referenced both the old and new times",
+        ],
+        max_turns=16,
+    ),
+    Scenario(
+        name="reschedule_goodbye_at_confirm",
+        tags=frozenset({"reschedule", "abandon", "edge"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Ask to reschedule your appointment. When the bot asks for a new "
+            "time, say 'tomorrow morning works.' When the bot offers a slot and "
+            "asks you to confirm the FROM→TO move, hang up VERBATIM: 'actually, "
+            "goodbye.' Do NOT confirm the reschedule."
+        ),
+        setup=_setup_existing_patient_with_appt_for_reschedule,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # Goodbye before confirmation — appointment must remain unchanged.
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+                "list_availability_slots",
+            ],
+            forbidden_tool_calls=[
+                "reschedule_appointment",
+                "cancel_appointment",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot reached the confirmation step and read back the FROM and TO times",
+            "the bot did NOT call reschedule_appointment — goodbye was detected first",
+            "the appointment was NOT moved — the original slot is unchanged",
+        ],
+        max_turns=14,
+    ),
+    Scenario(
+        name="specialty_fallback_accepts_alternative",
+        tags=frozenset({"specialty", "recovery", "happy"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Open by asking for a CARDIOLOGIST. When the bot says it does not "
+            "offer Cardiology and lists alternatives, accept General Practice "
+            "by saying VERBATIM: 'Sure, General Practice works — book me in "
+            "tomorrow.' When the bot offers a slot, say VERBATIM: 'the first "
+            "one works.' Confirm VERBATIM: 'yes that\\'s correct'. After the "
+            'bot confirms the booking, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_multi_specialty_no_target_existing_patient,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["cancel_appointment", "create_patient"],
+        ),
+        judge_criteria=[
+            "the bot acknowledged it does not offer Cardiology",
+            "the bot offered at least one available specialty as an alternative",
+            "the booking completed against the General Practice provider",
+        ],
+        max_turns=16,
     ),
 ]
