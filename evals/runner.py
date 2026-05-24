@@ -46,6 +46,61 @@ from prosper.ehr.models import Appointment, AppointmentStatus, Patient
 from prosper.ehr_client import EHRClient
 from prosper.flows import State
 from prosper.llm import OpenAILLMAdapter
+from prosper.observability.redact import redact_pii
+
+
+def render_trace(result: ScenarioResult) -> str:
+    """Render a ScenarioResult's transcript as a readable, PII-redacted table.
+
+    Used by ``python -m evals --trace`` (FUTURE.md 6.1). Derives everything
+    from the already-populated ``Dispatcher.transcript`` — no extra data
+    collection. User- and bot-spoken text is piped through ``redact_pii`` so
+    no raw phone/DOB/email reaches the terminal. The turn counter increments
+    on each caller utterance; the state column tracks the most recent state
+    seen on an assistant event or transition.
+    """
+    header = (
+        f"\nTRACE  {result.name}  "
+        f"(state={'P' if result.state_pass else 'F'} "
+        f"judge={'P' if result.judge_pass else 'F'}, turns={result.turns})"
+    )
+    rows: list[str] = [header, f"  {'turn':>4}  {'state':<18}  event"]
+    turn = 0
+    state = "(init)"
+
+    def _clip(text: str, width: int = 64) -> str:
+        text = redact_pii(text or "").replace("\n", " ").strip()
+        return text if len(text) <= width else text[: width - 1] + "…"
+
+    for ev in result.transcript:
+        kind = ev.get("kind")
+        if kind == "user":
+            turn += 1
+            rows.append(f"  {turn:>4}  {state:<18}  USER  {_clip(ev.get('text', ''))}")
+        elif kind == "assistant":
+            state = ev.get("state", state)
+            rows.append(f"  {'':>4}  {state:<18}  BOT   {_clip(ev.get('text', ''))}")
+        elif kind == "tool_ok":
+            rows.append(f"  {'':>4}  {state:<18}  TOOL  ok   {ev.get('name', '?')}")
+        elif kind == "tool_err":
+            rows.append(
+                f"  {'':>4}  {state:<18}  TOOL  ERR  {ev.get('name', '?')} "
+                f"code={ev.get('code', '?')}"
+            )
+        elif kind == "tool_rejected":
+            rows.append(f"  {'':>4}  {state:<18}  TOOL  REJECTED  {ev.get('name', '?')}")
+        elif kind == "transition":
+            state = ev.get("to", state)
+            rows.append(
+                f"  {'':>4}  {state:<18}  ->    {ev.get('from', '?')} -> "
+                f"{ev.get('to', '?')} ({ev.get('label', '?')})"
+            )
+        elif kind:
+            # Surface other transcript markers (empty_slot_result,
+            # llm_loop_exhausted, tool_repeated_blocked, …) so a debugging
+            # operator sees the dispatcher's own breadcrumbs too.
+            rows.append(f"  {'':>4}  {state:<18}  NOTE  {kind}")
+    return "\n".join(rows)
 
 
 @contextmanager

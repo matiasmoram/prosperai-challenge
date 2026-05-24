@@ -27,7 +27,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from evals.runner import run_scenario
+from evals.runner import render_trace, run_scenario
 from evals.scenarios import SCENARIOS
 from evals.types import Scenario, ScenarioResult
 
@@ -186,6 +186,15 @@ def main() -> int:
             "and print the path to stderr before re-raising. Off by default."
         ),
     )
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        help=(
+            "After running, print a readable PII-redacted per-turn trace table "
+            "for each scenario (state, user/bot text, tool calls, transitions) "
+            "derived from Dispatcher.transcript. Pairs well with --only NAME."
+        ),
+    )
     parser.add_argument("-v", action="store_true")
     args = parser.parse_args()
 
@@ -212,6 +221,10 @@ def main() -> int:
     )
     print(_summary(results))
     _print_aggregate_latency(results)
+
+    if args.trace:
+        for r in results:
+            print(render_trace(r))
 
     if args.json:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)

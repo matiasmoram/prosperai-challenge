@@ -1,4 +1,4 @@
-.PHONY: install seed ehr bot dev test eval mock-eval eval-baseline lint type bench verify status pre-commit clean
+.PHONY: install seed ehr bot dev test eval mock-eval trace eval-baseline lint type bench verify status pre-commit clean
 
 install:
 	uv sync
@@ -26,6 +26,11 @@ eval:
 # ~5 s, great for routine verification.
 mock-eval:
 	uv run python -m evals --mock-llm
+
+# Print a PII-redacted per-turn dispatcher trace for one scenario (FUTURE 6.1).
+# Usage: make trace SCENARIO=new_patient_books
+trace:
+	uv run python -m evals --mock-llm --only $(SCENARIO) --trace
 
 eval-baseline:
 	uv run python -m evals --json evals/results/current.json --baseline evals/results/baseline.json
