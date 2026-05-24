@@ -41,24 +41,64 @@ def _parse_sse_data_frames(body: str) -> list[dict[str, object]]:
 
 @pytest.mark.asyncio
 async def test_sessions_endpoint_lists_audit_files(tmp_path: Path) -> None:
-    """`GET /console/sessions` must return every session id on disk."""
-    audit = AuditJSONLWriter(root=tmp_path)
+    """`GET /console/sessions` must return sessions as [{id, mtime_ts}] newest-first.
+
+    Correctness check: the session written LAST must appear at index 0 so the
+    client can pick ``sessions[0]`` and always get the most-recently modified one.
+    """
+    import time
+
+    # Write "alpha" first, then sleep briefly so "beta" has a strictly newer mtime.
+    audit_alpha = AuditJSONLWriter(root=tmp_path)
     bus = ConsoleBus()
-    for sid in ("alpha", "beta"):
-        await audit.write(
-            make_event(
-                "latency_tick",
-                session_id=sid,
-                payload={"phase": "llm", "duration_ms": 1.0},
-                ts=0.0,
-            )
+    await audit_alpha.write(
+        make_event(
+            "latency_tick",
+            session_id="alpha",
+            payload={"phase": "llm", "duration_ms": 1.0},
+            ts=0.0,
         )
-    await audit.close()
-    app = _make_app(bus, audit)
+    )
+    await audit_alpha.close()
+
+    # Small sleep so OS mtime for beta is strictly greater than alpha's.
+    time.sleep(0.05)
+
+    audit_beta = AuditJSONLWriter(root=tmp_path)
+    await audit_beta.write(
+        make_event(
+            "latency_tick",
+            session_id="beta",
+            payload={"phase": "llm", "duration_ms": 1.0},
+            ts=1.0,
+        )
+    )
+    await audit_beta.close()
+
+    app = _make_app(bus, audit_beta)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://t") as client:
         response = await client.get("/console/sessions")
+
     assert response.status_code == 200
-    assert response.json() == {"sessions": ["alpha", "beta"]}
+    body = response.json()
+    sessions = body["sessions"]
+
+    # Shape: list of {id: str, mtime_ts: float}.
+    assert isinstance(sessions, list)
+    assert len(sessions) == 2
+    for entry in sessions:
+        assert "id" in entry
+        assert "mtime_ts" in entry
+        assert isinstance(entry["id"], str)
+        assert isinstance(entry["mtime_ts"], float)
+
+    # Chronological correctness: "beta" written last must be first (index 0).
+    assert sessions[0]["id"] == "beta", (
+        "newest session (beta) must be at index 0 so the client picks it by default"
+    )
+    assert sessions[1]["id"] == "alpha"
+    # Strictly descending mtime.
+    assert sessions[0]["mtime_ts"] >= sessions[1]["mtime_ts"]
 
 
 @pytest.mark.asyncio

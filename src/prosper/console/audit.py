@@ -235,3 +235,28 @@ class AuditJSONLWriter:
         if not self._root.exists():
             return []
         return sorted(p.stem for p in self._root.glob("*.jsonl"))
+
+    def list_sessions_with_meta(self) -> list[dict[str, object]]:
+        """Return session metadata sorted newest-first by file mtime.
+
+        Each entry is ``{"id": session_id, "mtime_ts": float}`` where
+        ``mtime_ts`` is the file's last-modified time as a UTC epoch
+        float (``Path.stat().st_mtime``). The list is sorted descending
+        so ``[0]`` is always the most-recently modified session.
+
+        All filesystem/mtime knowledge stays in ``audit.py``; ``sse.py``
+        delegates here instead of re-globbing the directory.  The
+        existing ``list_sessions() -> list[str]`` signature is preserved
+        unchanged for backward compatibility.
+        """
+        if not self._root.exists():
+            return []
+        # Collect (mtime, id) pairs for sorting, then build the final dicts.
+        # Using a typed intermediate list avoids the mypy `object`-narrowing
+        # issue that arises from sorting a `list[dict[str, object]]` by a
+        # value whose type the checker cannot prove is float at the sort site.
+        pairs: list[tuple[float, str]] = [
+            (p.stat().st_mtime, p.stem) for p in self._root.glob("*.jsonl")
+        ]
+        pairs.sort(key=lambda t: t[0], reverse=True)
+        return [{"id": sid, "mtime_ts": mtime} for mtime, sid in pairs]

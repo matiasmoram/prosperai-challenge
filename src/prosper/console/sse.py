@@ -77,12 +77,13 @@ def build_router(
 
     @router.get("/sessions")
     async def list_sessions() -> JSONResponse:
-        """Return every session id that has a `.jsonl` on disk.
+        """Return every session that has a `.jsonl` on disk, newest-first.
 
-        Sessions are returned in lexicographic order; the front-end is
-        responsible for sorting by mtime if it wants chronological order.
+        Response shape: ``{"sessions": [{"id": str, "mtime_ts": float}, …]}``
+        sorted descending by ``mtime_ts`` so the client can take ``[0]``
+        for the most-recently modified session without re-sorting.
         """
-        return JSONResponse({"sessions": audit.list_sessions()})
+        return JSONResponse({"sessions": audit.list_sessions_with_meta()})
 
     @router.get("/stream/{session_id}")
     async def stream(session_id: str, request: Request) -> StreamingResponse:

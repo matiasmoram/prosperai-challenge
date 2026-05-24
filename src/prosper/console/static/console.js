@@ -49,6 +49,31 @@ const HUMAN_ACTIVITY = {
 const LATENCY_WINDOW = 10;
 const latencyHistory = new Map(); // phase → number[]
 
+// Connection-state helpers — keep the live-dot colour and label honest.
+// Dot colours: emerald = live, amber = replay/reconnecting, red = error.
+function setConnState(state) {
+  const dot = document.getElementById("live-dot");
+  const label = document.getElementById("conn-label");
+  const dotClasses = {
+    live:         "live-dot inline-block w-2 h-2 rounded-full bg-emerald-500",
+    replay:       "inline-block w-2 h-2 rounded-full bg-amber-400",
+    reconnecting: "inline-block w-2 h-2 rounded-full bg-amber-400",
+    error:        "inline-block w-2 h-2 rounded-full bg-red-500",
+    done:         "inline-block w-2 h-2 rounded-full bg-slate-400",
+    idle:         "inline-block w-2 h-2 rounded-full bg-slate-300",
+  };
+  const labels = {
+    live:         "live",
+    replay:       "replaying",
+    reconnecting: "reconnecting…",
+    error:        "connection error",
+    done:         "replay complete",
+    idle:         "no sessions yet — start a call",
+  };
+  if (dot) dot.className = dotClasses[state] || dotClasses.idle;
+  if (label) label.textContent = labels[state] || state;
+}
+
 function setText(id, text) {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
@@ -73,7 +98,9 @@ function renderStateChange(ev) {
   const { to_state, from_state, trigger } = ev.payload;
   const badge = document.getElementById("state-badge");
   if (badge) {
-    badge.textContent = (to_state || "?").toLowerCase().replace("_", " ");
+    // replaceAll handles multi-underscore state names added in future (e.g.
+    // CONFIRM_RESCHEDULE_FLOW); the string-literal form only replaces the first.
+    badge.textContent = (to_state || "?").toLowerCase().replaceAll("_", " ");
     badge.className = "state-badge text-xs font-semibold uppercase tracking-wide px-2.5 py-1 rounded-full " + (STATE_PALETTE[to_state] || "bg-slate-100 text-slate-600");
   }
   setText("activity-line", HUMAN_ACTIVITY[to_state] || `In ${to_state}…`);
@@ -266,28 +293,61 @@ function pickSessionFromPath() {
   return null;
 }
 
-async function resolveSessionId() {
-  const fromPath = pickSessionFromPath();
-  if (fromPath) return fromPath;
-  // Fallback: pick the most recent recorded session, if any.
+// Populate the session picker <select> from the /console/sessions API.
+// Returns the id of the newest session, or null if none exist.
+// On fetch failure, shows a retry banner and returns null.
+async function loadSessions() {
+  const picker = document.getElementById("session-picker");
+  const errorBanner = document.getElementById("conn-error-banner");
   try {
     const r = await fetch("/console/sessions");
-    if (!r.ok) return null;
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
+    // API returns [{id, mtime_ts}, …] sorted newest-first.
     const sessions = j.sessions || [];
-    return sessions.length ? sessions[sessions.length - 1] : null;
-  } catch {
+    if (picker) {
+      picker.innerHTML = "";
+      if (sessions.length === 0) {
+        const opt = document.createElement("option");
+        opt.textContent = "no sessions yet";
+        opt.disabled = true;
+        picker.appendChild(opt);
+      } else {
+        for (const s of sessions) {
+          const opt = document.createElement("option");
+          opt.value = s.id;
+          // Show id + human date derived from mtime.
+          const d = new Date(s.mtime_ts * 1000);
+          opt.textContent = `${s.id}  (${d.toLocaleDateString()} ${d.toLocaleTimeString()})`;
+          picker.appendChild(opt);
+        }
+        picker.value = sessions[0].id;
+      }
+    }
+    return sessions.length ? sessions[0].id : null;
+  } catch (err) {
+    // Distinguish genuine "no sessions" from a network/server failure.
+    if (errorBanner) {
+      const errText = document.getElementById("conn-error-text");
+      if (errText) errText.textContent = `Could not load sessions: ${err.message}. Check the console server is running.`;
+      errorBanner.classList.remove("hidden");
+    }
+    setConnState("error");
     return null;
   }
 }
 
+async function resolveSessionId() {
+  const fromPath = pickSessionFromPath();
+  if (fromPath) return fromPath;
+  // Fallback: fetch the session list and pick the newest (index 0).
+  return loadSessions();
+}
+
 function connect(sessionId) {
   setText("session-label", `session ${sessionId}`);
-  // Decide live vs replay: we just try live first; the server transparently
-  // falls back to replay only when no live publisher exists for that id.
-  // Today the server has separate `/stream` and `/replay` endpoints —
-  // we pick `stream` for an active session, `replay` for archived ones.
-  // Heuristic: if no events arrive in 1.5 s, switch to replay.
+  // Decide live vs replay: try live first.  Heuristic: if no events arrive
+  // within 1.5 s, switch to the replay endpoint which reads from JSONL.
   let url = `/console/stream/${encodeURIComponent(sessionId)}`;
   let source = new EventSource(url);
   let receivedAny = false;
@@ -302,8 +362,8 @@ function connect(sessionId) {
   }, 1500);
 
   function attach(src) {
-    src.onopen = () => setText("conn-label", url.includes("replay") ? "replaying" : "live");
-    src.onerror = () => setText("conn-label", "reconnecting…");
+    src.onopen = () => setConnState(url.includes("replay") ? "replay" : "live");
+    src.onerror = () => setConnState("reconnecting");
     src.onmessage = (msg) => {
       receivedAny = true;
       clearTimeout(fallbackTimer);
@@ -321,7 +381,7 @@ function connect(sessionId) {
     // replaying the whole session again and duplicating every row.
     src.addEventListener("replay_complete", () => {
       src.close();
-      setText("conn-label", "replay complete");
+      setConnState("done");
     });
   }
   attach(source);
@@ -329,15 +389,15 @@ function connect(sessionId) {
 
 function dispatch(ev) {
   switch (ev.type) {
-    case "state_change":     return renderStateChange(ev);
+    case "state_change":       return renderStateChange(ev);
     case "patient_identified": return renderPatient(ev);
-    case "slots_offered":    return renderSlots(ev);
-    case "tool_call_start":  return renderToolStart(ev);
-    case "tool_call_end":    return renderToolEnd(ev);
-    case "transcript_turn":  return renderTranscript(ev);
-    case "outcome":          return renderOutcome(ev);
-    case "latency_tick":     return renderLatency(ev);
-    case "turn_interrupted": return renderInterrupted(ev);
+    case "slots_offered":      return renderSlots(ev);
+    case "tool_call_start":    return renderToolStart(ev);
+    case "tool_call_end":      return renderToolEnd(ev);
+    case "transcript_turn":    return renderTranscript(ev);
+    case "outcome":            return renderOutcome(ev);
+    case "latency_tick":       return renderLatency(ev);
+    case "turn_interrupted":   return renderInterrupted(ev);
   }
 }
 
@@ -355,10 +415,32 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  // Session picker — navigate when operator selects a different session.
+  const picker = document.getElementById("session-picker");
+  if (picker) {
+    picker.addEventListener("change", () => {
+      const sid = picker.value;
+      if (sid) window.location.href = `/console/${encodeURIComponent(sid)}`;
+    });
+  }
+
+  // Dismiss button for the connection-error banner.
+  const dismissBtn = document.getElementById("conn-error-dismiss");
+  const errorBanner = document.getElementById("conn-error-banner");
+  if (dismissBtn && errorBanner) {
+    dismissBtn.addEventListener("click", () => errorBanner.classList.add("hidden"));
+  }
+
   const sid = await resolveSessionId();
   if (!sid) {
-    setText("conn-label", "no sessions yet — start a call");
+    // loadSessions already set the error banner if it was a fetch failure.
+    // If the banner is still hidden it's a genuine empty state.
+    if (errorBanner && errorBanner.classList.contains("hidden")) {
+      setConnState("idle");
+    }
     return;
   }
+  // If a picker exists, keep it in sync with the currently-displayed session.
+  if (picker) picker.value = sid;
   connect(sid);
 });
