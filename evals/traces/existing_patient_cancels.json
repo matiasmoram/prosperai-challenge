@@ -1,0 +1,10 @@
+[
+  "T GREETING->IDENTIFY_PATIENT go_identify",
+  "OK find_patient_by_phone",
+  "T IDENTIFY_PATIENT->CHOOSE_INTENT patient_found",
+  "T CHOOSE_INTENT->CANCEL_FLOW wants_cancel",
+  "OK get_upcoming_appointments",
+  "T CANCEL_FLOW->CONFIRM_CANCEL appointment_chosen",
+  "OK cancel_appointment",
+  "T CONFIRM_CANCEL->END cancelled"
+]

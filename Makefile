@@ -1,4 +1,4 @@
-.PHONY: install seed ehr bot dev test eval mock-eval trace eval-baseline lint type bench verify status pre-commit clean
+.PHONY: install seed ehr bot dev test eval mock-eval trace replay replay-record eval-baseline lint type bench verify status pre-commit clean
 
 install:
 	uv sync
@@ -31,6 +31,13 @@ mock-eval:
 # Usage: make trace SCENARIO=new_patient_books
 trace:
 	uv run python -m evals --mock-llm --only $(SCENARIO) --trace
+
+# Golden-trace replay: order-sensitive FSM transition/tool regression guard
+# (FUTURE 2.3). Zero tokens. `make replay-record` to regenerate goldens.
+replay:
+	uv run python -m evals.trace_replay
+replay-record:
+	uv run python -m evals.trace_replay --record
 
 eval-baseline:
 	uv run python -m evals --json evals/results/current.json --baseline evals/results/baseline.json

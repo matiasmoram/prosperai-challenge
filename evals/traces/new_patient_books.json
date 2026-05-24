@@ -1,0 +1,13 @@
+[
+  "T GREETING->IDENTIFY_PATIENT go_identify",
+  "OK find_patient_by_phone",
+  "OK find_patient_by_name_dob",
+  "T IDENTIFY_PATIENT->REGISTER_PATIENT no_match",
+  "OK create_patient",
+  "T REGISTER_PATIENT->CHOOSE_INTENT registered",
+  "T CHOOSE_INTENT->BOOK_FLOW wants_book",
+  "OK list_availability_slots",
+  "T BOOK_FLOW->CONFIRM_BOOK slot_chosen",
+  "OK create_appointment",
+  "T CONFIRM_BOOK->END booked"
+]

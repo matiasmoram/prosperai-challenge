@@ -1,0 +1,11 @@
+[
+  "T GREETING->IDENTIFY_PATIENT go_identify",
+  "OK find_patient_by_phone",
+  "T IDENTIFY_PATIENT->CHOOSE_INTENT patient_found",
+  "T CHOOSE_INTENT->RESCHEDULE_FLOW wants_reschedule",
+  "OK get_upcoming_appointments",
+  "OK list_availability_slots",
+  "T RESCHEDULE_FLOW->CONFIRM_RESCHEDULE slot_chosen",
+  "OK reschedule_appointment",
+  "T CONFIRM_RESCHEDULE->END rescheduled"
+]
