@@ -238,3 +238,17 @@ class EHRClient:
                 json=body,
             ),
         )
+
+    async def list_appointments_in_range(
+        self,
+        *,
+        from_date: date,
+        to_date: date,
+    ) -> list[dict[str, Any]]:
+        """Clinic-wide calendar read: scheduled appointments in [from_date, to_date]."""
+        body = await self._request(
+            "GET",
+            "/appointments",
+            params={"from": from_date.isoformat(), "to": to_date.isoformat()},
+        )
+        return cast("list[dict[str, Any]]", body["entries"])

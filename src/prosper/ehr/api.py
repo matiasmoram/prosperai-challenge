@@ -27,6 +27,8 @@ from prosper.ehr.schemas import (
     AppointmentList,
     AppointmentOut,
     AppointmentReschedule,
+    CalendarEntryOut,
+    CalendarList,
     PatientCreate,
     PatientFuzzyList,
     PatientList,
@@ -318,6 +320,38 @@ def create_app(engine: Engine | None = None) -> FastAPI:
                 detail={"code": "invalid_duration", "duration": e.duration},
             ) from e
         return _appt_to_out(appt)
+
+    @app.get("/appointments", response_model=CalendarList)
+    def list_appointments(
+        from_: date_t = Query(..., alias="from"),
+        to: date_t = Query(...),
+        session: Session = Depends(session_dep),
+    ) -> CalendarList:
+        """Clinic-wide calendar read for the staff front-desk view.
+
+        Returns all scheduled appointments whose anchor slot falls on a
+        calendar date in [from, to] (both inclusive, naive-UTC grid).
+        Joins patient + provider in a single query so the response carries
+        names and specialty without lazy-loads.
+        """
+        rows = repo.list_appointments_in_range(session, from_date=from_, to_date=to)
+        entries: list[CalendarEntryOut] = []
+        for appt, patient, provider in rows:
+            visit_end = appt.slot.start_at + timedelta(minutes=appt.duration_minutes)
+            entries.append(
+                CalendarEntryOut(
+                    appointment_id=appt.id,
+                    patient_name=f"{patient.first_name} {patient.last_name}",
+                    provider_name=provider.name,
+                    specialty=provider.specialty,
+                    start_at=appt.slot.start_at,
+                    end_at=visit_end,
+                    duration_minutes=appt.duration_minutes,
+                    status=appt.status.value,
+                    notes=appt.notes,
+                )
+            )
+        return CalendarList(entries=entries)
 
     @app.get("/health")
     def health() -> dict[str, str]:

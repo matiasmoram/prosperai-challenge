@@ -164,3 +164,21 @@ class AppointmentOut(BaseModel):
 
 class AppointmentList(BaseModel):
     appointments: list[AppointmentOut]
+
+
+class CalendarEntryOut(BaseModel):
+    """One scheduled appointment as seen by the staff calendar view."""
+
+    appointment_id: str
+    patient_name: str
+    provider_name: str
+    specialty: str
+    start_at: datetime
+    end_at: datetime
+    duration_minutes: int
+    status: str
+    notes: str | None = None
+
+
+class CalendarList(BaseModel):
+    entries: list[CalendarEntryOut]

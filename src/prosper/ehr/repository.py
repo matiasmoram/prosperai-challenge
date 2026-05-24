@@ -521,3 +521,35 @@ def get_upcoming_appointments(session: Session, *, patient_id: str) -> list[Appo
         .order_by(Slot.start_at)
     )
     return list(session.execute(stmt).scalars())
+
+
+def list_appointments_in_range(
+    session: Session,
+    *,
+    from_date: date,
+    to_date: date,
+) -> list[tuple[Appointment, Patient, Provider]]:
+    """Clinic-wide calendar: scheduled appointments in [from_date, to_date] inclusive.
+
+    Returns ``(Appointment, Patient, Provider)`` tuples in ascending slot
+    order. A single join fetches patient + provider alongside the appointment
+    so the API layer can render names and specialty without lazy-loads.
+
+    ``from_date`` and ``to_date`` are interpreted as calendar dates in naive
+    UTC (matching the slot.start_at convention): the range is
+    ``[from_date 00:00, to_date+1 00:00)`` so a query for a single day
+    (from_date == to_date) includes every slot that starts on that day.
+    """
+    range_start = datetime.combine(from_date, time.min)
+    range_end = datetime.combine(to_date + timedelta(days=1), time.min)
+    stmt = (
+        select(Appointment, Patient, Provider)
+        .join(Slot, Slot.id == Appointment.slot_id)
+        .join(Patient, Patient.id == Appointment.patient_id)
+        .join(Provider, Provider.id == Slot.provider_id)
+        .where(Appointment.status == AppointmentStatus.SCHEDULED)
+        .where(Slot.start_at >= range_start)
+        .where(Slot.start_at < range_end)
+        .order_by(Slot.start_at)
+    )
+    return [(appt, pat, prov) for appt, pat, prov in session.execute(stmt)]
