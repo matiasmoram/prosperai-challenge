@@ -355,6 +355,10 @@ html, body {
   min-height: 3em;
 }
 
+/* Connecting hint ("Calling Sarah…") deserves more visibility — it's the
+   only feedback about progress while ICE gathering + offer round-trip run. */
+.phone.connecting .hint { color: rgba(255,255,255,0.55); }
+
 /* Live: hint is noise — fade out so avatar+controls dominate. */
 .phone.live .hint { opacity: 0; pointer-events: none; }
 
