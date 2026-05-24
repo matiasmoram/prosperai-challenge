@@ -576,6 +576,34 @@ by-name-dob        4.5   5.3   5.6   6.6
 LLM dominates by an order of magnitude — EHR calls (httpx loopback or
 ASGITransport) stay sub-15 ms; a single LLM turn is 800–2000 ms.
 
+### 15.1 Speculative execution on call start — *the latency answer (deferred, by design)*
+
+The highest-leverage *structural* latency idea is to overlap backend I/O with
+the caller's speech: the moment a call connects (and again the moment a name is
+heard), speculatively warm the paths the call is likely to take instead of doing
+them sequentially on demand. Concretely:
+
+- On `GREETING → IDENTIFY`, fire the identity lookup as soon as a name/phone is
+  heard, and (for an existing patient) pre-fetch their upcoming appointments —
+  so by the time the caller states an intent, "do you have anything to
+  cancel/reschedule?" is already answered.
+- Pre-stage the three intent branches (book / cancel / reschedule) in parallel
+  rather than choosing one and then starting its I/O.
+- For a new caller, prepare the registration payload speculatively (but **never**
+  speculatively `create_patient` — our EHR has no name-dedupe, so a speculative
+  write could duplicate a patient).
+
+**Why it is deferred (not skipped):** on the current in-process SQLite EHR a
+lookup is ~5–15 ms, so racing it saves <200 ms while adding real asyncio
+task-lifecycle + cancellation complexity in the dispatcher core (drain/cancel on
+`no_match` / intent-flip / call end, the MarioW333 pattern). The cost/benefit
+only flips when the EHR moves out-of-process / remote (round-trips in the
+100–300 ms range), where the overlap pays for the complexity. The groundwork is
+already in `speculation.py` (`next_n_business_days`, fuzzy disambiguation
+shipped); the async prefetch itself is held. **Scope (light warm-path vs full
+3-branch race) to be decided by an LLM-council pass before building.** Tracked in
+`FUTURE.md` §3.3.
+
 ## 16. Intentional cuts (deferred on purpose)
 
 | Cut | Why |

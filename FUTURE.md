@@ -107,7 +107,19 @@ Landed (commit `bfb3a70`). `evals/trace_replay.py` + `make replay` /
 
 ---
 
-### 3.3 First-Turn Speculative Race (find + availability prefetch) — *deferred*
+### 3.3 Speculative execution on call start — *the latency answer (deferred, by design)*
+
+> **This is the canonical answer to "what do we do about latency?"** (see
+> `SOLUTION.md` §15.1). On call start, overlap backend I/O with the caller's
+> speech instead of doing it sequentially on demand: warm the identity lookup +
+> the caller's upcoming appointments the moment a name is heard, and pre-stage
+> the three intent branches (book/cancel/reschedule) in parallel. For a new
+> caller, prepare the registration payload speculatively — but **never**
+> speculatively `create_patient` (no name-dedupe → duplicate-patient risk).
+> **Status: NOT building yet.** On local SQLite the gain is <200 ms vs real
+> asyncio cancellation complexity; revisit when the EHR is remote (100–300 ms
+> round-trips). **Scope — light warm-path vs full 3-branch race — to be decided
+> by an LLM-council pass before any implementation.**
 
 **Why this matters to Prosper:** On call start the bot asks the caller's name, then runs identity lookup and (later) availability sequentially. A speculative race — fire `find_patient_by_name_dob` and `list_availability_slots` for the next few business days in parallel the moment the name is heard — overlaps EHR I/O with the caller's speech (the MarioW333 pattern). Full design + sequence diagrams + cancellation discipline in `docs/research/speculative_race.md`.
 
