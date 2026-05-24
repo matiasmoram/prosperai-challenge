@@ -1806,6 +1806,57 @@ def _script_phone_retracted_fallback_to_name_dob() -> list[LLMReply]:
     ]
 
 
+def _script_new_patient_skips_cancel_offer() -> list[LLMReply]:
+    # New patient registers. On CHOOSE_INTENT entry, the prefetch fires a
+    # direct EHR call (not a scripted tool) and returns [] → choose_ctx=False
+    # → the task message tells the bot NOT to offer cancel/reschedule and to
+    # lead with booking. Bot confirms the proactive booking offer, user says
+    # "yes" (containing "book" keyword → wants_book → BOOK_FLOW). Bot lists
+    # slots, books. Asserts: no cancel_appointment ever fires for a new patient.
+    return [
+        _t("Hi, you've reached Prosper Health — how can I help?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="555-400-3001"),
+        _t("I don't see you — what's your full name and date of birth?"),
+        _tool("find_patient_by_name_dob", name="Terry Fox", dob="April 12 1985"),
+        _t("I'll register Terry Fox, born April 12th 1985, phone 555-400-3001 — right?"),
+        _tool(
+            "create_patient",
+            first_name="Terry",
+            last_name="Fox",
+            dob="1985-04-12",
+            phone="5554003001",
+        ),
+        # CHOOSE_INTENT: prefetch returned [] → choose_ctx=False → bot leads with booking.
+        _t("I don't see any upcoming appointments for you — would you like to book one?"),
+        # User says "yes, book please" → "book" matches _STRONG_BOOK → BOOK_FLOW.
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set for tomorrow at ten with Dr. Patel — take care."),
+    ]
+
+
+def _script_existing_no_appts_proactive_book() -> list[LLMReply]:
+    # Ada exists, 0 appointments. Identified by phone → CHOOSE_INTENT.
+    # Prefetch returns [] → choose_ctx=False → bot leads with booking offer,
+    # does NOT offer cancel/reschedule. User says "yes, book" → BOOK_FLOW.
+    # Asserts: find_patient_by_phone + create_appointment fire; no
+    # cancel_appointment (there is nothing to cancel).
+    return [
+        _t("Hi, you've reached Prosper Health — how can I help?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        # found → CHOOSE_INTENT; prefetch returned [] → bot leads with booking.
+        _t("I don't see any upcoming appointments for you, Ada — would you like to book one?"),
+        # User: "yes, book please" → wants_book → BOOK_FLOW.
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set for tomorrow at ten with Dr. Patel — take care."),
+    ]
+
+
 _BOT_SCRIPTS: dict[str, callable] = {
     "new_patient_books": _script_new_patient_books,
     "existing_patient_cancels": _script_existing_patient_cancels,
@@ -1885,6 +1936,9 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "goodbye_at_book_flow": _script_goodbye_at_book_flow,
     "goodbye_at_cancel_flow": _script_goodbye_at_cancel_flow,
     "goodbye_at_reschedule_flow": _script_goodbye_at_reschedule_flow,
+    # Wave-2: CHOOSE_INTENT prefetch → choose_ctx=False leads directly to booking
+    "new_patient_skips_cancel_offer": _script_new_patient_skips_cancel_offer,
+    "existing_no_appts_proactive_book": _script_existing_no_appts_proactive_book,
     # TRACK 1: adversarial contradiction + off-by-one guards
     "claims_not_in_system_but_exists": _script_claims_not_in_system_but_exists,
     "patient_four_appts_cancel_third": _script_patient_four_appts_cancel_third,
@@ -2454,6 +2508,26 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         # Bot says not found; caller gives name+DOB.
         "Ada Lovelace, December 10th 1990.",
         "Book please.",
+        "first one works.",
+        "yes that's correct.",
+    ],
+    # Wave-2: CHOOSE_INTENT prefetch → choose_ctx=False → bot leads with booking
+    "new_patient_skips_cancel_offer": [
+        "Hi, I'd like to make an appointment.",
+        "555-400-3001.",
+        "Terry Fox, April 12th 1985.",
+        "Yes that's right.",
+        # Bot proactively offers booking (no cancel/reschedule offered).
+        # "book" keyword triggers wants_book → BOOK_FLOW transition.
+        "Yes, please book me in.",
+        "first one works.",
+        "yes that's correct.",
+    ],
+    "existing_no_appts_proactive_book": [
+        "Hi, this is Ada.",
+        "202-555-0100.",
+        # Bot leads with booking (no upcoming appts); "book" → BOOK_FLOW.
+        "Yes, please book an appointment.",
         "first one works.",
         "yes that's correct.",
     ],

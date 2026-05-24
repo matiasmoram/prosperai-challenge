@@ -435,7 +435,11 @@ Rules:
 """
 
 
-def build_task_message(state: str) -> str:
+def build_task_message(
+    state: str,
+    *,
+    choose_intent_has_appointments: bool | None = None,
+) -> str:
     """Return the per-state task message with TODAY's date prepended.
 
     Voice agents that resolve phrases like 'next Wednesday' need an anchor;
@@ -443,6 +447,14 @@ def build_task_message(state: str) -> str:
     one-line prefix is cheap (~50 chars), unique per call, and intentionally
     NOT placed inside CLINIC_PERSONA — the persona stays byte-identical
     across turns so OpenAI's prompt cache keeps hitting.
+
+    ``choose_intent_has_appointments`` is only consulted when
+    ``state == "CHOOSE_INTENT"``:
+    - ``None``  (default) — unknown / not prefetched; output is unchanged.
+    - ``True``  — caller has ≥1 upcoming appointment; output is unchanged.
+    - ``False`` — caller has zero upcoming appointments; a [CONTEXT] note is
+      prepended to the task text instructing the bot not to offer
+      cancel/reschedule and to lead with booking.
     """
     tz, tz_label = _resolve_clinic_tz()
     now = datetime.now(tz) if tz is not None else datetime.now()
@@ -451,4 +463,15 @@ def build_task_message(state: str) -> str:
         f"(clinic timezone: {tz_label}). "
         "Use this as the anchor for all relative dates."
     )
-    return f"{anchor}\n\n{TASK_MESSAGES[state]}"
+    task = TASK_MESSAGES[state]
+    if state == "CHOOSE_INTENT" and choose_intent_has_appointments is False:
+        appt_note = (
+            "[CONTEXT] This caller has no upcoming appointments. "
+            "Do NOT offer cancel or reschedule — there is nothing to cancel. "
+            "Lead with booking: e.g. \"I don't see any upcoming appointments "
+            '— would you like to book one?" '
+            "If they explicitly ask to cancel or reschedule anyway, "
+            "gently confirm there's nothing on the schedule and offer to book instead."
+        )
+        return f"{anchor}\n\n{appt_note}\n\n{task}"
+    return f"{anchor}\n\n{task}"

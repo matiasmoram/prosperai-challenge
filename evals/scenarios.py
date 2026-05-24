@@ -2542,4 +2542,68 @@ SCENARIOS: list[Scenario] = [
         ],
         max_turns=16,
     ),
+    # ---------------------------------------------------------------------------
+    # Wave-2: CHOOSE_INTENT prefetch (choose_ctx=False) scenarios
+    # ---------------------------------------------------------------------------
+    Scenario(
+        name="new_patient_skips_cancel_offer",
+        tags=frozenset({"wave2", "intent_routing"}),
+        persona=(
+            "You are a NEW caller named Terry Fox, DOB April 12 1985, phone "
+            "555-400-3001. You want to book an appointment. After registration "
+            "the bot will proactively offer booking (it knows you have no "
+            "upcoming appointments). Say VERBATIM 'Yes, please book me in' when "
+            "the bot offers. After the bot confirms the booking, end the call "
+            'VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_new_patient_books,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "create_patient",
+                "create_appointment",
+            ],
+            # No cancel offer should be made and no cancel tool should fire
+            # for a brand-new patient with no appointments.
+            forbidden_tool_calls=["cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot did NOT offer to cancel or reschedule (new patient has nothing to cancel)",
+            "the bot proactively offered booking after identifying the new patient",
+            "the appointment was successfully booked",
+        ],
+        max_turns=16,
+    ),
+    Scenario(
+        name="existing_no_appts_proactive_book",
+        tags=frozenset({"wave2", "intent_routing"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have no upcoming appointments. The bot will proactively offer "
+            "booking after identifying you. Say VERBATIM 'Yes, please book an "
+            "appointment' when it offers. After the booking, end the call "
+            'VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "create_appointment",
+            ],
+            # Bot must NOT offer or attempt cancel/reschedule when prefetch
+            # confirms zero upcoming appointments.
+            forbidden_tool_calls=["cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot identified the caller via phone without creating a duplicate",
+            "the bot did NOT offer to cancel or reschedule (caller has no appointments)",
+            "the bot proactively offered booking and completed it",
+        ],
+        max_turns=14,
+    ),
 ]

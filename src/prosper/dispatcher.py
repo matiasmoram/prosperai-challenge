@@ -101,6 +101,12 @@ class SessionMemory:
     # Stored for operator-console telemetry alongside recommended_duration.
     # Never enforced as a code gate — negotiation is entirely prompt-driven.
     minimum_safe_minutes: int | None = None
+    # Set to True after a successful one-shot upcoming-appointments prefetch on
+    # CHOOSE_INTENT entry. Stays False if the EHR call errors — that way the
+    # task-message builder never falsely suppresses cancel/reschedule for a
+    # patient who may have appointments but whose EHR fetch was flaky. Once
+    # True, the _llm_turn guard skips all further prefetch attempts this call.
+    upcoming_appointments_prefetched: bool = False
     # When a name+DOB lookup returns more than one candidate (same DOB,
     # similar names — the "John Smith vs Jon Smith" case), we stash the
     # candidates here and stay in IDENTIFY_PATIENT so the LLM can ask the
@@ -551,6 +557,16 @@ class Dispatcher:
         # when results are empty). Allowing one retry is fine — beyond that we
         # short-circuit with a synthetic tool response telling the LLM the call
         # was suppressed, which steers it back to speaking to the user.
+        # One-shot prefetch: know appointment count before CHOOSE_INTENT's
+        # first LLM call so build_task_message can steer new/appointment-free
+        # callers directly to booking. Guarded by the flag — fires at most
+        # once per call and adds a single ~10ms EHR read with no LLM round-trip.
+        if (
+            self.state is State.CHOOSE_INTENT
+            and not self.memory.upcoming_appointments_prefetched
+            and self.memory.identified_patient
+        ):
+            await self._prefetch_upcoming_on_choose_intent()
         tool_call_signatures: dict[str, int] = {}
         for _ in range(4):
             llm_started = time.perf_counter()
@@ -1342,6 +1358,41 @@ class Dispatcher:
         if dst is State.END:
             self._publish_outcome(label)
 
+    async def _prefetch_upcoming_on_choose_intent(self) -> None:
+        """Fetch upcoming appointments once on CHOOSE_INTENT entry.
+
+        A single ~10ms EHR read (no LLM round-trip) that lets the task
+        message steer appointment-free callers directly to booking without
+        wasting a CANCEL_FLOW round-trip. Result lands in the same
+        ``last_upcoming_appointments`` field that CANCEL/RESCHEDULE_FLOW
+        use — CANCEL_FLOW will overwrite it with a fresh fetch if needed.
+
+        The ``upcoming_appointments_prefetched`` flag is set to ``True``
+        ONLY on success. An EHR error leaves the flag ``False``, so
+        ``_messages_for_llm`` sees ``choose_ctx = None`` and falls back to
+        the normal three-way UX — we never falsely suppress cancel/reschedule
+        for a patient whose appointments exist but whose EHR call was flaky.
+        """
+        patient_id = (self.memory.identified_patient or {}).get("id")
+        if not patient_id:
+            return
+        try:
+            appts = await self._ehr.get_upcoming_appointments(str(patient_id))
+        except Exception:
+            # EHR error: flag stays False → choose_ctx stays None → normal UX.
+            return
+        self.memory.last_upcoming_appointments = [
+            {
+                "id": a["id"],
+                "start_at": a["start_at"],
+                "provider_name": a["provider_name"],
+            }
+            for a in appts
+            if isinstance(a, dict)
+        ]
+        # Flag set after successful write — never on exception (see docstring).
+        self.memory.upcoming_appointments_prefetched = True
+
     def _publish_outcome(self, trigger_label: str) -> None:
         """Emit the `outcome` event when the call has just reached END.
 
@@ -1421,9 +1472,22 @@ class Dispatcher:
         if len(hist) > self._HISTORY_WINDOW:
             hist = hist[-self._HISTORY_WINDOW :]
             hist = self._prune_orphan_tool_messages(hist)
+        # Derive the appointment-count hint for CHOOSE_INTENT so the task
+        # message can steer callers with no upcoming appointments directly
+        # to booking. None = unknown (prefetch not done or error) → behaves
+        # identically to today; True/False = prefetch succeeded.
+        choose_ctx: bool | None = None
+        if self.state is State.CHOOSE_INTENT and self.memory.upcoming_appointments_prefetched:
+            choose_ctx = len(self.memory.last_upcoming_appointments) > 0
         return [
             {"role": "system", "content": CLINIC_PERSONA},
-            {"role": "system", "content": build_task_message(self.state.value)},
+            {
+                "role": "system",
+                "content": build_task_message(
+                    self.state.value,
+                    choose_intent_has_appointments=choose_ctx,
+                ),
+            },
             *hist,
         ]
 
