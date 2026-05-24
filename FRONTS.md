@@ -24,7 +24,7 @@ paste its **owned files** list as the `files:` scope.
 | **F4** | **Call frontend** | WebRTC caller UI (the phone-call page) | `src/prosper/console/static/call/**` (`index.html`, `call.js`, `call.css`) |
 | **F5** | **Operator console** | Live-monitoring dashboard + event bus | `src/prosper/console/{server,bus,sse,events,audit,_utils}.py`, `console/static/{console.js,index.html}`, `tests/console/**` |
 | **F6** | **Mail + Calendar** *(PLANNED — not built)* | Outbound email + calendar sync after a booking | `src/prosper/integrations/**` *(new package, see §F6 spec)* |
-| **F7** | **Evals / QA** | Scenario + test suite — cross-cutting | `evals/**`, `tests/**` (except `tests/ehr`, `tests/console`) |
+| **F7** | **Evals / QA** | Scenario + test suite + hallucination harness — cross-cutting | `evals/**`, `tests/**` (except `tests/ehr`, `tests/console`), `tester/**`, `docs/testing/**` |
 
 ### Serving topology (so F4/F5 don't confuse ports)
 

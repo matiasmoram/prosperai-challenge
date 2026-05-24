@@ -100,14 +100,23 @@ instructions — the LLM literally cannot see tools outside the whitelist):
 | GREETING | (none) |
 | IDENTIFY_PATIENT | `find_patient_by_phone`, `find_patient_by_name_dob` |
 | REGISTER_PATIENT | `create_patient` |
-| CHOOSE_INTENT | (none) |
-| BOOK_FLOW | `list_availability_slots` |
+| CHOOSE_INTENT | `route_intent` (internal — dispatcher-intercepted, no EHR call) |
+| BOOK_FLOW | `list_availability_slots`, `suggest_specialty` |
 | CANCEL_FLOW | `get_upcoming_appointments` |
 | RESCHEDULE_FLOW | `get_upcoming_appointments`, `list_availability_slots` |
 | CONFIRM_BOOK | `create_appointment` |
 | CONFIRM_CANCEL | `cancel_appointment` |
 | CONFIRM_RESCHEDULE | `reschedule_appointment` |
 | END | (none) |
+
+`route_intent` is whitelisted in CHOOSE_INTENT but **dispatcher-intercepted**
+(`INTERNAL_TOOLS` in `flows.py`, `Dispatcher._handle_route_intent`) — it is the
+hybrid-navigation tool: the LLM proposes the caller's intent
+(`wants_book` / `wants_cancel` / `wants_reschedule`) and the dispatcher validates
+the edge. It has no `HANDLERS` entry and fires no EHR call. `suggest_specialty`
+(BOOK_FLOW) is a real handler backed by the triage mini-LLM (ADR 005, §6); its
+`medical_emergency` Err drives the hard `BOOK_FLOW → END` edge so the booking
+tools are physically unmounted on a red flag (audit F-011).
 
 If the LLM tries a tool outside the whitelist, the dispatcher records a
 `tool_rejected` transcript entry and feeds a synthetic error
@@ -119,22 +128,32 @@ choice; `docs/architecture.md` for the diagram.
 
 ## 6. Tools
 
-Eight handlers in `src/prosper/tools.py`. All return
-`Result[Ok[dict], Err]` (`src/prosper/result.py`). The `Err.code` strings
-are **public eval contract** — scenarios assert on them, so renaming a
-code is a breaking change and must update `evals/scenarios.py` in the
-same commit.
+Nine EHR-backed handlers in `src/prosper/tools.py` (the `HANDLERS` map), plus
+`route_intent` — whitelisted but dispatcher-intercepted, no handler, no EHR call
+(see §5). All handlers return `Result[Ok[dict], Err]` (`src/prosper/result.py`).
+The `Err.code` strings are **public eval contract** — scenarios assert on them,
+so renaming a code is a breaking change and must update `evals/scenarios.py` in
+the same commit.
 
 | Tool | Whitelisted in | Err codes |
 |---|---|---|
+| `route_intent` *(internal — no handler)* | CHOOSE_INTENT | — (dispatcher validates the FSM edge) |
 | `find_patient_by_phone` | IDENTIFY | `ehr_error` |
 | `find_patient_by_name_dob` | IDENTIFY | `dob_unparseable`, `ehr_error` |
 | `create_patient` | REGISTER | `dob_unparseable`, `patient_exists`, `ehr_error` |
-| `list_availability_slots` | BOOK_FLOW, RESCHEDULE_FLOW | `date_unparseable`, `ehr_error` |
-| `create_appointment` | CONFIRM_BOOK | `missing_slot_id`, `missing_patient_id`, `hallucinated_slot_id`, `patient_id_mismatch`, `slot_taken_other_patient`, `patient_or_slot_not_found`, `ehr_error` |
+| `suggest_specialty` | BOOK_FLOW | `medical_emergency`; passes through `llm.classify_symptoms`: `triage_unavailable`, `unknown_specialty`, `invalid_duration` |
+| `list_availability_slots` | BOOK_FLOW, RESCHEDULE_FLOW | `date_unparseable`, `invalid_duration`, `ehr_error` |
+| `create_appointment` | CONFIRM_BOOK | `missing_slot_id`, `missing_patient_id`, `hallucinated_slot_id`, `patient_id_mismatch`, `slot_taken_other_patient`, `no_consecutive_slots`, `patient_or_slot_not_found`, `ehr_error` |
 | `get_upcoming_appointments` | CANCEL_FLOW, RESCHEDULE_FLOW | `ehr_error` |
 | `cancel_appointment` | CONFIRM_CANCEL | `missing_appointment_id`, `hallucinated_appointment_id`, `appointment_not_found`, `ehr_error` |
 | `reschedule_appointment` | CONFIRM_RESCHEDULE | `missing_appointment_id`, `missing_slot_id`, `hallucinated_appointment_id`, `hallucinated_slot_id`, `slot_taken_other_patient`, `appointment_or_slot_not_found`, `ehr_error` |
+
+`suggest_specialty` maps a free-form symptom string → `{specialty,
+duration_minutes, confidence, follow_up}` via the triage mini-LLM
+(`llm.classify_symptoms`, a single `gpt-4o-mini` JSON-mode call). A red flag
+returns `Err(medical_emergency)`; visit duration ∈ {30, 60, 90} flows into
+`list_availability_slots`/`create_appointment` (multi-slot lock). Full design:
+ADR 005.
 
 Three things to know about the tool layer:
 
@@ -481,15 +500,14 @@ Audit trail: `docs/research/2026-05-20-security-audit.md` +
 
 Active work the main branch does not yet reflect:
 
-- **Mini-LLM specialty router.** Today the LLM picks the `specialty`
-  string for `list_availability_slots` from caller phrasing. A
-  dedicated small-model classifier is in development that maps a
-  complaint utterance ("my stomach hurts", "I think I broke my leg")
-  → specialty enum, with a hand-curated symptom → specialty table as
-  fallback. Goal: deterministic specialty selection and a separate
-  prompt-cache lane for the classifier. Where it lands (new module,
-  new state, new tool, or in-line in BOOK_FLOW) is still being
-  designed.
+- **Mini-LLM specialty router — SHIPPED (ADR 005, 2026-05-23).** No longer
+  in-flight. Landed as the `suggest_specialty` tool (BOOK_FLOW) backed by
+  `llm.classify_symptoms` (a `gpt-4o-mini` JSON-mode call), variable visit
+  duration {30/60/90} via an `AppointmentSlotLock` junction table, and a hard
+  `medical_emergency → END` FSM edge. The hybrid-navigation `route_intent` tool
+  (CHOOSE_INTENT, dispatcher-intercepted) landed alongside it. See §5, §6, ADR
+  005. Scenarios `symptom_routes_to_gp`, `symptom_ambiguous_followup`,
+  `direct_specialty_skips_triage` pin it; mocked offline by `MockTriageClient`.
 - **Interruption design.** `docs/research/interruption_design.md` —
   research notes on how to handle the caller talking over the bot's
   TTS. Not yet wired.
@@ -506,11 +524,11 @@ Active work the main branch does not yet reflect:
   confirm-only-after-successful-write. Finds whole bug *classes* via
   shrinking rather than one hand-written scenario at a time.
 
-The eval suite already has scenarios pinning the current specialty
-behaviour (`specialty_filter_therapist`, `specialty_unknown_falls_back`,
-`specialty_no_filter_any_doctor`). When the router lands, those
-scenarios continue to apply; new scenarios will cover the
-complaint→specialty mapping itself.
+The eval suite pins both the plain specialty-filter behaviour
+(`specialty_filter_therapist`, `specialty_unknown_falls_back`,
+`specialty_no_filter_any_doctor`) and the shipped complaint→specialty router
+(`symptom_routes_to_gp`, `symptom_ambiguous_followup`,
+`direct_specialty_skips_triage`).
 
 ## 15. Latency (README bonus #1)
 
@@ -570,22 +588,22 @@ ASGITransport) stay sub-15 ms; a single LLM turn is 800–2000 ms.
 
 ## 17. Future work (priority order)
 
-1. **Mini-LLM specialty router** (§14) — ship the in-flight design.
-2. **Interruption handling** (§14) — caller talking over TTS.
-3. **Speculative race** (§14) — STT partials → speculative LLM kickoff.
-4. **STT/TTS multi-provider fallback** — blocked on pipecat #4139.
-5. **Streaming TTS** via ElevenLabs flush-after-each-clause.
-6. **OpenRouter as LLM gateway** — one env-var swap, 100+ models.
-7. **Audio smoke tests** with a real TTS → STT loop.
-8. **Continuous production eval** — 5–10 % sampling of live transcripts
+1. **Interruption handling** (§14) — caller talking over TTS.
+2. **Speculative race** (§14) — STT partials → speculative LLM kickoff.
+3. **STT/TTS multi-provider fallback** — blocked on pipecat #4139.
+4. **Streaming TTS** via ElevenLabs flush-after-each-clause.
+5. **OpenRouter as LLM gateway** — one env-var swap, 100+ models.
+6. **Audio smoke tests** with a real TTS → STT loop.
+7. **Continuous production eval** — 5–10 % sampling of live transcripts
    to the LLM judge for drift detection.
-9. **Pre-recorded "everything is on fire" TTS fallback** for the
+8. **Pre-recorded "everything is on fire" TTS fallback** for the
    double-failure case.
-10. **`AvailabilityCache`** with 60 s TTL in `repository.py`.
+9. **`AvailabilityCache`** with 60 s TTL in `repository.py`.
 
 Already landed (was on this list): mock-eval offline mode, parallel
 eval runner, atomic reschedule, specialty filter, next-day forward
-scan, operator console event stream.
+scan, operator console event stream, **mini-LLM specialty router +
+hybrid `route_intent` navigation (ADR 005)**.
 
 ## 18. File map
 

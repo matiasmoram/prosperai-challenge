@@ -20,13 +20,13 @@ Last refreshed: **2026-05-24**.
 
 Re-run with `make verify` + `make mock-eval`. All green:
 
-- **456 tests pass**, 0 failed (`uv run pytest tests/ -q`, ~16 s).
-- **`make mock-eval`: 55/55 scenarios** `state=P judge=P`, 0 failing (~5 s, no API key).
+- **547 passed, 1 skipped**, 0 failed (`uv run pytest tests/ evals/test_types.py evals/test_runner_checks.py tester/ -q`, ~24 s).
+- **`make mock-eval`: 56/56 scenarios** `state=P judge=P`, 0 failing (~5 s, no API key).
 - `mypy --strict` clean; ruff check + format clean (via `make verify`).
 - EHR endpoints 200, p50 < 100 ms warm; `/metrics`, `/health`, `/docs` live.
 - No data corruption, no hallucinated appointments, no breakage under the
   security/concurrency/adversarial suites (`tests/adversarial/`, see
-  `docs/testing/ADVERSARIAL_FINDINGS.md` — F-001…F-012 all fixed at root).
+  `docs/testing/ADVERSARIAL_FINDINGS.md` — F-001…F-013 all fixed at root).
 
 **Caveat:** `make mock-eval` runs *canned* scripts through `evals/mock_llm.py`.
 Green mock ≠ green live. The failures in the next section were real-LLM

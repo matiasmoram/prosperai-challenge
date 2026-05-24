@@ -6,17 +6,15 @@ Priority-ranked improvements that would meaningfully strengthen this submission 
 
 ## 1. Reliability / Production-Readiness
 
-### 1.1 Universal Goodbye-Intent Transition (Dispatcher)
+### 1.1 Universal Goodbye-Intent Transition (Dispatcher) — ✅ SHIPPED
 
-**Why this matters to Prosper:** ERRORS.md identifies the missing `goodbye → END` universal transition as the root cause of ~80% of live-eval terminal-state failures — fixing it directly converts 10+ currently-failing live scenarios to passing, which is the single highest-leverage reliability change remaining.
-
-- Add a `_detect_goodbye_intent(text)` helper in `dispatcher.py` that matches a broad pattern set (`bye`, `never mind`, `actually forget it`, `talk to you later`, `that's all`, etc.) using a short regex union.
-- Call it at the top of `handle_user_turn`, before the per-state LLM dispatch, so any state can transition to `END` on a clear goodbye without burning an LLM call.
-- Extend `TRANSITIONS` in `flows.py` — the `"goodbye"` edge already exists in every state; the issue is it is never triggered from user text in most states.
-- Add three eval scenarios: `goodbye_from_book_flow`, `goodbye_from_cancel_flow`, `goodbye_from_register`, each with a persona that hangs up mid-flow without completing.
-
-**Files to touch:** `src/prosper/dispatcher.py`, `src/prosper/flows.py`, `evals/scenarios.py`
-**Effort:** S | **Risk:** low
+Landed. `flows.py` carries a `"goodbye"` edge on every non-END state and
+`dispatcher.py` has a tiered goodbye matcher (`_GOODBYE_HARD` + trailing-anchor
+tiers). Adversarial regression on both directions:
+`tests/adversarial/test_confirm_goodbye.py` (true-positive) +
+`test_goodbye_false_positive.py` (F-012 mid-utterance "bye"). Abandon scenarios
+(`goodbye_at_*`, `reschedule_abort_at_confirm`) cover hang-up at every reachable
+state.
 
 ---
 
@@ -50,17 +48,10 @@ Priority-ranked improvements that would meaningfully strengthen this submission 
 
 ## 2. Eval Quality
 
-### 2.1 Adversarial Scenario Generator from Transcript Templates
+### 2.1 Adversarial Scenario Generator from Transcript Templates — ✅ SHIPPED
 
-**Why this matters to Prosper:** The challenge brief emphasises robust evaluation; the current 16 scenarios are hand-authored. A generator that produces novel adversarial variants would demonstrate a scalable eval discipline, not just a one-time test suite.
-
-- Add `evals/generator.py` with a `ScenarioTemplate` dataclass: a scenario plus a list of `PerturbationRule` objects (e.g. swap the phone number with a malformed one, inject a refusal phrase mid-confirmation, replace the name with an injection string).
-- Implement four concrete perturbation rules: `PhoneFormatChaos`, `NameInjection`, `MidFlowAbort`, `OffTopicProbe`.
-- A `generate(template, rules) -> list[Scenario]` function returns concrete `Scenario` objects that can be dropped into the existing runner without changes.
-- Add a `make gen-eval` target that generates and immediately runs the expanded set, printing a coverage summary of which FSM transitions were exercised.
-
-**Files to touch:** `evals/generator.py` (new), `Makefile`, `evals/scenarios.py`
-**Effort:** M | **Risk:** low
+Landed (commit `831b99a`). `evals/generator.py` + `make gen-list` / `make
+gen-eval` targets.
 
 ---
 
@@ -78,17 +69,10 @@ Priority-ranked improvements that would meaningfully strengthen this submission 
 
 ---
 
-### 2.3 Golden-Trace Replay Mode
+### 2.3 Golden-Trace Replay Mode — ✅ SHIPPED
 
-**Why this matters to Prosper:** Live-eval failures in ERRORS.md are largely persona-script mismatches. A golden-trace mode replays a recorded human transcript turn-by-turn through the dispatcher, asserting state transitions and tool calls match without involving the LLM — this is a deterministic regression test that costs zero tokens and catches dispatcher-logic regressions before the live eval run.
-
-- Add `evals/trace_replay.py` with a `GoldenTrace` dataclass holding an ordered list of `(role, text, expected_state, expected_tool | None)` tuples.
-- A `replay(trace, dispatcher) -> ReplayResult` feeds each user turn into `dispatcher.handle_user_turn` with the LLM mocked to the recorded assistant response, then asserts state and tool match.
-- Ship three initial golden traces captured from the happy-path manual browser test.
-- Add `make replay` target; it runs in under 1 second, no API key required.
-
-**Files to touch:** `evals/trace_replay.py` (new), `evals/traces/` (new directory), `Makefile`
-**Effort:** M | **Risk:** low
+Landed (commit `bfb3a70`). `evals/trace_replay.py` + `make replay` /
+`make replay-record`.
 
 ---
 
@@ -212,28 +196,13 @@ Original proposal kept below for reference.
 
 ## 6. DX / Contributor Experience
 
-### 6.1 Dispatcher Trace Viewer (CLI)
+### 6.1 Dispatcher Trace Viewer (CLI) — ✅ SHIPPED
 
-**Why this matters to Prosper:** ERRORS.md's fix path for the lone E1 crash begins "add `--debug` mode to `evals/runner.py` that prints `dispatcher.history` before each LLM call." This feature is that item, generalised: a single CLI command that renders the full dispatcher trace for any scenario in a readable table without requiring a live LLM call.
-
-- Add `--trace` flag to `python -m evals` that, after running a scenario (mock or live), prints a formatted table: turn number, state, user text (redacted), tool called, tool result code, state transition.
-- Pipe through `src/prosper/observability/redact.py` so no raw PII appears in terminal output.
-- The table is derived from `Dispatcher.transcript` (already populated) — no new data collection needed.
-- Add `make trace SCENARIO=new_patient_books` convenience target.
-
-**Files to touch:** `evals/runner.py`, `evals/__main__.py`, `Makefile`
-**Effort:** S | **Risk:** low
+Landed (commit `6f1d6e8`). `--trace` flag on `python -m evals` + `make trace
+SCENARIO=…`.
 
 ---
 
-### 6.2 Scenario-from-Transcript Scaffolder
+### 6.2 Scenario-from-Transcript Scaffolder — ✅ SHIPPED
 
-**Why this matters to Prosper:** CONTRIBUTING.md describes adding a scenario as a "20-line PR" but the 20 lines still require knowing the `StateExpectation` schema. A scaffolder that reads a raw transcript and outputs a populated `Scenario` stub lowers the barrier for clinical staff or QA to contribute new test cases without reading the codebase.
-
-- Add `scripts/scaffold_scenario.py` that reads a plain-text transcript (one line per turn, format `USER: ...` / `BOT: ...`) from stdin or a file argument.
-- Infer `StateExpectation` fields heuristically: presence of "booked" in a BOT line with a prior tool call implies `booked_appointment_count_delta=1`; "cancelled" implies `cancelled_appointment_count_delta=1`.
-- Output a Python snippet ready to paste into `evals/scenarios.py`, with `# TODO:` comments on fields it couldn't infer.
-- Document in `CONTRIBUTING.md` as the recommended first step when a manual call reveals unexpected behaviour.
-
-**Files to touch:** `scripts/scaffold_scenario.py` (new), `CONTRIBUTING.md`
-**Effort:** S | **Risk:** low
+Landed (commit `4a2cda0`). `scripts/scaffold_scenario.py`.

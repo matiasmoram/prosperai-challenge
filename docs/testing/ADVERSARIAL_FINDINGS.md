@@ -1,12 +1,19 @@
 # Adversarial findings log
 
-> **STATUS (resolved): all of F-001 … F-012 are FIXED at the root cause.**
+> **STATUS (resolved): all of F-001 … F-013 are FIXED at the root cause.**
 > The `tests/adversarial/` suite now passes as plain assertions of the
-> corrected behaviour — **79 passed, 0 xfailed, 0 failed**. Full repo gate
-> green: ruff + `ruff format` + `mypy --strict` (27 files) + 456 tests, and
-> `make mock-eval` (all scenarios). Each finding's "Suggested fix" below is
-> what was implemented; the **Fix** line records where. M-001's F-008/F-009
-> classes are now covered by direct unit tests in the adversarial suite.
+> corrected behaviour. Full repo gate green: ruff + `ruff format` +
+> `mypy --strict` (27 files) + **547 passed / 1 skipped**, and `make mock-eval`
+> (56/56 `state=P judge=P`) — re-verified 2026-05-24. Each finding's "Suggested
+> fix" below is what was implemented; the **Fix** column in the summary table
+> records the status. M-001's F-008/F-009 classes are now covered by direct
+> unit tests in the adversarial suite.
+>
+> **⚠ Read the per-finding "Suggested fix (needs sign-off)" lines as historical
+> proposals, NOT open work.** They are the original write-ups from when each bug
+> was found; the summary table's "Fix (all ✅ implemented)" column is the current
+> status. Every F-NNN is CLOSED and pinned by a passing test — do not
+> re-implement a fix for any of them.
 
 Running log of bugs surfaced by adversarial / fuzz-style testing. Each entry
 is pinned by a test under `tests/adversarial/`. Bugs were originally pinned
