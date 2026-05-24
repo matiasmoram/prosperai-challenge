@@ -235,10 +235,11 @@ recovers.
 ## 8. Operator console
 
 `src/prosper/console/` ships a live operator pane fed by the dispatcher.
-Eight event types from `events.py`:
+Nine event types from `events.py`:
 
 `state_change`, `transcript_turn`, `tool_call_start`, `tool_call_end`,
-`latency_tick`, `patient_identified`, `slots_offered`, `outcome`.
+`latency_tick`, `patient_identified`, `slots_offered`, `outcome`,
+`turn_interrupted`.
 
 Wiring:
 

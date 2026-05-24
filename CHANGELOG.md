@@ -5,7 +5,7 @@ derived from `git log`. Forward-reading and grouped by delivery wave; each
 entry is `commit-hash — what changed, and why`. Dates are
 `America/New_York` from the commit metadata.
 
-**Span:** 2026-05-19 → 2026-05-24 · 59 commits · 1 author.
+**Span:** 2026-05-19 → 2026-05-24 · 67 commits · 1 author.
 
 ---
 
@@ -113,6 +113,21 @@ Working through ranked items in `FUTURE.md`.
 - `831b99a` — adversarial scenario generator (FUTURE 2.1): composable `PerturbationRule` transforms produce adversarial variants from a base scenario; live-only by design.
 - `4a2cda0` — scenario-from-transcript scaffolder (FUTURE 6.2): `scripts/scaffold_scenario.py` turns a `USER:`/`BOT:` transcript into a paste-ready `Scenario` stub with `# TODO` markers for un-inferable fields.
 
+## Phase 10 — Parallel guardian fronts (2026-05-24)
+
+A team-orchestrated pass: ledger reconciliation, then four parallel
+single-owner fronts (EHR, conversation, call UI, operator console), each
+gated by `make verify` + `make mock-eval` and committed independently.
+
+- `b086e4c` — repo cleanup + per-doc consult/update policy.
+- `6c7a6da` — checkpoint the hybrid-llm-navigation WIP (triage, adversarial suite, tester, F6 docs) before multi-agent front work — green baseline captured.
+- `59f51fe` — reconcile ledgers with shipped code: mini-LLM specialty router moved in-flight→shipped (SOLUTION §14/§17, ADR 005), FUTURE 1.1/2.1/2.3/6.1/6.2 marked shipped, F-013 added + counts refreshed in ADVERSARIAL_FINDINGS, F7 gains `tester/**` ownership.
+- `58bd729` — (F1 EHR) duration bounds `ge=30,le=90` on create/reschedule schemas, xdist-safe test fixtures, seed `name_normalized` via `normalize_name`; +17 tests.
+- `2eb4d5f` — (F3 conversation) naturalness pass on per-state task messages; every routing token preserved, all entries <1 KB, mock-eval 56/56.
+- `9dcb444` — (F4 call UI) distinct error state, connecting-phase animation, a11y on mute, removed the dead speaker button; WebRTC signaling path unchanged.
+- `985b440` — (F5 console) mtime-sorted session picker + connection-state UX; new back-compat `list_sessions_with_meta()`; no bus-shape change.
+- `docs` — console event count 8→9 (`turn_interrupted`) in SOLUTION §8 + CLAUDE.md; this Phase 10 entry.
+
 ---
 
 ## Trajectory at a glance
@@ -129,6 +144,7 @@ Working through ranked items in `FUTURE.md`.
 | 7 | Id-contract + naturalness | 337, mock 18/18 | — |
 | 8 | Eval coverage | mock 18→55 | — |
 | 9 | FUTURE roadmap | mock 55/55 | — |
+| 10 | Parallel guardian fronts | 564 tests, mock 56/56 | — |
 
 **Recurring discipline across phases:** every change gated by `make verify`
 (ruff + format + mypy `--strict` + pytest); `make mock-eval` after any
