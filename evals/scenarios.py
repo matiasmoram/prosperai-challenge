@@ -223,6 +223,16 @@ def _setup_multi_specialty(session: Session) -> None:
     session.commit()
 
 
+def _setup_existing_four_appts(session: Session) -> None:
+    """Existing patient (Ada) with FOUR upcoming appointments + 4 extra free
+    slots. Lets a scenario cancel the THIRD item from a numbered list to
+    guard against off-by-one errors beyond the 3-appt baseline."""
+    _, slots = _seed_provider_and_slots(session, count=8)
+    patient = _seed_existing_patient(session)
+    for s in slots[:4]:
+        repo.create_appointment(session, patient_id=patient.id, slot_id=s.id)
+
+
 def _setup_two_patients_same_dob(session: Session) -> None:
     """Two patients with the same DOB and similar names that both fuzzy-score
     >= 0.85 but < 0.97 against the query 'Jaime Reyes' — so
@@ -2277,5 +2287,185 @@ SCENARIOS: list[Scenario] = [
             "no appointment was modified — the caller hung up before providing a new time",
         ],
         max_turns=10,
+    ),
+    # -----------------------------------------------------------------------
+    # TRACK 1 adversarial / contradiction scenarios
+    # -----------------------------------------------------------------------
+    Scenario(
+        name="claims_not_in_system_but_exists",
+        tags=frozenset({"adversarial", "identity", "contradiction"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "When the bot asks for your phone, insist VERBATIM: "
+            "'I'm definitely not in your system — I've never called before.' "
+            "Then give your phone number anyway when pushed: '202-555-0100.' "
+            "When the bot says it found you, accept it and ask to book any "
+            "morning slot tomorrow. When the bot offers a slot, say VERBATIM "
+            "'first one works'. Confirm VERBATIM 'yes that\\'s correct'. "
+            'After the booking, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            # Bot must NEVER create a duplicate — the EHR record already exists.
+            forbidden_tool_calls=["create_patient", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot trusted the EHR over the caller's claim (found the record via phone)",
+            "the bot did NOT register a new patient — the existing record was used",
+            "the booking completed for the existing patient",
+        ],
+        max_turns=14,
+    ),
+    Scenario(
+        name="patient_four_appts_cancel_third",
+        tags=frozenset({"edge", "cancel", "disambiguation"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have FOUR upcoming appointments. You want to cancel the THIRD "
+            "one on the bot's numbered list. When the bot lists your appointments, "
+            "say VERBATIM: 'the third one, please'. When the bot reads back the "
+            "third appointment for confirmation, say VERBATIM: 'yes, cancel that "
+            "one'. After the bot confirms the cancellation, end the call VERBATIM "
+            'with: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_four_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=-1,
+            cancelled_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+                "cancel_appointment",
+            ],
+            forbidden_tool_calls=["create_patient", "create_appointment"],
+        ),
+        judge_criteria=[
+            "the bot read out a numbered list of four upcoming appointments",
+            "the bot cancelled the THIRD appointment, not the first, second, or fourth",
+            "exactly one appointment was cancelled",
+        ],
+        max_turns=14,
+    ),
+    Scenario(
+        name="reschedule_flow_cancel_demand_stays_reschedule",
+        tags=frozenset({"edge", "reschedule", "contradiction"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have one upcoming appointment. Open with VERBATIM: 'Hi, I'd like "
+            "to reschedule my appointment.' Provide phone. When the bot shows your "
+            "current appointment and asks what new time works, say VERBATIM: "
+            "'actually, just cancel the whole thing.' The bot will stay in the "
+            "reschedule flow (it cannot cancel from here). Accept whatever the bot "
+            "says next and provide a new time: 'Tomorrow morning works.' When the "
+            "bot offers a slot, say VERBATIM: 'the first one works'. When the bot "
+            "reads back the move, say VERBATIM: 'yes that\\'s correct'. After the "
+            'move is confirmed, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_patient_with_appt_for_reschedule,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # Atomic reschedule: same appointment row, new slot. No net delta.
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+                "list_availability_slots",
+                "reschedule_appointment",
+            ],
+            # The reschedule path must NOT fire cancel_appointment — that is
+            # the old chain. If cancel_appointment fires here it means the FSM
+            # incorrectly yielded to the mid-flow cancel demand.
+            forbidden_tool_calls=["cancel_appointment", "create_appointment"],
+        ),
+        judge_criteria=[
+            "the bot stayed in RESCHEDULE_FLOW after the mid-flow cancel demand",
+            "the appointment was rescheduled atomically (not cancelled and re-booked)",
+            "no cancellation was performed",
+        ],
+        max_turns=18,
+    ),
+    Scenario(
+        name="book_flow_cancel_demand_stays_book",
+        tags=frozenset({"edge", "cancel", "contradiction"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Open VERBATIM: 'Hi, I'd like to book a visit.' Provide phone. When "
+            "the bot lists available slots, say VERBATIM: 'wait — actually I need "
+            "to cancel my existing visit first.' The bot stays in BOOK_FLOW (no "
+            "mid-flow intent flip to cancel). Accept this and just book the slot "
+            "offered: say VERBATIM 'first one works'. Confirm VERBATIM: 'yes "
+            "that\\'s correct'. After the booking, end VERBATIM: 'thanks, "
+            "goodbye.'"
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            # If cancel_appointment fires, the FSM incorrectly honored the
+            # mid-BOOK_FLOW cancel demand — that is the bug we're pinning out.
+            forbidden_tool_calls=["cancel_appointment", "create_patient"],
+        ),
+        judge_criteria=[
+            "the bot stayed in BOOK_FLOW after the mid-flow cancel demand",
+            "a new appointment was booked (not cancelled)",
+            "no cancellation was performed",
+        ],
+        max_turns=14,
+    ),
+    Scenario(
+        name="phone_retracted_fallback_to_name_dob",
+        tags=frozenset({"edge", "identity", "recovery"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, real phone 202-555-0100. "
+            "When the bot asks for your phone, first give a WRONG number VERBATIM: "
+            "'555-999-0001'. When the bot says it can't find you under that number "
+            "and asks for your name and DOB, say VERBATIM: 'Ada Lovelace, December "
+            "10th 1990'. After the bot finds you and confirms, ask to book any "
+            "morning slot tomorrow. When the bot offers a slot, say 'first one "
+            "works'. Confirm VERBATIM 'yes that\\'s correct'. After the booking, "
+            'end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "find_patient_by_name_dob",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            # The bot must NOT create a new patient — Ada already exists.
+            # Both find attempts must fire (phone miss then name+DOB hit).
+            forbidden_tool_calls=["create_patient", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot tried the (wrong) phone first, got no match, then fell back to name+DOB",
+            "the bot identified the existing patient via name+DOB without creating a duplicate",
+            "the booking completed for the correct existing patient",
+        ],
+        max_turns=16,
     ),
 ]

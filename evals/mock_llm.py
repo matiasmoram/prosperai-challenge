@@ -1576,6 +1576,121 @@ def _script_goodbye_at_reschedule_flow() -> list[LLMReply]:
     ]
 
 
+def _script_claims_not_in_system_but_exists() -> list[LLMReply]:
+    # Ada exists. Caller initially insists she's not in the system, then
+    # gives her real phone anyway. Bot calls find_patient_by_phone → found →
+    # CHOOSE_INTENT → BOOK_FLOW → CONFIRM_BOOK → END.
+    # Asserts: no create_patient (the EHR record must be trusted).
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        # Bot hears "I'm not in your system" then phone; proceeds normally.
+        _t("Let me check that for you — what's the number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        # found → CHOOSE_INTENT
+        _t("I do have you on file, Ada — book, reschedule, or cancel?"),
+        # BOOK_FLOW: list → CONFIRM_BOOK
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set for tomorrow at ten — have a great day."),
+    ]
+
+
+def _script_patient_four_appts_cancel_third() -> list[LLMReply]:
+    # Ada has 4 appointments. Cancel the THIRD (index 2).
+    # Guards off-by-one beyond the existing 3-appt cancel scenario.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book or cancel?"),
+        # CANCEL_FLOW: list all 4 → CONFIRM_CANCEL
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t("You have four upcoming visits — which number would you like to cancel?"),
+        # Persona says "the third one" — cancel index 2.
+        _tool("cancel_appointment", appointment_id="__use_upcoming__", **{_USE_UPCOMING_N: 2}),
+        _t("Cancelled your third visit — have a great day."),
+    ]
+
+
+def _script_reschedule_flow_cancel_demand_stays_reschedule() -> list[LLMReply]:
+    # Ada enters RESCHEDULE_FLOW. Mid-flow she demands a cancellation.
+    # RESCHEDULE_FLOW has no wants_cancel edge → _transition is a no-op.
+    # Bot stays in RESCHEDULE_FLOW and continues to ask for a new time.
+    # Caller relents and reschedules atomically → END.
+    # Pins the CURRENT behavior (no mid-reschedule flip) as a regression guard.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("Sure — what's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        # RESCHEDULE_FLOW: get_upcoming → stays in flow
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t("Your visit is tomorrow at ten with Dr. Patel — what new time works for you?"),
+        # Persona says "just cancel the whole thing" — bot can't flip, continues.
+        _t(
+            "I can only cancel from the cancel flow — but I can move your visit "
+            "to any other open time. What time works for you?"
+        ),
+        # Persona provides a new time; list slots → CONFIRM_RESCHEDULE
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I can move you to ten-thirty with Dr. Patel — shall I go ahead?"),
+        # Atomic reschedule → END
+        _tool("reschedule_appointment", appointment_id="1", __use_first_slot__=True),
+        _t("All set — you're now at ten-thirty tomorrow with Dr. Patel. Have a great day."),
+    ]
+
+
+def _script_book_flow_cancel_demand_stays_book() -> list[LLMReply]:
+    # Ada enters BOOK_FLOW. Mid-listing she demands a cancellation.
+    # BOOK_FLOW has no wants_cancel edge → _transition is a no-op.
+    # Bot stays in BOOK_FLOW. Caller relents, picks the slot, books.
+    # Pins the CURRENT behavior (no mid-book flip to cancel) as a regression guard.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        # BOOK_FLOW: list → CONFIRM_BOOK
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        # Persona says "wait, cancel my existing visit" — bot can't flip.
+        _t(
+            "I can only cancel from the cancel menu — I've got ten tomorrow open "
+            "to book right now. Want to go ahead with that?"
+        ),
+        # Persona relents, books.
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set for tomorrow at ten — have a great day."),
+    ]
+
+
+def _script_phone_retracted_fallback_to_name_dob() -> list[LLMReply]:
+    # Ada's real phone is +12025550100; caller first gives a wrong number
+    # (555-999-0001, not in DB) → not found. Bot falls back to name+DOB.
+    # find_patient_by_name_dob("Ada Lovelace", "December 10 1990") →
+    # exact/fuzzy single hit → CHOOSE_INTENT → BOOK_FLOW → END.
+    # Asserts: two find calls (phone miss then name+DOB hit), no create_patient.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        # First call: wrong number → not found
+        _tool("find_patient_by_phone", phone="555-999-0001"),
+        # not found → ask for name+DOB
+        _t("I don't see that number — what's your full name and date of birth?"),
+        # Second call: name+DOB → found Ada
+        _tool("find_patient_by_name_dob", name="Ada Lovelace", dob="December 10 1990"),
+        # found → CHOOSE_INTENT
+        _t("Got you, Ada — book, reschedule, or cancel?"),
+        # BOOK_FLOW: list → CONFIRM_BOOK
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set for tomorrow at ten — have a great day."),
+    ]
+
+
 _BOT_SCRIPTS: dict[str, callable] = {
     "new_patient_books": _script_new_patient_books,
     "existing_patient_cancels": _script_existing_patient_cancels,
@@ -1652,6 +1767,14 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "goodbye_at_book_flow": _script_goodbye_at_book_flow,
     "goodbye_at_cancel_flow": _script_goodbye_at_cancel_flow,
     "goodbye_at_reschedule_flow": _script_goodbye_at_reschedule_flow,
+    # TRACK 1: adversarial contradiction + off-by-one guards
+    "claims_not_in_system_but_exists": _script_claims_not_in_system_but_exists,
+    "patient_four_appts_cancel_third": _script_patient_four_appts_cancel_third,
+    "reschedule_flow_cancel_demand_stays_reschedule": (
+        _script_reschedule_flow_cancel_demand_stays_reschedule
+    ),
+    "book_flow_cancel_demand_stays_book": _script_book_flow_cancel_demand_stays_book,
+    "phone_retracted_fallback_to_name_dob": _script_phone_retracted_fallback_to_name_dob,
 }
 
 
@@ -2142,6 +2265,55 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "Reschedule please.",
         # Goodbye after bot asks for new time — runner short-circuits to END.
         "actually, never mind. goodbye.",
+    ],
+    # TRACK 1: adversarial contradiction + off-by-one guards
+    "claims_not_in_system_but_exists": [
+        "Hi, I'd like to book.",
+        # Insist not in system, then give real phone.
+        "I'm definitely not in your system — I've never called before.",
+        "202-555-0100.",
+        "Book please.",
+        "first one works.",
+        "yes that's correct.",
+    ],
+    "patient_four_appts_cancel_third": [
+        "Hi, I want to cancel one of my appointments.",
+        "202-555-0100.",
+        "Cancel please.",
+        # Cancel the third in the numbered list.
+        "the third one, please.",
+        "yes, cancel that one.",
+    ],
+    "reschedule_flow_cancel_demand_stays_reschedule": [
+        "Hi, I'd like to reschedule my appointment.",
+        "202-555-0100.",
+        "Reschedule please.",
+        # Mid-flow cancel demand — bot stays in RESCHEDULE_FLOW.
+        "actually, just cancel the whole thing.",
+        # Bot explains it can't flip; caller provides a new time.
+        "Tomorrow morning works.",
+        "the first one works.",
+        "yes that's correct.",
+    ],
+    "book_flow_cancel_demand_stays_book": [
+        "Hi, I'd like to book a visit.",
+        "202-555-0100.",
+        "Book please.",
+        # Mid-BOOK_FLOW cancel demand — bot stays in BOOK_FLOW.
+        "wait — actually I need to cancel my existing visit first.",
+        # Bot explains it can't flip; caller relents and books.
+        "first one works.",
+        "yes that's correct.",
+    ],
+    "phone_retracted_fallback_to_name_dob": [
+        "Hi, I'd like to book.",
+        # Give wrong phone first.
+        "555-999-0001.",
+        # Bot says not found; caller gives name+DOB.
+        "Ada Lovelace, December 10th 1990.",
+        "Book please.",
+        "first one works.",
+        "yes that's correct.",
     ],
 }
 
