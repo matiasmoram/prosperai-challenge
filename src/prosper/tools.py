@@ -240,6 +240,8 @@ async def suggest_specialty_handler(
         value={
             "specialty": cls.specialty,
             "duration_minutes": cls.duration_minutes,
+            "minimum_safe_minutes": cls.minimum_safe_minutes,
+            "rationale": cls.rationale,
             "confidence": cls.confidence,
             "follow_up": cls.follow_up,
         }
@@ -555,7 +557,11 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "already said which provider they want (e.g. 'my "
                 "therapist', 'a psychiatrist'), skip this tool and go "
                 "straight to `list_availability_slots`. Returns "
-                "{specialty, duration_minutes, confidence, follow_up}. "
+                "{specialty, duration_minutes, minimum_safe_minutes, "
+                "rationale, confidence, follow_up}. "
+                "`duration_minutes` is the recommended length; "
+                "`minimum_safe_minutes` is the clinical floor — see "
+                "BOOK_FLOW task message for negotiation rules. "
                 "If `follow_up` is set, ask it verbatim and call this "
                 "tool again with the combined description."
             ),

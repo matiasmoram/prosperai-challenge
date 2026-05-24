@@ -63,9 +63,11 @@ def _classification_json(**overrides: Any) -> str:
     base = {
         "specialty": "General Practice",
         "duration_minutes": 30,
+        "minimum_safe_minutes": 30,
         "confidence": 0.9,
         "follow_up": None,
         "red_flag": False,
+        "rationale": "",
     }
     base.update(overrides)
     return json.dumps(base)
@@ -207,6 +209,8 @@ async def test_suggest_specialty_handler_ok_shape(monkeypatch: pytest.MonkeyPatc
     assert is_ok(r)
     assert r.value["specialty"] == "Therapist"
     assert r.value["duration_minutes"] == 60
+    assert r.value["minimum_safe_minutes"] == 30  # default floor
+    assert r.value["rationale"] == ""  # default empty
     assert r.value["confidence"] == pytest.approx(0.88)
     assert r.value["follow_up"] is None
 

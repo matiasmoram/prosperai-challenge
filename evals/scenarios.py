@@ -2289,6 +2289,80 @@ SCENARIOS: list[Scenario] = [
         max_turns=10,
     ),
     # -----------------------------------------------------------------------
+    # Wave-1: duration negotiation scenarios
+    # -----------------------------------------------------------------------
+    Scenario(
+        name="duration_soft_override",
+        tags=frozenset({"triage", "duration", "recovery"}),
+        persona=(
+            "You are a NEW caller named Morgan Lee, DOB June 6th 1990, phone "
+            "555-300-1111. You want to book a psychiatric appointment. When the "
+            "bot asks what you need, say VERBATIM: 'I want to book — I've been "
+            "feeling really anxious and down lately.' When the bot recommends "
+            "sixty minutes but says thirty is possible, insist VERBATIM: 'I'd "
+            "prefer just thirty minutes, please.' When the bot offers a thirty-"
+            "minute slot, confirm VERBATIM: 'Yes, thirty minutes works — please "
+            "book that.' After the bot confirms the booking, end the call "
+            'VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_triage_new_patient,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "create_patient",
+                "suggest_specialty",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot called suggest_specialty after the caller described anxiety symptoms",
+            "the bot nudged the caller once toward the recommended sixty-minute duration",
+            "after the caller insisted on thirty minutes, the bot honoured the choice",
+            "the appointment was booked for thirty minutes, not sixty",
+        ],
+        max_turns=18,
+    ),
+    Scenario(
+        name="duration_extend_accepted",
+        tags=frozenset({"triage", "duration", "happy"}),
+        persona=(
+            "You are a NEW caller named Casey Park, DOB July 7th 1991, phone "
+            "555-300-2222. You want to book a psychiatric appointment. When the "
+            "bot asks what you need, say VERBATIM: 'I want to book — I've been "
+            "feeling really anxious and down lately.' When the bot mentions the "
+            "recommended sixty-minute length, say VERBATIM: 'Actually I'd like "
+            "ninety minutes if that's possible.' When the bot offers a ninety-"
+            "minute slot, confirm VERBATIM: 'Yes, ninety minutes — please book "
+            "that.' After the bot confirms the booking, end the call VERBATIM: "
+            '"thanks, goodbye."'
+        ),
+        setup=_setup_triage_new_patient,
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "create_patient",
+                "suggest_specialty",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot called suggest_specialty after the caller described anxiety symptoms",
+            "the bot accepted the caller's ninety-minute request without any pushback",
+            "the appointment was booked for ninety minutes, not sixty",
+        ],
+        max_turns=18,
+    ),
+    # -----------------------------------------------------------------------
     # TRACK 1 adversarial / contradiction scenarios
     # -----------------------------------------------------------------------
     Scenario(

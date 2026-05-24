@@ -32,11 +32,19 @@ from prosper.flows import State
 def test_redact_for_llm_triage_line_without_follow_up() -> None:
     line = _redact_for_llm(
         "suggest_specialty",
-        {"specialty": "Psychiatrist", "duration_minutes": 60, "confidence": 0.91},
+        {
+            "specialty": "Psychiatrist",
+            "duration_minutes": 60,
+            "minimum_safe_minutes": 30,
+            "confidence": 0.91,
+            "rationale": "Sixty minutes recommended for psychiatric assessment.",
+        },
     )
     assert "Psychiatrist" in line
-    assert "60" in line
+    assert "duration_minutes=60 (recommended)" in line
+    assert "minimum_safe_minutes=30 (clinical floor)" in line
     assert "0.91" in line
+    assert "rationale:" in line
     assert "ask the caller" not in line
 
 
@@ -46,7 +54,9 @@ def test_redact_for_llm_triage_line_with_follow_up() -> None:
         {
             "specialty": "General Practice",
             "duration_minutes": 30,
+            "minimum_safe_minutes": 30,
             "confidence": 0.4,
+            "rationale": "",
             "follow_up": "Is it physical or emotional?",
         },
     )
@@ -89,9 +99,14 @@ class _FixedTriageCompletions:
                 {
                     "specialty": "Psychiatrist",
                     "duration_minutes": 60,
+                    "minimum_safe_minutes": 30,
                     "confidence": 0.9,
                     "follow_up": None,
                     "red_flag": False,
+                    "rationale": (
+                        "Sixty minutes recommended for psychiatric assessment; "
+                        "thirty is the clinical minimum."
+                    ),
                 }
             )
         )
@@ -133,8 +148,14 @@ async def test_suggest_specialty_records_recommendation_in_memory(
         await d.handle_user_turn("I've been feeling really down")
     assert d.memory.recommended_specialty == "Psychiatrist"
     assert d.memory.recommended_duration_minutes == 60
+    assert d.memory.minimum_safe_minutes == 30
     # The LLM-facing tool result is the redacted triage line, not raw JSON.
     triage_tool_msgs = [
         m for m in d.history if m.get("role") == "tool" and "triage:" in str(m.get("content", ""))
     ]
     assert triage_tool_msgs, d.history
+    # Both recommended and floor durations must be surfaced so the LLM can
+    # negotiate per the BOOK_FLOW task message rules.
+    content = triage_tool_msgs[0]["content"]
+    assert "duration_minutes=60 (recommended)" in content
+    assert "minimum_safe_minutes=30 (clinical floor)" in content

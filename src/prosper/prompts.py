@@ -248,22 +248,24 @@ TASK_MESSAGES = {
         "guessing. Vary your opener so a repeat caller doesn't hear the same line."
     ),
     "BOOK_FLOW": (
-        "[STATE: BOOK_FLOW] Settle specialty first, then availability. "
-        "Named a specialty or doctor → use it. Described symptoms → call "
-        "suggest_specialty once with a short symptom summary; it returns "
-        "{specialty, duration_minutes, follow_up?}. If follow_up is set, ask "
-        "it and call suggest_specialty again with the combined answer. "
-        "Once specialty and duration are known, ask what day — resolve "
-        "'tomorrow' / 'next Tuesday' against TODAY; default to tomorrow if flexible. "
-        "Call list_availability_slots once (date + specialty + duration_minutes, default 30 min). "
-        "Adaptive offer: "
-        "4+ slots → ask 'morning or afternoon?' first, then name 2–3 from that half; "
-        "if more slots remain, say 'there are more times too if none of these work'; "
-        "1–3 slots → read them all in one sentence; "
-        "none + next_day_with_slots → name that day "
-        "('nothing Tuesday, but Thursday has ten or two'); "
-        "none at all → 'nothing then — when else works?'. "
-        "Each slot is [1], [2] …; pass that number as slot_id. Never invent a UUID."
+        "[STATE: BOOK_FLOW] Settle specialty, then availability. "
+        "Named specialty/doctor → use it. Described symptoms → call "
+        "suggest_specialty once (short summary); returns {specialty, duration_minutes, "
+        "minimum_safe_minutes, follow_up?}. "
+        "If follow_up set, ask it and call suggest_specialty again. "
+        "Caller wants ≥ duration_minutes → accept immediately. "
+        "Wants shorter than duration_minutes → nudge ONCE with the rationale, "
+        "then honor their choice; never book below minimum_safe_minutes. "
+        "Ask what day — resolve 'tomorrow'/'next Tuesday' against TODAY; "
+        "default to tomorrow if flexible. "
+        "Call list_availability_slots once "
+        "(date + specialty + agreed duration_minutes, default 30). "
+        "4+ slots → ask 'morning or afternoon?' first, name 2–3 from that half; "
+        "if more remain, add 'there are more times if none of these work'; "
+        "1–3 → read all in one sentence; "
+        "none + next_day_with_slots → name that day; "
+        "none → 'when else works?'. "
+        "Slots: [1], [2]…; pass that number as slot_id. Never invent a UUID."
     ),
     "CANCEL_FLOW": (
         "[STATE: CANCEL_FLOW] Call get_upcoming_appointments for the "
@@ -403,7 +405,8 @@ You are a clinical triage classifier for a US outpatient clinic. Given a
 caller's symptom description, decide:
 
 1. Which provider specialty fits best, from the allowed list provided.
-2. The visit duration in minutes — one of 30, 60, or 90.
+2. The visit duration in minutes — one of 30, 60, or 90. This is the
+   RECOMMENDED length for the best clinical outcome.
 3. Your confidence in the routing (0.0 to 1.0).
 4. A `follow_up` question to ask the caller IF and ONLY IF confidence is
    below 0.7, otherwise leave it empty/null. The follow-up must be ONE
@@ -412,6 +415,15 @@ caller's symptom description, decide:
    symptoms, severe bleeding, anaphylaxis, suicidal ideation, or other
    immediately life-threatening descriptions. Triggers an emergency
    redirect from the agent.
+6. `minimum_safe_minutes`: the clinical floor — the shortest visit that
+   is medically safe for this complaint. Must be one of 30, 60, or 90,
+   and MUST be ≤ `duration_minutes`. For most complaints the floor is 30.
+   Only raise it above 30 if a shorter visit genuinely cannot address the
+   issue (e.g. a full physiotherapy intake truly cannot be done in 30 min).
+7. `rationale`: ONE sentence explaining why `duration_minutes` was chosen.
+   Focus on clinical reasoning. Example: "Sixty minutes recommended for a
+   first therapy session to allow a full intake assessment." Leave as an
+   empty string for routine 30-minute visits where the default is obvious.
 
 Rules:
 - Output strict JSON matching the schema; no prose, no markdown.

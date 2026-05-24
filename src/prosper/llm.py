@@ -169,10 +169,19 @@ class SpecialtyClassification:
     """Mini-LLM triage result. Used by ``tools.suggest_specialty_handler``."""
 
     specialty: str
-    duration_minutes: int
+    duration_minutes: int  # recommended visit length
     confidence: float
     follow_up: str | None = None
     red_flag: bool = False
+    # Clinical floor: shortest visit that is medically safe for this complaint.
+    # Always ≤ duration_minutes and always in {30, 60, 90}. Caller may choose
+    # any duration ≥ minimum_safe_minutes without refusal; if they ask for
+    # something shorter, the agent nudges once with `rationale` then honours
+    # their choice (soft-override, no second refusal).
+    minimum_safe_minutes: int = 30
+    # One-sentence clinical reason for the recommended duration. Surfaced in
+    # the tool result the main LLM sees so it can cite it during negotiation.
+    rationale: str = ""
 
 
 # Strict JSON schema we ask gpt-4o-mini to emit. `additionalProperties:
@@ -186,19 +195,28 @@ _TRIAGE_JSON_SCHEMA: dict[str, Any] = {
         "required": [
             "specialty",
             "duration_minutes",
+            "minimum_safe_minutes",
             "confidence",
             "follow_up",
             "red_flag",
+            "rationale",
         ],
         "properties": {
             "specialty": {
                 "type": "string",
                 "enum": list(SPECIALTY_DURATION_TABLE.keys()),
             },
+            # Recommended visit length — the LLM may negotiate around it.
             "duration_minutes": {"type": "integer", "enum": [30, 60, 90]},
+            # Clinical floor: shortest safe visit; must be ≤ duration_minutes.
+            # Caller may choose any value ≥ this without a refusal.
+            "minimum_safe_minutes": {"type": "integer", "enum": [30, 60, 90]},
             "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             "follow_up": {"type": ["string", "null"]},
             "red_flag": {"type": "boolean"},
+            # One-sentence clinical reason for the recommended duration.
+            # Empty string is fine for routine 30-min visits.
+            "rationale": {"type": "string"},
         },
     },
 }
@@ -312,6 +330,24 @@ async def classify_symptoms(
             message=f"mini-LLM returned duration_minutes={duration!r} outside {{30,60,90}}",
             retryable=False,
         )
+    # minimum_safe_minutes: same enum constraint as duration_minutes.
+    # The model must emit a value in {30,60,90} that is ≤ duration_minutes.
+    # We validate the range here; we do NOT enforce ≤ duration_minutes as a
+    # hard code gate — the prompt instructs the model to honour the constraint
+    # and any slip is corrected by using min(minimum, duration) below.
+    minimum_safe_raw = parsed.get("minimum_safe_minutes")
+    if minimum_safe_raw not in (30, 60, 90):
+        return Err(
+            code="invalid_duration",
+            message=(
+                f"mini-LLM returned minimum_safe_minutes={minimum_safe_raw!r} outside {{30,60,90}}"
+            ),
+            retryable=False,
+        )
+    # Defensive clamp: if the model accidentally emits a floor > recommended
+    # (violates the ≤ contract), silently lower the floor to the recommended
+    # rather than returning an Err that blocks the whole booking flow.
+    minimum_safe_minutes = min(int(minimum_safe_raw), int(duration))
     # ``confidence`` should be a number, but a misbehaving model might emit a
     # string ("high") or omit it. Coerce defensively — a bad value must yield
     # a typed Err, never an uncaught ValueError that escapes the contract.
@@ -324,6 +360,9 @@ async def classify_symptoms(
             retryable=False,
         )
     follow_up_raw = parsed.get("follow_up")
+    # rationale: free-form string; default to "" if absent or wrong type.
+    rationale_raw = parsed.get("rationale", "")
+    rationale = rationale_raw if isinstance(rationale_raw, str) else ""
     return Ok(
         value=SpecialtyClassification(
             specialty=specialty,
@@ -331,5 +370,7 @@ async def classify_symptoms(
             confidence=confidence,
             follow_up=follow_up_raw if isinstance(follow_up_raw, str) and follow_up_raw else None,
             red_flag=bool(parsed.get("red_flag", False)),
+            minimum_safe_minutes=minimum_safe_minutes,
+            rationale=rationale,
         )
     )

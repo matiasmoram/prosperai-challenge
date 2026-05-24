@@ -88,12 +88,19 @@ class SessionMemory:
     # of ending the call, so the same call can swap out an appointment.
     wants_reschedule: bool = False
     # Latest output of ``suggest_specialty`` for this call. The dispatcher
-    # records these for audit / operator-console + lets the LLM reach for
-    # them when calling ``list_availability_slots`` / ``create_appointment``
-    # without restating the values every turn. ``None`` means the caller
+    # records these for audit / operator-console. ``None`` means the caller
     # never went through triage.
+    # NOTE: the dispatcher does NOT inject these back into tool args — the LLM
+    # reads them from the tool result string and passes its own chosen
+    # duration_minutes to list_availability_slots / create_appointment. This
+    # is intentional: if the caller negotiated a different duration, the LLM's
+    # choice is honoured without any dispatcher override.
     recommended_specialty: str | None = None
     recommended_duration_minutes: int | None = None
+    # Clinical floor from triage: shortest visit the mini-LLM considers safe.
+    # Stored for operator-console telemetry alongside recommended_duration.
+    # Never enforced as a code gate — negotiation is entirely prompt-driven.
+    minimum_safe_minutes: int | None = None
     # When a name+DOB lookup returns more than one candidate (same DOB,
     # similar names — the "John Smith vs Jon Smith" case), we stash the
     # candidates here and stay in IDENTIFY_PATIENT so the LLM can ask the
@@ -334,19 +341,28 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
     if name == "reschedule_appointment":
         return f"rescheduled to {value['start_at']} with {value['provider_name']}"
     if name == "suggest_specialty":
-        # Render the triage recommendation as a single readable line so the
-        # main LLM can act on it next turn. ``follow_up`` (if present) is
-        # what the main LLM should ask the caller verbatim before
-        # calling suggest_specialty again. Confidence is exposed so the
-        # main LLM can decide to ask the follow-up vs commit.
+        # Render the triage result as a single readable line so the main LLM
+        # can act on it next turn. Surfaces duration_minutes (recommended),
+        # minimum_safe_minutes (clinical floor), rationale (nudge text), and
+        # follow_up (clarifying question when confidence < 0.7). The LLM uses
+        # these to negotiate duration with the caller per the BOOK_FLOW rules:
+        # longer-than-recommended → accept; shorter-than-floor → nudge once
+        # with rationale; insists → book anyway. No code gate enforces the
+        # floor; the negotiation is entirely prompt-driven.
         specialty = value.get("specialty", "?")
         duration = value.get("duration_minutes", 30)
+        minimum = value.get("minimum_safe_minutes", 30)
         confidence = value.get("confidence", 0.0)
         follow_up = value.get("follow_up")
+        rationale = value.get("rationale", "")
         base = (
-            f"triage: specialty={specialty}, duration_minutes={duration}, "
+            f"triage: specialty={specialty}, "
+            f"duration_minutes={duration} (recommended), "
+            f"minimum_safe_minutes={minimum} (clinical floor), "
             f"confidence={confidence:.2f}"
         )
+        if rationale:
+            base = base + f"; rationale: {rationale}"
         if follow_up:
             return base + f"; ask the caller: {follow_up!r}"
         return base
@@ -1025,11 +1041,12 @@ class Dispatcher:
                 if self.memory.last_slots:
                     self._publish_slots_offered(self.memory.last_slots)
             elif name == "suggest_specialty":
-                # Remember the triage recommendation so list_availability_slots
-                # / create_appointment can default to it, and the operator
-                # console can show what the caller was routed to.
+                # Store triage results for operator-console telemetry.
+                # These are NOT injected back into subsequent tool args —
+                # the LLM passes its own negotiated duration_minutes directly.
                 self.memory.recommended_specialty = result.value.get("specialty")
                 self.memory.recommended_duration_minutes = result.value.get("duration_minutes")
+                self.memory.minimum_safe_minutes = result.value.get("minimum_safe_minutes")
             elif name == "get_upcoming_appointments":
                 self.memory.last_upcoming_appointments = result.value["appointments"]
             elif name in ("find_patient_by_phone", "find_patient_by_name_dob"):

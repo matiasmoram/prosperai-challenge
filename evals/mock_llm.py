@@ -128,6 +128,26 @@ _TRIAGE_RULES: list[tuple[str, str, int, float, str | None, bool]] = [
     ),
 ]
 
+# Rationale strings for mock triage payloads, keyed by (specialty, duration).
+# All mock rules have minimum_safe_minutes=30 (the universal floor for demo
+# purposes) — only a full intake assessment might raise it, and the mock
+# doesn't need that level of clinical fidelity.
+_MOCK_TRIAGE_RATIONALE: dict[tuple[str, int], str] = {
+    ("General Practice", 30): "Brief visit; thirty minutes is standard for this complaint.",
+    ("Psychiatrist", 60): (
+        "Sixty minutes recommended for psychiatric assessment; "
+        "thirty is the clinical minimum if time is limited."
+    ),
+    ("Therapist", 60): (
+        "Sixty minutes recommended for therapy; thirty is the minimum if time is limited."
+    ),
+    ("Dermatologist", 30): "Brief dermatology visit; thirty minutes is standard.",
+    ("Physiotherapist", 60): (
+        "Sixty minutes recommended for physiotherapy assessment; "
+        "thirty is the minimum if time is limited."
+    ),
+}
+
 
 class _MockTriageMessage:
     def __init__(self, content: str) -> None:
@@ -158,6 +178,9 @@ class _MockTriageCompletions:
                 payload = {
                     "specialty": specialty,
                     "duration_minutes": duration,
+                    # Clinical floor: always 30 in the mock (demo fidelity).
+                    "minimum_safe_minutes": 30,
+                    "rationale": _MOCK_TRIAGE_RATIONALE.get((specialty, duration), ""),
                     "confidence": conf,
                     "follow_up": follow_up if conf < 0.7 else None,
                     "red_flag": red_flag,
@@ -169,6 +192,8 @@ class _MockTriageCompletions:
                 {
                     "specialty": "General Practice",
                     "duration_minutes": 30,
+                    "minimum_safe_minutes": 30,
+                    "rationale": _MOCK_TRIAGE_RATIONALE.get(("General Practice", 30), ""),
                     "confidence": 0.6,
                     "follow_up": None,
                     "red_flag": False,
@@ -1416,6 +1441,96 @@ def _script_direct_specialty_skips_triage() -> list[LLMReply]:
     ]
 
 
+def _script_duration_soft_override() -> list[LLMReply]:
+    # New patient registers, enters BOOK_FLOW via "book" keyword, then
+    # describes anxiety → triage: Psychiatrist, recommended=60, minimum_safe=30.
+    # Caller asks for 30 min (shorter than recommended).
+    # Bot nudges ONCE with the clinical rationale. Caller insists → bot honours
+    # (soft-override — no second refusal). Books 30-min visit → END.
+    # The key: suggest_specialty fires on a BOOK_FLOW turn AFTER the FSM
+    # transition from CHOOSE_INTENT, matching the symptom_routes_to_gp pattern.
+    return [
+        _t("Hi, you've reached Prosper Health — how can I help?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="555-300-1111"),
+        _t("I don't see you — what's your full name and date of birth?"),
+        _tool("find_patient_by_name_dob", name="Morgan Lee", dob="June 6 1990"),
+        _t("I'll register Morgan Lee, born June 6th 1990, phone 555-300-1111 — right?"),
+        _tool(
+            "create_patient",
+            first_name="Morgan",
+            last_name="Lee",
+            dob="1990-06-06",
+            phone="5553001111",
+        ),
+        # CHOOSE_INTENT
+        _t("Great — book, reschedule, or cancel?"),
+        # BOOK_FLOW: caller says "book — I've been feeling anxious" →
+        # "book" triggers wants_book → FSM moves to BOOK_FLOW on this turn,
+        # then suggest_specialty fires in the inner loop on the same turn.
+        _tool("suggest_specialty", symptoms="I've been feeling really anxious and down lately"),
+        # triage Ok: Psychiatrist, recommended=60, minimum_safe=30.
+        # Bot nudges once ("60 min recommended, 30 is the minimum if tight").
+        _t(
+            "For a psychiatric assessment we usually recommend sixty minutes, "
+            "but thirty is the minimum if your schedule is tight. "
+            "Would thirty work, or can you do the full hour?"
+        ),
+        # Caller insists on 30 → bot honours without a second refusal.
+        # list with caller-negotiated duration=30
+        _tool(
+            "list_availability_slots",
+            date=_tomorrow_iso(),
+            specialty="Psychiatrist",
+            duration_minutes=30,
+        ),
+        _t("I have ten tomorrow with Dr. Chen for thirty minutes — shall I book that?"),
+        # create with the caller-negotiated 30 min → END
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=30),
+        _t("You're all set for tomorrow at ten with Dr. Chen — take care."),
+    ]
+
+
+def _script_duration_extend_accepted() -> list[LLMReply]:
+    # New patient registers, enters BOOK_FLOW, describes anxiety →
+    # triage: Psychiatrist, recommended=60. Caller asks for 90 min (LONGER
+    # than recommended) → bot accepts immediately, no nudge, no pushback.
+    # Books 90-min visit (3 consecutive 30-min slots). Regression guard for
+    # the old "90-min refused" bug.
+    return [
+        _t("Hi, you've reached Prosper Health — how can I help?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="555-300-2222"),
+        _t("I don't see you — what's your full name and date of birth?"),
+        _tool("find_patient_by_name_dob", name="Casey Park", dob="July 7 1991"),
+        _t("I'll register Casey Park, born July 7th 1991, phone 555-300-2222 — right?"),
+        _tool(
+            "create_patient",
+            first_name="Casey",
+            last_name="Park",
+            dob="1991-07-07",
+            phone="5553002222",
+        ),
+        # CHOOSE_INTENT
+        _t("Great — book, reschedule, or cancel?"),
+        # BOOK_FLOW: "book — I've been feeling anxious" → suggests_specialty fires.
+        _tool("suggest_specialty", symptoms="I've been feeling really anxious and down lately"),
+        # triage Ok: recommended=60. Caller asks for 90 → bot accepts immediately.
+        # No nudge; ask what day and list straight at 90 min.
+        _t("Absolutely — ninety minutes works great. What day suits you?"),
+        _tool(
+            "list_availability_slots",
+            date=_tomorrow_iso(),
+            specialty="Psychiatrist",
+            duration_minutes=90,
+        ),
+        _t("I have ten tomorrow with Dr. Chen for ninety minutes — shall I book that?"),
+        # create with 90 min → END
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=90),
+        _t("You're all set for tomorrow at ten with Dr. Chen — take care."),
+    ]
+
+
 def _script_route_intent_resolves_to_cancel() -> list[LLMReply]:
     # Ada has 1 appointment. Her CHOOSE_INTENT utterance is ambiguous enough
     # that the LLM uses route_intent(intent="cancel") rather than the regex.
@@ -1756,6 +1871,9 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "symptom_routes_to_gp": _script_symptom_routes_to_gp,
     "symptom_ambiguous_followup": _script_symptom_ambiguous_followup,
     "direct_specialty_skips_triage": _script_direct_specialty_skips_triage,
+    # Wave-1: duration negotiation (soft-override + extend-accepted)
+    "duration_soft_override": _script_duration_soft_override,
+    "duration_extend_accepted": _script_duration_extend_accepted,
     # GAP-5: hybrid route_intent coverage
     "route_intent_resolves_to_cancel": _script_route_intent_resolves_to_cancel,
     "route_intent_resolves_to_reschedule": _script_route_intent_resolves_to_reschedule,
@@ -2201,6 +2319,30 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "202-555-0100.",
         "I'd like to book a visit — tomorrow morning if possible.",
         "Yes, book that.",
+    ],
+    # Wave-1: duration negotiation
+    "duration_soft_override": [
+        "Hi, I'd like to book an appointment.",
+        "555-300-1111.",
+        "Morgan Lee, June 6th 1990.",
+        "Yes that's right.",
+        # "book" keyword triggers wants_book → BOOK_FLOW; symptom description
+        # follows so suggest_specialty fires on the same BOOK_FLOW inner loop.
+        "I want to book — I've been feeling really anxious and down lately.",
+        # Bot nudges: 60 min recommended, 30 is the minimum. Caller insists.
+        "I'd prefer just thirty minutes, please.",
+        "Yes, thirty minutes works — please book that.",
+    ],
+    "duration_extend_accepted": [
+        "Hi, I'd like to book an appointment.",
+        "555-300-2222.",
+        "Casey Park, July 7th 1991.",
+        "Yes that's right.",
+        # "book" keyword triggers BOOK_FLOW; symptom description follows.
+        "I want to book — I've been feeling really anxious and down lately.",
+        # Caller asks for 90 min (longer than recommended 60) → bot accepts.
+        "Actually I'd like ninety minutes if that's possible.",
+        "Yes, ninety minutes — please book that.",
     ],
     # GAP-5: hybrid route_intent coverage
     "route_intent_resolves_to_cancel": [
