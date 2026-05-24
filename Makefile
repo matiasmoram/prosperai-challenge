@@ -1,4 +1,4 @@
-.PHONY: install seed ehr bot dev test eval mock-eval trace replay replay-record eval-baseline lint type bench verify status pre-commit clean
+.PHONY: install seed ehr bot dev test eval mock-eval trace replay replay-record gen-list gen-eval eval-baseline lint type bench verify status pre-commit clean
 
 install:
 	uv sync
@@ -38,6 +38,13 @@ replay:
 	uv run python -m evals.trace_replay
 replay-record:
 	uv run python -m evals.trace_replay --record
+
+# Adversarial scenario generator (FUTURE 2.1). `gen-list` previews the
+# generated variants offline; `gen-eval` runs them against the live LLM.
+gen-list:
+	uv run python -m evals.generator --list
+gen-eval:
+	uv run python -m evals.generator
 
 eval-baseline:
 	uv run python -m evals --json evals/results/current.json --baseline evals/results/baseline.json
