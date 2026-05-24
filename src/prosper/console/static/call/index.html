@@ -77,7 +77,8 @@
       <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
         <path d="M21 15.46l-5.27-.61a1 1 0 0 0-.83.27l-2.36 2.36a15 15 0 0 1-6.59-6.59L8.31 8.5a1 1 0 0 0 .27-.83L7.97 2.4a1 1 0 0 0-1-.86H3.6a1 1 0 0 0-1 1.05A18 18 0 0 0 19.46 21.4a1 1 0 0 0 1.05-1v-3.94a1 1 0 0 0-.51-1z"/>
       </svg>
-      <span>Tap to call Sarah</span>
+      <!-- Label text is updated by JS based on current state (idle/error/ended). -->
+      <span id="dial-label">Tap to call Sarah</span>
     </button>
 
     <p class="hint" id="hint">Bot must be running on <span class="mono" id="bot-origin">http://127.0.0.1:7860</span>.</p>

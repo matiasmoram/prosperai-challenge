@@ -27,6 +27,7 @@ const els = {
   timer: document.getElementById("timer"),
   hangup: document.getElementById("btn-hangup"),
   dial: document.getElementById("btn-dial"),
+  dialLabel: document.getElementById("dial-label"),
   mute: document.getElementById("btn-mute"),
   audio: document.getElementById("remote-audio"),
   mouth: document.getElementById("mouth"),
@@ -47,6 +48,14 @@ let timerInt = null;      // setInterval for the live timer
 let timerStart = 0;
 let muted = false;
 
+// Dial button labels per state — green = fresh call, orange = retry.
+// Must be declared before setPhone() is first called (const is not hoisted).
+const DIAL_LABELS = {
+  idle: "Tap to call Sarah",
+  error: "Try again",
+  ended: "Call again",
+};
+
 setPhone("idle");
 setState("idle", "Ready");
 
@@ -61,6 +70,11 @@ window.addEventListener("beforeunload", () => hangup("nav"));
 function setPhone(stage) {
   els.phone.classList.remove("idle", "connecting", "live", "ended", "error");
   els.phone.classList.add(stage);
+  // Update dial button label to match context — avoids the mismatch of a
+  // green "Tap to call Sarah" button appearing after an error.
+  if (els.dialLabel && DIAL_LABELS[stage]) {
+    els.dialLabel.textContent = DIAL_LABELS[stage];
+  }
 }
 
 function setState(stage, label) {
