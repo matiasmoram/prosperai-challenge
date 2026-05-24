@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prosper · Front Desk</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 0; color: #1c2530; background: #f4f6f8; }
+    header { background: #0f2a43; color: #fff; padding: 10px 16px; display: flex; gap: 16px; align-items: center; }
+    header .demo { margin-left: auto; font-size: 12px; opacity: .8; }
+    .tabs button { font: inherit; border: 0; background: transparent; color: #cfe0ef; padding: 6px 10px; cursor: pointer; }
+    .tabs button.active { color: #fff; border-bottom: 2px solid #fff; }
+    main { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 49px); }
+    #list { overflow: auto; border-right: 1px solid #dde3ea; background: #fff; }
+    .row { padding: 10px 12px; border-bottom: 1px solid #eef1f4; cursor: pointer; }
+    .row:hover { background: #f0f6ff; }
+    .row .k { font-weight: 600; text-transform: capitalize; }
+    .row .meta { color: #7a8794; font-size: 12px; }
+    #detail { padding: 20px; overflow: auto; }
+    .email { background: #fff; border: 1px solid #dde3ea; border-radius: 6px; padding: 18px; max-width: 640px; }
+    .email .hd { color: #5b6b7a; font-size: 12px; border-bottom: 1px solid #eef1f4; padding-bottom: 8px; margin-bottom: 12px; }
+    .email pre { white-space: pre-wrap; font: inherit; margin: 0 0 12px; }
+    .email .meta { color: #7a8794; font-size: 12px; }
+    .cal { padding: 16px; overflow: auto; }
+    .cal .card { display: inline-block; vertical-align: top; width: 200px; margin: 6px; border: 1px solid #dde3ea; border-radius: 6px; background: #fff; padding: 10px; }
+    .cal .card .when { font-weight: 600; }
+    .cal .card .reason { color: #336; font-style: italic; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Prosper · Front Desk</strong>
+    <span class="tabs">
+      <button id="tab-mail" class="active">Mail</button>
+      <button id="tab-cal">Calendar</button>
+    </span>
+    <span class="demo">simulated — demo</span>
+  </header>
+  <main id="mail-view">
+    <div id="list"></div>
+    <div id="detail"><p style="color:#7a8794">Select a message.</p></div>
+  </main>
+  <div id="cal-view" class="cal hidden"></div>
+  <script src="/frontdesk/static/frontdesk.js"></script>
+</body>
+</html>

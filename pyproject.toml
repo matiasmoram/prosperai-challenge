@@ -41,6 +41,7 @@ select = ["I", "E", "F", "W", "B", "UP", "ARG", "SIM", "RET", "RUF", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/prosper/ehr/api.py" = ["B008"]  # FastAPI dependency-injection pattern
+"src/prosper/integrations/router.py" = ["B008"]  # FastAPI Query() in default args — same pattern
 "src/prosper/result.py" = ["UP007"]  # TypeVar with X | Y requires PEP 695 in 3.12+
 "src/prosper/ehr/db.py" = ["S101"]  # assert used as None-narrowing for `_SessionLocal`
 "src/prosper/ehr_client.py" = ["S101"]  # assert narrows Optional[AsyncClient] inside `_c()`
