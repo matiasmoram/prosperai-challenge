@@ -77,6 +77,9 @@ def test_to_json_is_single_line() -> None:
         ("transcript_turn", {"role": "user", "text": "hi", "turn_id": 1}),
         ("outcome", {"outcome": "booked", "details": {}}),
         ("latency_tick", {"phase": "llm", "duration_ms": 420.0}),
+        # turn_interrupted was missing — 9th event type, required keys {"turn_id","state"}.
+        # A regression on _REQUIRED_KEYS["turn_interrupted"] would have passed CI silently.
+        ("turn_interrupted", {"turn_id": 3, "state": "CONFIRM_BOOK"}),
     ],
 )
 def test_validate_accepts_minimum_payload_for_each_type(

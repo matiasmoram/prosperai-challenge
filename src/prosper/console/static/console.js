@@ -231,7 +231,7 @@ function renderInterrupted(ev) {
   const heard = spoken_text ? `“${escapeHtml(spoken_text)}…”` : "(nothing heard)";
   li.innerHTML = `
     <span class="text-xs text-amber-700 font-medium shrink-0 mono">⚠ interrupted</span>
-    <span class="text-amber-700 text-sm">caller cut the bot off in ${escapeHtml((state || "").toLowerCase().replace("_", " "))} — bot had said ${heard}</span>
+    <span class="text-amber-700 text-sm">caller cut the bot off in ${escapeHtml((state || "").toLowerCase().replaceAll("_", " "))} — bot had said ${heard}</span>
   `;
   appendTo("transcript-list", li, { cap: 24, scrollBottom: true });
 }
@@ -243,7 +243,6 @@ function renderLatency(ev) {
   while (arr.length > LATENCY_WINDOW) arr.shift();
   latencyHistory.set(phase, arr);
   // Update only the strip — full-resolution numbers live in raw log.
-  const sorted = [...arr].sort((a, b) => a - b);
   const llm = (latencyHistory.get("llm") || []).slice().sort((a, b) => a - b);
   const tool = [...latencyHistory.entries()]
     .filter(([k]) => k.startsWith("tool:"))
