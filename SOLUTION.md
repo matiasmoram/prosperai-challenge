@@ -431,8 +431,7 @@ Active work the main branch does not yet reflect:
   fallback. Goal: deterministic specialty selection and a separate
   prompt-cache lane for the classifier. Where it lands (new module,
   new state, new tool, or in-line in BOOK_FLOW) is still being
-  designed — see `docs/plans/` for the current planning notes if
-  present.
+  designed.
 - **Interruption design.** `docs/research/interruption_design.md` —
   research notes on how to handle the caller talking over the bot's
   TTS. Not yet wired.
@@ -563,7 +562,6 @@ scan, operator console event stream.
 - `docs/research/` — codebase-audit, security-audit, prod-readiness,
   reliability, eval-depth, latency-advanced, perf-wave2, interruption
   design, speculative race.
-- `docs/plans/` — in-flight implementation plans (see §14).
 - `docs/superpowers/specs/2026-05-19-prosper-challenge-design.md` —
   full deliberation trail (LLM council verdict per decision).
 - `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, `ERRORS.md`,

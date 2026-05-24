@@ -6,8 +6,7 @@
 
 ## Context
 
-Two gaps surfaced when comparing this agent to peer submissions
-(`OTHER_SOLUTIONS_REPORT.md`):
+Two gaps surfaced when comparing this agent to peer submissions:
 
 1. **Callers don't always know which provider they need.** A real caller
    says "my stomach's been killing me, what do I do?" — not "book me a

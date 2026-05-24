@@ -49,3 +49,7 @@ data/
 # Eval artifacts
 evals/results/
 coverage.xml
+
+# Debug artifacts (playwright smoke + loose root screenshots)
+.playwright-mcp/
+/*.png

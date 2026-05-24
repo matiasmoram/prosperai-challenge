@@ -63,6 +63,7 @@ Voice agent (Pipecat + ElevenLabs STT/TTS + OpenAI LLM) for a US clinic, busines
 8. **`prompts.py`** — ≤ 1 KB per `TASK_MESSAGES` entry; persona preamble stays long for cache benefit. All caller-audible strings stay in this file.
 9. **Every public function in `src/prosper/`** has a type annotation and one-line docstring. `mypy --strict` is enforced via `make verify` and `pre-commit`.
 10. **Don't bypass `pre-commit`.** Ruff + format + `mypy --strict` + tests run on every commit; `--no-verify` is not an out.
+11. **`SOLUTION.md` is the live ledger.** Anything shipped, removed, or moved out of in-flight must be reflected in `SOLUTION.md` in the *same change* — update the relevant section and the §14 *In-flight work* list (drop finished items, add new ones). Code change without the matching `SOLUTION.md` edit is incomplete. It is the canonical "what exists today"; if it lies, the next agent builds on a lie.
 
 ## Gotchas
 
@@ -71,14 +72,29 @@ Voice agent (Pipecat + ElevenLabs STT/TTS + OpenAI LLM) for a US clinic, busines
 - **409 from EHR is terminal**, not retryable: slot taken or appointment not in scheduled state. Don't loop tenacity over it.
 - **`other solutions/`** is a read-only reference dump from other candidates. Do not edit, do not import from.
 
-## Where to look first
+## Doc maintenance — when to CONSULT each, when to UPDATE each
 
-- **`SOLUTION.md` — start here.** Section-by-section walkthrough of every part of the codebase as it stands today, plus §14 *In-flight work* for unfinished features.
-- `docs/architecture.md` — process topology + FSM graph.
-- `docs/adr/001..004` — hybrid FSM + whitelist, separate EHR process, paired state+judge eval, operator console event stream.
-- `CONTRIBUTING.md` — recipes for adding a tool / state / scenario.
-- `docs/glossary.md` — TTFT, dispatcher, FSM, judge.
-- `SECURITY.md` — SSRF guard on `PROSPER_EHR_URL`, PII redaction, threat model.
-- `ERRORS.md` — honest snapshot of known live-eval failures.
-- `FUTURE.md` — ranked next features.
-- `docs/plans/`, `docs/research/` — active planning + research notes (may include WIP from other agents — read but don't edit).
+Docs rot silently and the next agent builds on the lie. Every doc below has an
+explicit trigger for reading it and for writing it. **The update column is not
+optional** — if your change matches an update trigger, editing that doc is part
+of the same change, exactly like rule 11 for `SOLUTION.md`. A code change that
+leaves its doc stale is incomplete.
+
+| Doc | CONSULT when… | UPDATE when… |
+|---|---|---|
+| **`SOLUTION.md`** ← start here | unsure how any feature is wired; before grepping; checking shipped-vs-in-flight (§14) | **any** feature shipped / removed / moved out of in-flight (rule 11) — same change, incl. §14 list |
+| **`CLAUDE.md`** (this file) | start of every session; before any substantial change | a hard rule, architecture invariant, gotcha, or this doc-policy itself changes |
+| `FRONTS.md` | before dispatching parallel agents — ownership map + parallel-safety matrix | a work-front's file ownership or a shared seam (`tools.py`/`flows.py`/console) changes |
+| `CONTRIBUTING.md` | adding a tool / state / scenario — follow the recipe | the recipe changes (new required step, renamed make target) |
+| `README.md` | first clone; how to run; env-var list | run steps, ports, env vars, or the one-line pitch change |
+| `CHANGELOG.md` | want the forward narrative of how the repo got here | **every commit** — append the `hash — what + why` line under the right phase |
+| `FUTURE.md` | picking next work; checking if a feature is planned vs done | a listed feature ships (remove it) or a new one is proposed (add, ranked) |
+| `ERRORS.md` | before claiming something works; triaging a failure | offline: after `make verify`+`make mock-eval` (refresh counts+date). live: after `make eval` (add/clear failures). **Never invent a "fixed" — verify first.** |
+| `SECURITY.md` | touching `PROSPER_EHR_URL`, PII redaction, auth, input validation | the threat model or a control (SSRF guard, redaction, DoS cap) changes |
+| `docs/architecture.md` | need process topology or FSM graph | a process, port, or FSM state/transition is added/removed |
+| `docs/adr/NNN-*.md` | understanding *why* a load-bearing decision was made | a **new** load-bearing decision is made → new ADR (never rewrite an Accepted one; supersede it) |
+| `docs/glossary.md` | hit an unfamiliar repo term (TTFT, dispatcher, judge…) | a new repo-specific term enters the code/docs |
+| `docs/bench-results.md` | comparing perf across waves | after `make bench` on a perf-relevant change — append a dated snapshot |
+| `docs/testing/ADVERSARIAL_FINDINGS.md` | reviewing the adversarial threat surface | a new adversarial finding (F-NNN) is found or fixed |
+| `docs/interview-notes.md` | prepping talking points | a design answer changes — **private prep, not load-bearing** |
+| `docs/research/`, `docs/superpowers/specs/` | mining the reasoning behind a feature | **read-only history** — don't edit; may hold other agents' WIP. A finished spec's *outcome* belongs in `SOLUTION.md`, not here |

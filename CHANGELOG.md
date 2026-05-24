@@ -1,208 +1,136 @@
 # Changelog
 
-All notable changes to this submission, reverse-chronological. Versions are
-loose semver tags grouped by delivery wave rather than published artifacts —
-this repo is a single interview submission, not a released package.
+Chronological narrative of every change made to this repo, oldest → newest,
+derived from `git log`. Forward-reading and grouped by delivery wave; each
+entry is `commit-hash — what changed, and why`. Dates are
+`America/New_York` from the commit metadata.
 
-The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
+**Span:** 2026-05-19 → 2026-05-24 · 59 commits · 1 author.
 
-## [0.1.3] — 2026-05-20 — Offline eval, dev-loop polish, repo hygiene
+---
 
-### Added
+## Phase 0 — Design & planning (2026-05-19)
 
-- **Mock LLM eval mode** — `evals/mock_llm.py` (~700 LOC deterministic
-  mock) + `make mock-eval` target. Runs all 16 scenarios with no
-  `OPENAI_API_KEY` in ~5 s; `test_scenario_mock` is parametrised over
-  every scenario so the suite gates on a real run on every push.
-- **Live-eval gating on `PROSPER_EVAL_LIVE=1`** — previously a missing
-  quota silently passed; the live suite now exits with code 2 unless
-  both `PROSPER_EVAL_LIVE=1` and `OPENAI_API_KEY` are set.
-- **5 more adversarial / mixed scenarios** — `multi_turn_drift_hallucinated_slot`,
-  `phone_format_chaos`, `patient_correction_mid_register`,
-  `goodbye_mid_confirmation`, `insurance_question_redirect` (11 → 16).
-- **Parallel eval runner** — `python -m evals --concurrency N` (default 4)
-  with per-scenario isolated SQLite engine so transactional state never
-  crosses scenarios.
-- **`make verify`** — one-shot pre-submit gate: lint → format → mypy →
-  pytest. Stops on first failure.
-- **`make status`** + `scripts/status.py` — repo health snapshot (test
-  count, coverage, dirty files, lint status).
-- **`make mock-eval`** — see above.
-- **Repo hygiene**: `CONTRIBUTING.md` (how to add scenarios / tools /
-  states), `SECURITY.md` (SSRF guard, PII redaction, threat model),
-  `CHANGELOG.md` (this file), `.editorconfig`, `.gitattributes`.
-- **Docs expansion**: `docs/glossary.md` (terminology cheat-sheet),
-  `docs/architecture.md` (process + FSM diagrams), `docs/interview-notes.md`
-  (candidate prep + decision evidence), three ADRs under `docs/adr/`,
-  `docs/bench-results.md` (pinned bench snapshots).
+No shipped code; spec and plan only.
 
-### Changed
+- `c47d9a6` — initial commit.
+- `cd68778` — design spec for the Prosper challenge submission.
+- `b16021a` — spec v2; integrated ideas from a cross-survey of approaches.
+- `d8f526a` — implementation plan.
 
-- `SOLUTION.md` reconciled with the new file map, eval-suite section,
-  quality-gates row (149 tests + 17 skipped, 91% coverage on
-  `src/prosper`, 97% excluding `bot.py`), and trimmed future-work list.
-- `README.md` quickstart now leads with `make mock-eval` as the zero-cost
-  way to verify the suite; `make` table grew `mock-eval`, `verify`,
-  `status` rows.
+## Phase 1 — Initial vertical slice → `0.1.0` (2026-05-20)
 
-### Fixed
+First end-to-end slice: pipecat voice loop → FSM dispatcher → FastAPI EHR
+over HTTP, with a deterministic eval suite (paired state-assertion + LLM
+judge).
 
-- Scenario table in `SOLUTION.md` now lists all 16 scenarios (was 11);
-  test count in `README.md` corrected from 125 → 149.
+- `4d27821` — repo scaffold + deps (FastAPI / SQLAlchemy / httpx / test).
+- `c580e50` — EHR SQLAlchemy models + repository.
+- `005b9be` — EHR FastAPI app, Pydantic schemas, DB factory, seed script.
+- `f857cde` — `Result[Ok, Err]` type, async `EHRClient`, tool handlers.
+- `7c4743c` — FSM dispatcher + per-state prompts + flows + OpenAI adapter + timing.
+- `a48c20f` — eval suite: paired state+judge scenarios, `HeadlessFlow` runner, CLI.
+- `0f67a62` — pipecat bot pipeline driven by the dispatcher.
+- `899793b` — CLAUDE.md hard rules, pre-commit, GitHub Actions CI, audio-smoke skeleton.
+- `0a913d7` — first reviewer-facing `SOLUTION.md` + `README.md`.
 
-## [0.1.2] — 2026-05-20 — Security, coverage, parallel eval
+## Phase 2 — Performance + reliability wave → `0.1.1` (2026-05-20)
 
-### Added
+- `1859eea` — TTFT instrumentation; surface `cached_prompt_tokens` so prompt-cache regressions show up immediately.
+- `9348756` — fix audit bugs A1–A4 (pagination off-by-one, stale cancel-flow memory key, wrong error-code mapping, duplicate state-log entry).
+- `99b203e` — reliability layer (retry-with-jitter, primary→fallback model swap) + ElevenLabs Flash v2.5 for STT/TTS (~150 ms median TTFT cut).
+- `b99485a` — 5 adversarial scenarios + `hallucinated_confirmation` regex (catch "you're booked" before `create_appointment` fires).
+- `df5dc61` — filler speech in tool-firing states to mask EHR latency without burning tokens.
+- `8958fdd` — faster tests + fix N+1 query in `list_available_slots`.
+- `d089724` — re-runnable EHR bench CLI (`scripts/bench.py`).
+- `36c50b1` — Dockerfile/`.dockerignore` + `scripts/README.md`.
+- `961330f` — prod-readiness fixes (subagent #1).
+- `2059e28` — mypy `--strict` gate, expanded ruff rules, ADRs, architecture doc, interview prep.
+- `ac415e5` — `make bench` target.
+- `33f0a24` — pinned bench snapshot (`docs/bench-results.md`) for cross-wave regression diffs.
+- `a6ef2e9` — SQLite WAL + `expire_on_commit=False` + lazy VAD import + env fail-fast guard.
 
-- **SSRF guard** at startup: `PROSPER_EHR_URL` must be `http`/`https` with a
-  hostname or the bot exits before importing pipecat (`src/prosper/bot.py`).
-- **PII redaction layer** for tool results destined for the LLM — UUIDs are
-  replaced with human-readable summaries so leaked transcripts are cheaper to
-  contain (`src/prosper/dispatcher.py::_redact_for_llm`,
-  `src/prosper/observability/redact.py`).
-- **DoS caps** on tool result sizes and EHR pagination to prevent a
-  pathological dataset from exploding the context window.
-- **+79 coverage tests** across dispatcher gaps, tool errors, EHR client
-  failure modes, redaction, and timing — repo coverage now 91 %.
-- **Parallel eval runner**: `python -m evals` accepts `--concurrency N` and
-  runs scenarios in a thread pool, cutting full-suite wall-clock ~3×.
-- **5 new adversarial scenarios** in `evals/scenarios.py` (hallucinated
-  confirmation, mid-call intent switch, ambiguous DOB, no slots, repeated
-  no-match).
-- **UX polish**: clearer copy in CONFIRM_BOOK / CONFIRM_CANCEL,
-  filler-speech consistency across all tool-firing states.
-- **CI matrix** Python 3.10 + 3.11, coverage upload, bench-smoke job
-  (`.github/workflows/`).
-- **`env.example`** documents `PROSPER_BOT_ENTRYPOINT` and other vars.
+## Phase 3 — Security, coverage, parallel eval → `0.1.2` (2026-05-20)
 
-### Changed
+- `45ba2d5` — SSRF guard on `PROSPER_EHR_URL`, PII redaction layer, DoS caps, +79 coverage tests (coverage → 91%).
+- `3850fb5` — wave 3: parallel-eval refactor, +5 scenarios, UX polish, SOLUTION.md v4.
+- `2851424` — fix: `--concurrency` arg was parsed but never threaded into `_run_all`.
+- `bf8727a` — `env.example` documents `PROSPER_BOT_ENTRYPOINT`; README updates; gitignore `coverage.xml`.
+- `ed45435` — CI matrix py3.10/3.11, coverage upload, bench-smoke job, hardening.
 
-- `SOLUTION.md` rewritten to v4 reflecting the security wave.
-- README updated with the new env vars and the eval CLI.
+## Phase 4 — Offline eval + repo hygiene → `0.1.3` (2026-05-20)
 
-### Fixed
+- `0086913` — `CONTRIBUTING.md`, `docs/glossary.md`, `SECURITY.md`, `CHANGELOG.md`, `.editorconfig`.
+- `a2ef125` — `make verify` = lint + format + mypy + tests in one shot.
+- `e2f6435` — `.gitattributes` (`text=auto eol=lf`) to stop CRLF warning storm on Windows.
+- `c1e5b26` — `scripts/status.py` + `make status` repo-health snapshot.
+- `6e65439` — `--mock-llm` offline eval mode + `PROSPER_EVAL_LIVE` gate.
+- `861f616` — `make mock-eval`: 16 scenarios offline, no API key.
+- `02728b7` — SOLUTION.md + README.md + CHANGELOG.md reconciliation (v5).
 
-- `--concurrency` arg was parsed but not threaded into `_run_all`.
+## Phase 5 — Multi-subagent hardening sweep (2026-05-20)
 
-### Commits
+Parallel subagent waves: bug-fuzzing, observability, code quality, prompt
+hardening, concurrency review.
 
-- `ed45435` ci: matrix py3.10/3.11, coverage upload, bench-smoke job, hardening
-- `bf8727a` docs+env: env.example docs PROSPER_BOT_ENTRYPOINT, README updates, gitignore coverage.xml
-- `2851424` fix: --concurrency arg threaded into _run_all call
-- `3850fb5` feat: wave 3 — parallel-eval refactor, +5 scenarios, UX polish, SOLUTION.md v4
-- `45ba2d5` sec+test: SSRF guard, PII redaction, DoS caps, +79 coverage tests
+- `4ef04f4` — remove transient fuzz-probe scripts left by a subagent.
+- `7f090ee` — multi-wave: 5 real bug-fuzz fixes (kwarg filtering, `_parse_dob` `fuzzy=False` data-corruption fix, idempotent cancel, `normalize_phone`/`normalize_name` edge cases) + observability (request-id propagation, `/metrics`, per-session/turn ids) + test-fixture dedup.
+- `02ccfbc` — prompt hardening (adversarial-safety persona block, refusal patterns) + mutation-killing tests.
+- `2297d9c` — async/concurrency review: 2 real bugs fixed (silent `_llm_turn` dead-air; `asyncio.gather` swallowing sibling-scenario crashes) + 6 paths verified-safe + regression tests.
+- `d2450a0` — code-quality sweep: docstrings, dead-code removal.
 
-## [0.1.1] — 2026-05-20 — Performance wave + reliability
+## Phase 6 — Live-eval truth pass (2026-05-20)
 
-### Added
+Running against real OpenAI surfaced bugs the mock couldn't.
 
-- **TTFT instrumentation** end-to-end with `cached_prompt_tokens` surfaced
-  in transcript logs so prompt-cache regressions show up immediately
-  (`src/prosper/observability/timing.py`).
-- **Reliability layer**: retry-with-jitter on transient EHR errors, primary
-  → fallback model swap (`PROSPER_BOT_FALLBACK_MODEL`), structured error
-  taxonomy via `Result[Ok, Err]`.
-- **ElevenLabs Flash v2.5** for STT/TTS, shaving ~150 ms median TTFT.
-- **Filler speech** ("one moment", "let me check") injected before every
-  tool-firing state to mask EHR round-trip latency without burning LLM
-  tokens.
-- **Adversarial eval scenarios** (×5) + a `hallucinated_confirmation` regex
-  catching the LLM saying "you're booked" before `create_appointment` fired.
-- **Re-runnable bench CLI** `scripts/bench.py` + `make bench` target,
-  pinned snapshot in `docs/bench-results.md` for cross-wave regression
-  diffs.
-- **mypy --strict** gate, expanded ruff rule set, three ADRs documenting
-  hybrid FSM / separate EHR process / paired state+judge eval,
-  `docs/architecture.md`, `docs/interview-notes.md`.
-- **Dockerfile** + `.dockerignore` + `scripts/README.md` for reproducible
-  packaging.
+- `4db270b` — **real bug from live eval:** OpenAI tool-call schema compliance — assistant messages now carry `tool_calls`, tool responses use `tool_call_id`; missing-field calls return structured `Err` instead of crashing the turn.
+- `18bbe28` — `ERRORS.md`: honest snapshot of live-eval failures (1 crash + 13 scenario state-assertion mismatches, with root causes).
 
-### Changed
+## Phase 7 — Id contract fix + naturalness + parallel features (2026-05-23)
 
-- SQLite pragmas: WAL mode + `expire_on_commit=False` for ~2× speedup on
-  the EHR endpoints under the eval suite.
-- VAD (silero) is now lazy-imported behind the env fail-fast guard,
-  removing it from `--help` startup cost.
-- `list_available_slots` N+1 query collapsed into a single join.
-- Tests run ~30 % faster after session-scoped EHR fixture + in-memory DB.
+- `30bda0f` — **core live-booking fix:** `_redact_for_llm` was stripping `slot_id`s while the prompt told the LLM to remember them → hallucinated UUIDs → canned fallback. Introduced bracketed `[1]`/`[2]` handles + `_resolve_memory_handles`; history-orphan pruning (OpenAI 400 fix); abort edges on "no" at confirm states; menu-phrasing guard; no-match → REGISTER routing. Also bundles the operator console, specialty filter, RESCHEDULE_FLOW, FUTURE.md, ADR-004. CLAUDE.md hard rules 7→10. Mock-eval 18/18.
+- `3266b02` — auto-migrate `providers.specialty` on boot (idempotent `ALTER TABLE`) so a stale `ehr.db` no longer 500s; seed docstring accuracy.
+- `ed7eeb7` — call-style WebRTC frontend at `:7861/call` (avatar + audio-driven mouth); in-flight symptom-triage router, observers, adversarial test suite, EHR repo hardening. 337 tests green.
 
-### Fixed
+## Phase 8 — Eval coverage expansion (2026-05-23)
 
-- A1–A4 from the codebase-audit subagent (off-by-one in pagination, stale
-  memory key in cancel flow, incorrect error code mapping, duplicate state
-  log entry).
+Driving mock-scenario coverage of every state, tool, and `Err`-code path.
 
-### Commits
+- `29f6b04` — +26 mock scenarios; failure-mode coverage 18 → 44.
+- `0a02922` — cover `date_unparseable` Err recovery (→ 50).
+- `7e0e2b7` — cover `no_consecutive_slots` + `invalid_duration` Err paths (→ 52).
+- `fa13f75` — cover `patient_exists` Err (duplicate-phone registration) (→ 53).
+- `5a6540e` — multi-turn memory: re-list invalidates stale slot handle (→ 54).
+- `8456f4e` — `medical_emergency` red-flag: emergency never becomes a booking (→ 55).
 
-- `a6ef2e9` perf: SQLite WAL + expire_on_commit=False + lazy VAD + env fail-fast
-- `33f0a24` docs: bench-results.md — pinned snapshot of EHR endpoint p50s for regression diffs
-- `ac415e5` build: make bench target for scripts/bench.py
-- `2059e28` build+docs: mypy strict gate, expanded ruff rules, ADRs, architecture, interview prep
-- `961330f` fix: prod-readiness wave (subagent #1)
-- `36c50b1` build: .dockerignore + scripts/README.md
-- `d089724` test: scripts/bench.py — re-runnable EHR endpoint benchmark CLI
-- `8958fdd` perf: faster tests + fix N+1 in list_available_slots
-- `df5dc61` feat: filler speech in tool-firing states + SOLUTION.md v3
-- `b99485a` feat(eval): 5 adversarial scenarios + hallucinated-confirmation regex
-- `99b203e` feat: reliability layer (README bonus #2) + ElevenLabs Flash v2.5
-- `9348756` fix: audit bugs A1-A4 from codebase-audit subagent
-- `1859eea` feat: TTFT instrumentation + cached_prompt_tokens surfacing
+## Phase 9 — FUTURE-roadmap features (2026-05-24)
 
-## [0.1.0] — 2026-05-20 — Initial submission
+Working through ranked items in `FUTURE.md`.
 
-The first complete vertical slice: a pipecat voice loop driven by an FSM
-dispatcher that calls a FastAPI EHR over HTTP, with a deterministic eval
-suite that pairs final-state assertion with an LLM judge.
+- `44187a8` — EHR input-validation hardening on request schemas (OWASP A03): phone char-set/length guard, DOB plausibility bounds, HTML/script-tag stripping on free text. +15 tests.
+- `6f1d6e8` — `--trace` dispatcher trace viewer (FUTURE 6.1): PII-redacted per-turn FSM/tool/transition table from the existing transcript.
+- `bfb3a70` — golden-trace replay (FUTURE 2.3): byte-for-byte ordered FSM-transition + tool-outcome fingerprint regression guard; catches reordering/drops a delta-only check misses.
+- `831b99a` — adversarial scenario generator (FUTURE 2.1): composable `PerturbationRule` transforms produce adversarial variants from a base scenario; live-only by design.
+- `4a2cda0` — scenario-from-transcript scaffolder (FUTURE 6.2): `scripts/scaffold_scenario.py` turns a `USER:`/`BOT:` transcript into a paste-ready `Scenario` stub with `# TODO` markers for un-inferable fields.
 
-### Added
+---
 
-- **EHR service** — FastAPI app, SQLAlchemy models, Pydantic schemas, DB
-  factory, seed script with 3 patients + provider slots
-  (`src/prosper/ehr/`).
-- **Async EHR client** with typed `Result[Ok, Err]` returns
-  (`src/prosper/ehr_client.py`, `src/prosper/result.py`).
-- **Tool handlers** (`find_patient_by_phone`, `find_patient_by_name_dob`,
-  `create_patient`, `list_availability_slots`,
-  `get_upcoming_appointments`, `create_appointment`, `cancel_appointment`)
-  with shared `HANDLERS` / `TOOL_SCHEMAS` registries
-  (`src/prosper/tools.py`).
-- **FSM dispatcher** — per-state tool whitelist, transition table driven
-  by tool result codes + short-circuit keywords, conversational memory
-  (`src/prosper/dispatcher.py`, `src/prosper/flows.py`).
-- **Per-state prompts** — `CLINIC_PERSONA` preamble (~1100 tokens, cached)
-  + task messages ≤ 1 KB each (`src/prosper/prompts.py`).
-- **OpenAI adapter** with tool-call streaming
-  (`src/prosper/llm.py`).
-- **pipecat bot** — STT → dispatcher → TTS pipeline
-  (`src/prosper/bot.py`, `bot.py`).
-- **Eval suite** — paired state-assertion + LLM-judge scenarios,
-  `HeadlessFlow` runner, CLI at `python -m evals`
-  (`evals/scenarios.py`, `evals/runner.py`, `evals/__main__.py`).
-- **CI** — GitHub Actions running ruff + pytest on every push, pre-commit
-  hook config.
-- `SOLUTION.md` + `README.md` reviewer-facing docs.
-- `CLAUDE.md` with hard rules for LLM contributors.
-- Audio smoke-test skeleton (`evals/audio_smoke/`).
+## Trajectory at a glance
 
-### Commits
+| Phase | Theme | Tests / scenarios | Tag |
+|---|---|---|---|
+| 0 | Design + plan | — | `0.0.x` |
+| 1 | Vertical slice | first eval suite | `0.1.0` |
+| 2 | Perf + reliability | ~130 | `0.1.1` |
+| 3 | Security + parallel eval | ~209, 91% cov | `0.1.2` |
+| 4 | Offline eval + hygiene | 149 + mock 16/16 | `0.1.3` |
+| 5 | Subagent hardening | 155→186 | — |
+| 6 | Live-eval truth pass | 186 | — |
+| 7 | Id-contract + naturalness | 337, mock 18/18 | — |
+| 8 | Eval coverage | mock 18→55 | — |
+| 9 | FUTURE roadmap | mock 55/55 | — |
 
-- `0a913d7` docs: SOLUTION.md + README.md
-- `899793b` build: CLAUDE.md hard rules, pre-commit, GH Actions CI, audio smoke skel
-- `0f67a62` feat(bot): pipecat pipeline driven by dispatcher
-- `a48c20f` feat(eval): paired state+judge scenario suite + HeadlessFlow runner + CLI
-- `7c4743c` feat: FSM dispatcher + prompts + flows + OpenAI adapter + timing
-- `f857cde` feat: Result[Ok,Err] + async EHR client + tool handlers
-- `005b9be` feat(ehr): FastAPI app + Pydantic schemas + DB factory + seed script
-- `c580e50` feat(ehr): SQLAlchemy models + repository
-- `4d27821` build: add FastAPI/SQLAlchemy/httpx/test deps + src/prosper scaffold
-
-## [0.0.x] — 2026-05-19 — Pre-implementation
-
-Design and planning notes only; no shipped code.
-
-### Commits
-
-- `d8f526a` docs: implementation plan for prosper challenge
-- `b16021a` docs: spec v2 — integrate ideas from cross-survey
-- `cd68778` docs: design spec for prosper challenge submission
-- `c47d9a6` initial commit
+**Recurring discipline across phases:** every change gated by `make verify`
+(ruff + format + mypy `--strict` + pytest); `make mock-eval` after any
+dispatcher/flows/tools change; root-cause fixes over symptom patches; tools
+return `Result[Ok, Err]` with `Err.code` as public eval contract.
