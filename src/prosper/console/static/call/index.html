@@ -57,21 +57,18 @@
     </div>
 
     <div class="controls">
-      <button class="ctrl mute" id="btn-mute" title="Mute mic" disabled>
+      <button class="ctrl mute" id="btn-mute"
+              aria-label="Mute microphone" aria-pressed="false"
+              title="Mute mic" disabled>
         <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
           <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>
         </svg>
       </button>
-      <button class="ctrl hangup" id="btn-hangup" title="End call">
+      <button class="ctrl hangup" id="btn-hangup"
+              aria-label="End call" title="End call">
         <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
           <path d="M21 15.46l-5.27-.61a1 1 0 0 0-.83.27l-2.36 2.36a15 15 0 0 1-6.59-6.59L8.31 8.5a1 1 0 0 0 .27-.83L7.97 2.4a1 1 0 0 0-1-.86H3.6a1 1 0 0 0-1 1.05A18 18 0 0 0 19.46 21.4a1 1 0 0 0 1.05-1v-3.94a1 1 0 0 0-.51-1z" transform="rotate(135 12 12)"/>
-        </svg>
-      </button>
-      <button class="ctrl speaker" id="btn-speaker" title="Speaker on/off" disabled>
-        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
-          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-          <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
         </svg>
       </button>
     </div>

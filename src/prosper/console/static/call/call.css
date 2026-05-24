@@ -62,6 +62,9 @@ html, body {
 .state-pill.connecting .dot { background: #fbbf24; animation: blink 1s ease-in-out infinite; }
 .state-pill.live .dot { background: #10b981; box-shadow: 0 0 0 4px rgba(16,185,129,0.18); }
 .state-pill.ended .dot { background: #ef4444; }
+/* error = distinct from ended: orange dot so "failed to connect" reads differently
+   from "call ended cleanly". */
+.state-pill.error .dot { background: #f97316; animation: blink 1.4s ease-in-out infinite; }
 
 @keyframes blink { 50% { opacity: 0.4 } }
 
@@ -90,9 +93,20 @@ html, body {
 .avatar-wrap.live .ring.delay-1 { animation-delay: 0.8s; }
 .avatar-wrap.live .ring.delay-2 { animation-delay: 1.6s; }
 
+/* Connecting phase: slower, dimmer sweep so the avatar isn't frozen while
+   ICE gathering + the /api/offer round-trip are in progress (~1–3 s). */
+.avatar-wrap.connecting .ring { animation: pulse-dim 3.2s ease-out infinite; }
+.avatar-wrap.connecting .ring.delay-1 { animation-delay: 1.05s; }
+.avatar-wrap.connecting .ring.delay-2 { animation-delay: 2.1s; }
+
 @keyframes pulse {
   0% { transform: scale(0.92); opacity: 0.55; }
   100% { transform: scale(1.5); opacity: 0; }
+}
+
+@keyframes pulse-dim {
+  0% { transform: scale(0.92); opacity: 0.28; }
+  100% { transform: scale(1.38); opacity: 0; }
 }
 
 .avatar {
@@ -175,13 +189,29 @@ html, body {
 .phone.idle .dial-btn { display: inline-flex; }
 .phone.idle .controls { display: none; }
 
+/* Error state: show the dial button (lets user retry) but hide call controls. */
+.phone.error .dial-btn { display: inline-flex; }
+.phone.error .controls { display: none; }
+
 .hint {
   font-size: 11px;
   color: rgba(255,255,255,0.4);
   text-align: center;
   margin: 0;
   letter-spacing: 0.2px;
+  transition: opacity 300ms ease, font-size 200ms ease, color 200ms ease;
 }
+
+/* Error hint is prominent — users need to act on it (e.g. grant mic access). */
+.phone.error .hint {
+  font-size: 13px;
+  color: rgba(251,146,60,0.9);
+}
+
+/* During a live call the hint ("Bot must be running on …") is noise;
+   fade it out so the avatar and controls dominate. */
+.phone.live .hint { opacity: 0; }
+
 .mono { font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; }
 
 #remote-audio { display: none; }

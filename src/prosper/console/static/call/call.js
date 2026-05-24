@@ -28,7 +28,6 @@ const els = {
   hangup: document.getElementById("btn-hangup"),
   dial: document.getElementById("btn-dial"),
   mute: document.getElementById("btn-mute"),
-  speaker: document.getElementById("btn-speaker"),
   audio: document.getElementById("remote-audio"),
   mouth: document.getElementById("mouth"),
   avatarWrap: document.getElementById("avatar-wrap"),
@@ -60,18 +59,23 @@ window.addEventListener("beforeunload", () => hangup("nav"));
 // ----------------------------------------------------------------- state
 
 function setPhone(stage) {
-  els.phone.classList.remove("idle", "connecting", "live", "ended");
+  els.phone.classList.remove("idle", "connecting", "live", "ended", "error");
   els.phone.classList.add(stage);
 }
 
 function setState(stage, label) {
-  els.pill.classList.remove("connecting", "live", "ended");
+  els.pill.classList.remove("connecting", "live", "ended", "error");
   if (stage !== "idle") els.pill.classList.add(stage);
   els.pillText.textContent = label;
+  // Avatar rings animate in both connecting (slow sweep) and live (pulse).
   if (stage === "live") {
+    els.avatarWrap.classList.remove("connecting");
     els.avatarWrap.classList.add("live");
-  } else {
+  } else if (stage === "connecting") {
     els.avatarWrap.classList.remove("live");
+    els.avatarWrap.classList.add("connecting");
+  } else {
+    els.avatarWrap.classList.remove("live", "connecting");
   }
 }
 
@@ -112,7 +116,7 @@ async function startCall() {
       autoGainControl: true,
     }, video: false });
   } catch (e) {
-    failed(`Mic permission denied: ${e.message}`);
+    failed(`Microphone access denied. Allow mic access in your browser settings, then try again.`, true);
     return;
   }
   els.hint.textContent = "Calling Sarah…";
@@ -210,13 +214,25 @@ async function waitForIce(pc, timeoutMs) {
   });
 }
 
-function failed(reason) {
+// isMicError: mic-permission denials need the user to act (open settings,
+// grant permission) — auto-dismissing the message before they can read it
+// gives no path forward. Network/bot errors are transient so they still
+// auto-reset to let the user retry.
+function failed(reason, isMicError = false) {
   els.hint.textContent = reason;
-  setState("ended", "Failed");
-  setPhone("ended");
+  setState("error", "Failed");
+  setPhone("error");
   cleanup();
-  // Allow another attempt.
-  setTimeout(() => { setPhone("idle"); setState("idle", "Ready"); els.hint.textContent = `Bot must be running on ${BOT_ORIGIN}.`; }, 4000);
+  if (!isMicError) {
+    // Allow another attempt after a readable pause.
+    setTimeout(() => {
+      setPhone("idle");
+      setState("idle", "Ready");
+      els.hint.textContent = `Bot must be running on ${BOT_ORIGIN}.`;
+    }, 8000);
+  }
+  // Mic-permission errors stay until the user acts — clicking "Tap to call"
+  // again will re-request permission (or succeed if they've granted it).
 }
 
 function hangup(_origin) {
@@ -224,7 +240,14 @@ function hangup(_origin) {
   setState("ended", "Call ended");
   setPhone("ended");
   cleanup();
-  setTimeout(() => { setPhone("idle"); setState("idle", "Ready"); els.timer.textContent = "00:00"; els.hint.textContent = `Bot must be running on ${BOT_ORIGIN}.`; }, 1500);
+  // 3 s lets the operator read the final timer and "Call ended" pill before
+  // the UI resets to idle. 1.5 s was too brief to register.
+  setTimeout(() => {
+    setPhone("idle");
+    setState("idle", "Ready");
+    els.timer.textContent = "00:00";
+    els.hint.textContent = `Bot must be running on ${BOT_ORIGIN}.`;
+  }, 3000);
 }
 
 function cleanup() {
@@ -235,6 +258,7 @@ function cleanup() {
   if (pc) { try { pc.close(); } catch (_) {} pc = null; }
   if (micStream) { for (const t of micStream.getTracks()) t.stop(); micStream = null; }
   els.mute.disabled = true;
+  els.mute.setAttribute("aria-pressed", "false");
   if (els.mouth) els.mouth.style.setProperty("--mouth-open", "0px");
   muted = false;
   els.mute.classList.remove("active");
@@ -245,6 +269,7 @@ function toggleMute() {
   muted = !muted;
   for (const t of micStream.getAudioTracks()) t.enabled = !muted;
   els.mute.classList.toggle("active", muted);
+  els.mute.setAttribute("aria-pressed", String(muted));
 }
 
 // ------------------------------------------------------------ mouth driver
