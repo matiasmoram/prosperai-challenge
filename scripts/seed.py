@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from prosper.ehr.db import get_engine, init_db
 from prosper.ehr.models import Patient, Provider, Slot
+from prosper.ehr.repository import normalize_name
 
 PROVIDERS = [
     ("Dr. Aisha Patel", "America/New_York", "Therapist"),
@@ -30,7 +31,10 @@ def _patient(first: str, last: str, dob: date, phone: str) -> dict[str, object]:
     return {
         "first_name": first,
         "last_name": last,
-        "name_normalized": f"{first} {last}".lower(),
+        # Use the full normalisation pipeline (diacritics, honorifics, bidi
+        # marks) rather than a bare .lower() so the stored value matches what
+        # repo.find_patient_by_name_dob compares against at lookup time.
+        "name_normalized": normalize_name(f"{first} {last}"),
         "dob": dob,
         "phone": phone,
     }

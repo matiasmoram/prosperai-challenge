@@ -115,9 +115,12 @@ class SlotList(BaseModel):
 class AppointmentCreate(BaseModel):
     patient_id: str = Field(min_length=1, max_length=36)
     slot_id: str = Field(min_length=1, max_length=36)
-    # Visit length in minutes; must be one of {30, 60, 90}. Repository's
-    # CheckConstraint validates again at the DB boundary.
-    duration_minutes: int = Field(default=30)
+    # Visit length in minutes; must be one of {30, 60, 90}. The ge/le bounds
+    # here are defence-in-depth against absurd values at the HTTP boundary —
+    # the repository's ``_slots_needed_for`` remains the authority on the exact
+    # allowed set ({30, 60, 90}) and raises ``InvalidDurationError`` → 400
+    # for any in-range value that isn't a valid grid multiple (e.g. 45).
+    duration_minutes: int = Field(default=30, ge=30, le=90)
     notes: str | None = Field(default=None, max_length=500)
 
     @field_validator("notes")
@@ -140,7 +143,9 @@ class AppointmentCancel(BaseModel):
 class AppointmentReschedule(BaseModel):
     new_slot_id: str = Field(min_length=1, max_length=36)
     # Optional duration override. ``None`` means "keep the current duration".
-    new_duration_minutes: int | None = Field(default=None)
+    # ge/le bounds mirror ``AppointmentCreate.duration_minutes`` — same
+    # defence-in-depth rationale; repository remains the {30,60,90} authority.
+    new_duration_minutes: int | None = Field(default=None, ge=30, le=90)
 
 
 class AppointmentOut(BaseModel):

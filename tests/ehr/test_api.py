@@ -32,7 +32,7 @@ def client(tmp_path, monkeypatch) -> TestClient:
                 )
             )
         session.commit()
-    return TestClient(create_app())
+    return TestClient(create_app(engine=engine))
 
 
 def test_create_then_find_patient_by_phone(client: TestClient) -> None:

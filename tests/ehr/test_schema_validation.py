@@ -20,7 +20,12 @@ from sqlalchemy.orm import Session
 from prosper.ehr.api import create_app
 from prosper.ehr.db import Base, get_engine
 from prosper.ehr.models import Provider
-from prosper.ehr.schemas import AppointmentCancel, AppointmentCreate, PatientCreate
+from prosper.ehr.schemas import (
+    AppointmentCancel,
+    AppointmentCreate,
+    AppointmentReschedule,
+    PatientCreate,
+)
 
 
 @pytest.fixture
@@ -31,7 +36,7 @@ def client(tmp_path, monkeypatch) -> TestClient:
     with Session(engine) as session:
         session.add(Provider(name="Dr. Patel", timezone="UTC"))
         session.commit()
-    return TestClient(create_app())
+    return TestClient(create_app(engine=engine))
 
 
 # ---------------------------------------------------------------------------
@@ -153,3 +158,59 @@ def test_reason_strips_html_tags() -> None:
 def test_notes_none_passes_through() -> None:
     appt = AppointmentCreate(patient_id="p1", slot_id="s1")
     assert appt.notes is None
+
+
+# ---------------------------------------------------------------------------
+# Duration bounds — defence-in-depth at the schema layer (ge=30, le=90).
+# The repository's _slots_needed_for remains the {30,60,90} authority;
+# the Pydantic bounds only guard against absurd values (0, negative, huge).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("duration", [30, 60, 90])
+def test_appointment_create_accepts_valid_durations(duration: int) -> None:
+    """Values in the allowed grid must pass schema validation."""
+    appt = AppointmentCreate(patient_id="p1", slot_id="s1", duration_minutes=duration)
+    assert appt.duration_minutes == duration
+
+
+@pytest.mark.parametrize("duration", [0, 29, 91, 999, -1])
+def test_appointment_create_rejects_out_of_bounds_duration(duration: int) -> None:
+    """Values outside [30, 90] must be rejected at the schema boundary (422)."""
+    with pytest.raises(ValidationError):
+        AppointmentCreate(patient_id="p1", slot_id="s1", duration_minutes=duration)
+
+
+def test_appointment_create_duration_out_of_bounds_at_http_boundary(
+    client: TestClient,
+) -> None:
+    """End-to-end: duration=0 and duration=999 must return 422 from the API."""
+    for bad_dur in (0, 999):
+        r = client.post(
+            "/appointments",
+            json={"patient_id": "p1", "slot_id": "s1", "duration_minutes": bad_dur},
+        )
+        assert r.status_code == 422, (
+            f"duration_minutes={bad_dur} should be 422 at schema boundary, "
+            f"got {r.status_code}: {r.text}"
+        )
+
+
+@pytest.mark.parametrize("duration", [30, 60, 90])
+def test_appointment_reschedule_accepts_valid_durations(duration: int) -> None:
+    """Valid new_duration_minutes passes schema validation."""
+    rs = AppointmentReschedule(new_slot_id="s1", new_duration_minutes=duration)
+    assert rs.new_duration_minutes == duration
+
+
+def test_appointment_reschedule_none_duration_is_valid() -> None:
+    """None means 'keep current duration' — must pass."""
+    rs = AppointmentReschedule(new_slot_id="s1", new_duration_minutes=None)
+    assert rs.new_duration_minutes is None
+
+
+@pytest.mark.parametrize("duration", [0, 29, 91, 999])
+def test_appointment_reschedule_rejects_out_of_bounds_duration(duration: int) -> None:
+    """new_duration_minutes outside [30, 90] must be rejected (422)."""
+    with pytest.raises(ValidationError):
+        AppointmentReschedule(new_slot_id="s1", new_duration_minutes=duration)
