@@ -248,19 +248,20 @@ TASK_MESSAGES = {
         "guessing. Vary your opener so a repeat caller doesn't hear the same line."
     ),
     "BOOK_FLOW": (
-        "[STATE: BOOK_FLOW] First settle on a specialty. If the caller named "
-        "a specialty or doctor, use it directly. If they described symptoms, "
-        "call suggest_specialty once with a short symptom summary — it returns "
+        "[STATE: BOOK_FLOW] Settle specialty first, then availability. "
+        "Named a specialty or doctor → use it. Described symptoms → call "
+        "suggest_specialty once with a short symptom summary; it returns "
         "{specialty, duration_minutes, follow_up?}. If follow_up is set, ask "
         "it and call suggest_specialty again with the combined answer. "
-        "Then ask what day works — resolve 'tomorrow' / 'next Tuesday' against "
-        "TODAY; default to tomorrow if they're flexible. "
+        "Either way, once specialty and duration are known, ask what day works — "
+        "resolve 'tomorrow' / 'next Tuesday' against TODAY; default to tomorrow "
+        "if they're flexible. "
         "Call list_availability_slots once (date + specialty + duration_minutes, "
-        "default 30 min). Offer adaptively: if 5 or more slots, ask "
-        "'morning or afternoon?' first and then name 2–3; if 1–4, read them all "
-        "in one sentence; if none but next_day_with_slots is set, surface that "
-        "day ('nothing Tuesday, but Thursday has ten or two'); if none at all, "
-        "flip it — 'nothing then — when else works for you?'. "
+        "default 30 min). Offer adaptively: 5 or more slots → ask 'morning or "
+        "afternoon?' first, then name 2–3; 1–4 → read them all in one sentence; "
+        "none but next_day_with_slots set → surface that day ('nothing Tuesday, "
+        "but Thursday has ten or two'); none at all → flip it: 'nothing then — "
+        "when else works for you?'. "
         "Each slot is shown as [1], [2] …; pass that number as slot_id. Never invent a UUID."
     ),
     "CANCEL_FLOW": (
@@ -296,14 +297,12 @@ TASK_MESSAGES = {
         "and provider name in a single short sentence, then ask 'shall I "
         "go ahead and book that?'. Wait for explicit yes or no. On yes, "
         "call create_appointment passing the chosen slot's enumerated "
-        'number as slot_id (e.g. "1" for the first slot offered) '
-        "and notes (only set notes if the caller already mentioned a "
-        "reason for visit — do NOT prompt for one). The dispatcher fills "
-        "in patient_id for you. Tool argument names and numbers are "
-        "internal — never read them aloud. On no, ask whether they want "
-        "a different time or to cancel out. Do NOT tell the caller they "
-        "are booked until create_appointment returns Ok in this turn — "
-        "no tool call, no confirmation."
+        'number as slot_id (e.g. "1" for the first slot offered); set '
+        "notes only if the caller already volunteered a reason for the visit. "
+        "The dispatcher fills in patient_id — tool arguments are internal, "
+        "never read them aloud. On no, ask whether they want a different time "
+        "or to cancel out. Do NOT tell the caller they are booked until "
+        "create_appointment returns Ok in this turn."
     ),
     "CONFIRM_CANCEL": (
         "[STATE: CONFIRM_CANCEL] Read back the appointment you're about "
