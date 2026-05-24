@@ -343,6 +343,9 @@ def test_no_endpoint_returns_500_on_malformed_input(client: TestClient) -> None:
         ),  # hostile phone
         # Bad query params.
         ("GET", "/patients/by-phone", {"params": {"phone": "x"}}),  # min_length
+        ("GET", "/patients/by-phone", {"params": {"phone": "x" * 33}}),  # max_length (32)
+        # max_length (200) on name
+        ("GET", "/patients/by-name-dob", {"params": {"name": "x" * 201, "dob": "1990-01-01"}}),
         ("GET", "/availability", {"params": {"date": "not-a-date"}}),  # bad date
         ("GET", "/availability", {"params": {"date": day, "duration_minutes": 45}}),  # invalid dur
         # Nonexistent ids.

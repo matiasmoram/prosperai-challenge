@@ -159,7 +159,7 @@ def create_app(engine: Engine | None = None) -> FastAPI:
 
     @app.get("/patients/by-phone", response_model=PatientList)
     def find_by_phone(
-        phone: str = Query(min_length=7),
+        phone: str = Query(min_length=7, max_length=32),
         session: Session = Depends(session_dep),
     ) -> PatientList:
         return PatientList(
@@ -170,7 +170,7 @@ def create_app(engine: Engine | None = None) -> FastAPI:
 
     @app.get("/patients/by-name-dob", response_model=PatientFuzzyList)
     def find_by_name_dob(
-        name: str = Query(min_length=1),
+        name: str = Query(min_length=1, max_length=200),
         dob: date_t = Query(...),
         min_similarity: float = Query(0.85),
         session: Session = Depends(session_dep),
