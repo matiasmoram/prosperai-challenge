@@ -223,6 +223,30 @@ def _setup_multi_specialty(session: Session) -> None:
     session.commit()
 
 
+def _setup_two_patients_same_dob(session: Session) -> None:
+    """Two patients with the same DOB and similar names that both fuzzy-score
+    >= 0.85 but < 0.97 against the query 'Jaime Reyes' — so
+    ``find_patient_by_name_dob`` returns ``found_fuzzy_multiple`` and the
+    dispatcher holds both as ``pending_identity_candidates`` waiting for the
+    caller to pick. One free slot is seeded so the chosen patient can book."""
+    _seed_provider_and_slots(session, count=2)
+    dob = date(1990, 4, 15)
+    repo.create_patient(
+        session,
+        first_name="Jamie",
+        last_name="Reyes",
+        dob=dob,
+        phone="+15550011001",
+    )
+    repo.create_patient(
+        session,
+        first_name="James",
+        last_name="Reyes",
+        dob=dob,
+        phone="+15550011002",
+    )
+
+
 def _setup_multi_specialty_no_target(session: Session) -> None:
     """Provider line-up that does NOT include the specialty the caller asks
     for ("Cardiologist"). The filter returns 0 slots; the bot has to either
@@ -2022,5 +2046,236 @@ SCENARIOS: list[Scenario] = [
             "the booking was completed",
         ],
         max_turns=14,
+    ),
+    # -----------------------------------------------------------------------
+    # GAP-5: hybrid route_intent coverage — two more scenarios so the CHOOSE_INTENT
+    # tool path is exercised end-to-end for both cancel and reschedule outcomes.
+    # -----------------------------------------------------------------------
+    Scenario(
+        name="route_intent_resolves_to_cancel",
+        tags=frozenset({"hybrid", "happy"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have one upcoming appointment. When the bot asks what you need, "
+            "say VERBATIM: 'I need to sort out a visit.' "
+            "When the bot reads back your appointment and asks to confirm cancellation, "
+            'say VERBATIM: "yes please go ahead." '
+            'After the bot confirms the cancellation, end the call VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_one_appt,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=-1,
+            cancelled_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "route_intent",
+                "get_upcoming_appointments",
+                "cancel_appointment",
+            ],
+            forbidden_tool_calls=["create_patient", "create_appointment"],
+        ),
+        judge_criteria=[
+            "the bot used route_intent to classify the caller's intent before entering CANCEL_FLOW",
+            "the bot read back the appointment before cancelling",
+            "the cancellation was confirmed and no new appointment was created",
+        ],
+        max_turns=14,
+    ),
+    Scenario(
+        name="route_intent_resolves_to_reschedule",
+        tags=frozenset({"hybrid", "reschedule", "happy"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have one upcoming appointment. When the bot asks what you need, "
+            "say VERBATIM: 'I was hoping to adjust the time on my existing visit.' "
+            "Ask for a later slot tomorrow morning. When the bot offers options, "
+            'say VERBATIM: "the first one works." '
+            'When the bot reads back the new time, say VERBATIM: "yes that\'s correct." '
+            'After the bot confirms the move, end the call VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_patient_with_appt_for_reschedule,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "route_intent",
+                "get_upcoming_appointments",
+                "list_availability_slots",
+                "reschedule_appointment",
+            ],
+            forbidden_tool_calls=["cancel_appointment", "create_appointment", "create_patient"],
+        ),
+        judge_criteria=[
+            "the bot used route_intent to classify the ambiguous request before RESCHEDULE_FLOW",
+            "the appointment was atomically rescheduled (not cancelled and re-booked)",
+            "no new patient record was created",
+        ],
+        max_turns=16,
+    ),
+    # -----------------------------------------------------------------------
+    # GAP-2: cancel → rebook intent-flip (cancelled_then_rebook transition).
+    # -----------------------------------------------------------------------
+    Scenario(
+        name="cancel_then_rebook_intent_flip",
+        tags=frozenset({"edge", "cancel", "recovery"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have one upcoming appointment. Ask to cancel it. When the bot reads "
+            "back your appointment and asks to confirm, say VERBATIM: "
+            "'actually, can you reschedule me to a different time instead?' "
+            "When the bot asks for a new time, say 'Tomorrow morning.' "
+            'When the bot offers a slot, say VERBATIM: "the first one works." '
+            'When the bot reads it back, say VERBATIM: "yes please." '
+            'After the booking is confirmed, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_one_appt,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+                "cancel_appointment",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["create_patient"],
+        ),
+        judge_criteria=[
+            "the bot cancelled the original appointment after the mid-cancel reschedule request",
+            "the bot then booked a new appointment in the same call",
+            "the bot confirmed the new booking (not the cancellation) at the end",
+        ],
+        max_turns=18,
+    ),
+    # -----------------------------------------------------------------------
+    # GAP-4: identity disambiguation — two fuzzy candidates, caller picks #1.
+    # -----------------------------------------------------------------------
+    Scenario(
+        name="identify_by_name_dob_disambiguation",
+        tags=frozenset({"edge", "identity", "disambiguation"}),
+        persona=(
+            "You are Jamie Reyes, DOB April 15 1990. You do not have your phone. "
+            "When the bot asks for your phone, say you don't have it and offer your "
+            "name and date of birth instead. "
+            "When the bot lists two candidates and asks which is you, "
+            'say VERBATIM: "the first one, Jamie Reyes." '
+            "Then ask to book any morning slot tomorrow. "
+            'When the bot offers a slot, say VERBATIM: "yes please." '
+            'After the booking is confirmed, end VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_two_patients_same_dob,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_name_dob",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["create_patient", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot presented both candidates by number and asked the caller to pick",
+            "the bot identified the caller as candidate #1 (Jamie Reyes) after the pick",
+            "the booking was completed for the correct patient without creating a new record",
+        ],
+        max_turns=18,
+    ),
+    # -----------------------------------------------------------------------
+    # GAP-1: mid-flow goodbye scenarios — each drives the bot INTO the target
+    # flow (real tool calls fire) before the caller abandons.
+    # -----------------------------------------------------------------------
+    Scenario(
+        name="goodbye_at_book_flow",
+        tags=frozenset({"abandon", "edge"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Ask to book an appointment. Once the bot lists available slots, "
+            'immediately end the call VERBATIM: "actually, never mind. goodbye."'
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+            ],
+            forbidden_tool_calls=["create_appointment", "create_patient", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot entered BOOK_FLOW and listed available slots before the caller abandoned",
+            "no appointment was created — the caller hung up before confirming",
+        ],
+        max_turns=10,
+    ),
+    Scenario(
+        name="goodbye_at_cancel_flow",
+        tags=frozenset({"abandon", "edge"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Ask to cancel your appointment. Once the bot reads back your upcoming "
+            'appointment, immediately end the call VERBATIM: "actually, never mind. goodbye."'
+        ),
+        setup=_setup_existing_one_appt,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+            ],
+            forbidden_tool_calls=["cancel_appointment", "create_appointment", "create_patient"],
+        ),
+        judge_criteria=[
+            "the bot entered CANCEL_FLOW and listed the upcoming appointment before abandonment",
+            "no appointment was cancelled — the caller hung up before confirming",
+        ],
+        max_turns=10,
+    ),
+    Scenario(
+        name="goodbye_at_reschedule_flow",
+        tags=frozenset({"abandon", "edge"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Ask to reschedule your appointment. Once the bot shows your upcoming "
+            "appointment and asks what new time you prefer, immediately end the call "
+            'VERBATIM: "actually, never mind. goodbye."'
+        ),
+        setup=_setup_existing_patient_with_appt_for_reschedule,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+            ],
+            forbidden_tool_calls=[
+                "reschedule_appointment",
+                "cancel_appointment",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot entered RESCHEDULE_FLOW and retrieved the appointment before abandonment",
+            "no appointment was modified — the caller hung up before providing a new time",
+        ],
+        max_turns=10,
     ),
 ]

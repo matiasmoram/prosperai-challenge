@@ -339,7 +339,7 @@ any `tool_ok`. See `docs/adr/003-paired-state-and-judge-eval.md`.
 
 ### Scenarios
 
-`evals/scenarios.py` defines ~33 scenarios across these tag buckets:
+`evals/scenarios.py` defines 63 scenarios across these tag buckets:
 
 | Tag | Scenarios | What's tested |
 |---|---|---|
@@ -347,9 +347,11 @@ any `tool_ok`. See `docs/adr/003-paired-state-and-judge-eval.md`.
 | recovery | `dob_misheard_then_corrected`, `patient_correction_mid_register`, `phone_correction_mid_register`, `dob_unparseable_then_recovery` | Caller corrects a field mid-turn; bot must adopt the latest value |
 | edge | `slot_taken_by_other`, `cancel_when_nothing_to_cancel`, `phone_format_chaos`, `slot_handle_out_of_range`, `availability_falls_through_to_next_day`, `goodbye_at_*` | Boundary behaviour: race, empty list, parsing chaos, dispatcher handle guard |
 | adversarial | `prompt_injection_direct_override`, `prompt_injection_stored_in_name`, `cross_patient_cancel_refusal`, `hallucinated_confirmation_trap`, `multi_turn_drift_hallucinated_slot`, `off_topic_steering_and_budget`, `rude_caller_still_completes_booking`, `insurance_question_redirect`, `hallucinated_appointment_id_in_reschedule`, `reschedule_cross_patient_refusal` | Injection, authorization, hallucination, tone, scope |
-| abandon | `goodbye_at_greeting`, `goodbye_at_identify`, `goodbye_at_choose_intent`, `goodbye_mid_confirmation`, `reschedule_abort_at_confirm` | Caller hangs up at every reachable state — no orphan writes, no fake confirmations |
+| abandon | `goodbye_at_greeting`, `goodbye_at_identify`, `goodbye_at_choose_intent`, `goodbye_mid_confirmation`, `reschedule_abort_at_confirm`, `goodbye_at_book_flow`, `goodbye_at_cancel_flow`, `goodbye_at_reschedule_flow` | Caller hangs up at every reachable state (incl. mid-book/cancel/reschedule) — no orphan writes, no fake confirmations |
 | reschedule | `reschedule_existing_appointment`, `reschedule_no_upcoming_appointments`, `reschedule_cross_patient_refusal`, `reschedule_abort_at_confirm`, `reschedule_multi_appointment_picks_second`, `hallucinated_appointment_id_in_reschedule` | Atomic move + every refusal/abort path on it |
 | specialty | `specialty_unknown_falls_back`, `specialty_no_filter_any_doctor`, `specialty_filter_therapist` | Filter pass-through, unknown specialty graceful decline, no-filter wildcard |
+| hybrid | `ambiguous_intent_routed_via_tool`, `route_intent_resolves_to_cancel`, `route_intent_resolves_to_reschedule`, `cancel_then_rebook_intent_flip` | The `route_intent` navigation tool (CHOOSE_INTENT) end-to-end + the cancel→rebook intent-flip chain |
+| identity | `identify_by_name_dob_disambiguation` | Two fuzzy candidates → caller's pick resolves to the correct patient (F-013 class, end-to-end) |
 
 Adding a scenario is a ~20-line PR per `CONTRIBUTING.md` — pure data
 (`Scenario` dataclass), no framework changes.

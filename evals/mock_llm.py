@@ -1416,6 +1416,166 @@ def _script_direct_specialty_skips_triage() -> list[LLMReply]:
     ]
 
 
+def _script_route_intent_resolves_to_cancel() -> list[LLMReply]:
+    # Ada has 1 appointment. Her CHOOSE_INTENT utterance is ambiguous enough
+    # that the LLM uses route_intent(intent="cancel") rather than the regex.
+    # route_intent → CANCEL_FLOW; get_upcoming → CONFIRM_CANCEL; cancel → END.
+    return [
+        _t("Hi, thanks for calling Prosper Health — how can I help?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        # found → CHOOSE_INTENT; ask what they need
+        _t("Got it, Ada — what can I help you with today?"),
+        # LLM uses hybrid route_intent tool to classify the ambiguous utterance
+        _tool("route_intent", intent="cancel"),
+        # → CANCEL_FLOW: fetch appointments
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        # → CONFIRM_CANCEL: read back
+        _t("You have one upcoming visit with Dr. Patel — shall I cancel that one?"),
+        # cancel → END
+        _tool("cancel_appointment", appointment_id="__use_upcoming__", **{_USE_UPCOMING_N: 0}),
+        _t("All cancelled — have a great day."),
+    ]
+
+
+def _script_route_intent_resolves_to_reschedule() -> list[LLMReply]:
+    # Ada has 1 appointment in slot[0] + 3 free slots. Her CHOOSE_INTENT
+    # utterance is ambiguous → LLM uses route_intent(intent="reschedule").
+    # → RESCHEDULE_FLOW; get_upcoming stays in flow (not empty); list slots
+    # → CONFIRM_RESCHEDULE; atomic reschedule → END.
+    return [
+        _t("Hi, thanks for calling Prosper Health — how can I help?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — what can I do for you today?"),
+        # LLM classifies ambiguous utterance as reschedule
+        _tool("route_intent", intent="reschedule"),
+        # → RESCHEDULE_FLOW; get_upcoming returns 1 appt — stays in flow
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t("Your visit is tomorrow at ten with Dr. Patel — what new time works for you?"),
+        # list slots → CONFIRM_RESCHEDULE
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I can move you to ten-thirty with Dr. Patel — shall I go ahead?"),
+        # atomic reschedule → END; appointment_id "1" resolves via memory handles
+        _tool("reschedule_appointment", appointment_id="1", __use_first_slot__=True),
+        _t("All set — you're now at ten-thirty tomorrow with Dr. Patel. Have a great day."),
+    ]
+
+
+def _script_cancel_then_rebook_intent_flip() -> list[LLMReply]:
+    # Ada has 1 appointment + 4 free slots. She enters CANCEL_FLOW, the bot
+    # reads back the appointment. Her next utterance contains "reschedule" which
+    # sets memory.wants_reschedule = True. The bot then calls cancel_appointment
+    # → Ok → dispatcher fires cancelled_then_rebook → BOOK_FLOW. Bot lists
+    # slots, confirms, creates appointment → END. Net: cancelled 1, booked 1.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book or cancel?"),
+        # CANCEL_FLOW: fetch appointments → CONFIRM_CANCEL
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        # read back, ask to confirm
+        _t("You have one upcoming visit with Dr. Patel — cancel that one?"),
+        # Persona says "actually, can you reschedule me" → wants_reschedule = True.
+        # Bot then calls cancel which fires cancelled_then_rebook → BOOK_FLOW.
+        _tool("cancel_appointment", appointment_id="__use_upcoming__", **{_USE_UPCOMING_N: 0}),
+        # now in BOOK_FLOW; invite new slot preference
+        _t("Sure — let me find you a new slot instead. Any time preference?"),
+        # list slots → CONFIRM_BOOK
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        # create → END
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set for tomorrow at ten with Dr. Patel — have a great day."),
+    ]
+
+
+def _script_identify_by_name_dob_disambiguation() -> list[LLMReply]:
+    # Two patients share DOB 1990-04-15: "Jamie Reyes" and "James Reyes".
+    # Caller says "Jaime Reyes" → find_patient_by_name_dob returns both
+    # (sim ≈ 0.91 each, both above 0.85 floor, both below 0.97 threshold)
+    # → dispatcher sets pending_identity_candidates, stays IDENTIFY_PATIENT.
+    # Bot reads back both numbered. Caller says "the first one" → dispatcher
+    # resolves candidate[0] = Jamie Reyes → patient_found → CHOOSE_INTENT.
+    # Caller books → END.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        # Persona says they don't have phone → bot asks for name+DOB instead
+        _t("No problem — what's your full name and date of birth?"),
+        # find by name+DOB → 2 fuzzy candidates → pending_identity_candidates set
+        _tool("find_patient_by_name_dob", name="Jaime Reyes", dob="April 15 1990"),
+        # stays IDENTIFY_PATIENT; read back both candidates
+        _t(
+            "I found two records with that date of birth — "
+            "[1] Jamie Reyes DOB 1990-04-15; [2] James Reyes DOB 1990-04-15. "
+            "Which one is you?"
+        ),
+        # Caller says "the first one" → _resolve_pending_identity picks index 0
+        # → patient_found → CHOOSE_INTENT (no tool call needed here)
+        _t("Got it — welcome, Jamie. Book, reschedule, or cancel?"),
+        # BOOK_FLOW: list slots → CONFIRM_BOOK
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        # create → END
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set for tomorrow at ten with Dr. Patel — have a great day."),
+    ]
+
+
+def _script_goodbye_at_book_flow() -> list[LLMReply]:
+    # Ada identified via phone, enters BOOK_FLOW, list_availability fires,
+    # bot reads back slots — then the persona says "never mind, goodbye."
+    # The runner's _is_persona_stop short-circuits to END before handle_user_turn.
+    # This validates: BOOK_FLOW was reached (list_availability_slots fired) and
+    # no create_appointment was called. Same short-circuit as goodbye_at_greeting.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book or cancel?"),
+        # BOOK_FLOW: list slots → CONFIRM_BOOK
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        # Bot reads back the slot; caller then says goodbye → runner short-circuits.
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+    ]
+
+
+def _script_goodbye_at_cancel_flow() -> list[LLMReply]:
+    # Ada identified, enters CANCEL_FLOW, get_upcoming fires (1 appt),
+    # bot reads back the appointment — persona says "never mind, goodbye."
+    # Runner short-circuits to END. Validates: CANCEL_FLOW reached (get_upcoming
+    # fired) and no cancel_appointment was called.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book or cancel?"),
+        # CANCEL_FLOW: fetch appointments → CONFIRM_CANCEL
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        # Bot reads back; caller says goodbye → runner short-circuits.
+        _t("You have one upcoming visit with Dr. Patel — cancel that one?"),
+    ]
+
+
+def _script_goodbye_at_reschedule_flow() -> list[LLMReply]:
+    # Ada identified, enters RESCHEDULE_FLOW, get_upcoming fires (1 appt),
+    # bot asks for new time — persona says "never mind, goodbye."
+    # Runner short-circuits to END. Validates: RESCHEDULE_FLOW reached
+    # (get_upcoming fired) and no reschedule/cancel called.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's your phone number?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        # RESCHEDULE_FLOW: fetch appointments (stays in flow — not empty)
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        # Bot reads back appointment, asks for new time; caller says goodbye.
+        _t("Your visit is tomorrow at ten with Dr. Patel — what new time works?"),
+    ]
+
+
 _BOT_SCRIPTS: dict[str, callable] = {
     "new_patient_books": _script_new_patient_books,
     "existing_patient_cancels": _script_existing_patient_cancels,
@@ -1481,6 +1641,17 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "symptom_routes_to_gp": _script_symptom_routes_to_gp,
     "symptom_ambiguous_followup": _script_symptom_ambiguous_followup,
     "direct_specialty_skips_triage": _script_direct_specialty_skips_triage,
+    # GAP-5: hybrid route_intent coverage
+    "route_intent_resolves_to_cancel": _script_route_intent_resolves_to_cancel,
+    "route_intent_resolves_to_reschedule": _script_route_intent_resolves_to_reschedule,
+    # GAP-2: cancel → rebook intent-flip
+    "cancel_then_rebook_intent_flip": _script_cancel_then_rebook_intent_flip,
+    # GAP-4: identity disambiguation
+    "identify_by_name_dob_disambiguation": _script_identify_by_name_dob_disambiguation,
+    # GAP-1: mid-flow goodbyes
+    "goodbye_at_book_flow": _script_goodbye_at_book_flow,
+    "goodbye_at_cancel_flow": _script_goodbye_at_cancel_flow,
+    "goodbye_at_reschedule_flow": _script_goodbye_at_reschedule_flow,
 }
 
 
@@ -1907,6 +2078,70 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "202-555-0100.",
         "I'd like to book a visit — tomorrow morning if possible.",
         "Yes, book that.",
+    ],
+    # GAP-5: hybrid route_intent coverage
+    "route_intent_resolves_to_cancel": [
+        "Hi.",
+        "202-555-0100.",
+        # Ambiguous utterance — matches no intent regex, so LLM uses route_intent.
+        "I need to sort out a visit.",
+        # "cancel that" matches _DENY, which triggers abort. Use plain affirm instead.
+        "yes please go ahead.",
+        "thanks, goodbye.",
+    ],
+    "route_intent_resolves_to_reschedule": [
+        "Hi.",
+        "202-555-0100.",
+        # Ambiguous utterance — LLM routes via route_intent(intent="reschedule").
+        "I was hoping to adjust the time on my existing visit.",
+        "Later tomorrow morning.",
+        "the first one works.",
+        "yes that's correct.",
+    ],
+    # GAP-2: cancel → rebook intent-flip
+    "cancel_then_rebook_intent_flip": [
+        "Hi, I want to cancel my appointment.",
+        "202-555-0100.",
+        "Cancel please.",
+        # Contains "reschedule" → sets memory.wants_reschedule = True.
+        "actually, can you reschedule me to a different time instead?",
+        "Tomorrow morning.",
+        "the first one works.",
+        "yes please.",
+    ],
+    # GAP-4: identity disambiguation
+    "identify_by_name_dob_disambiguation": [
+        "Hi, I'd like to book.",
+        # No phone — bot falls back to name+DOB.
+        "I don't have my phone handy, sorry.",
+        "Jaime Reyes, April 15th 1990.",
+        # Two candidates shown; caller picks the first.
+        "The first one, Jamie Reyes.",
+        "Book please.",
+        "Tomorrow morning works.",
+        "yes please.",
+    ],
+    # GAP-1: mid-flow goodbyes (runner short-circuits on "goodbye" before handle_user_turn)
+    "goodbye_at_book_flow": [
+        "Hi, I'd like to book.",
+        "202-555-0100.",
+        "Book please.",
+        # Goodbye after bot lists slots — runner short-circuits to END.
+        "actually, never mind. goodbye.",
+    ],
+    "goodbye_at_cancel_flow": [
+        "Hi, I want to cancel.",
+        "202-555-0100.",
+        "Cancel please.",
+        # Goodbye after bot reads back appointment — runner short-circuits to END.
+        "actually, never mind. goodbye.",
+    ],
+    "goodbye_at_reschedule_flow": [
+        "Hi, I'd like to reschedule.",
+        "202-555-0100.",
+        "Reschedule please.",
+        # Goodbye after bot asks for new time — runner short-circuits to END.
+        "actually, never mind. goodbye.",
     ],
 }
 
