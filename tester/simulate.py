@@ -60,11 +60,15 @@ async def _run(
 
     total_violations = 0
     errored = 0
+    corrupted = 0
     print(f"\nSimulated {len(pairs)} autonomous call(s):\n")
     for result, violations in pairs:
         if result.error:
             errored += 1
             mark = "ERR "
+        elif result.corrupt:
+            corrupted += 1
+            mark = "CRPT"
         elif violations:
             mark = "FAIL"
         else:
@@ -76,20 +80,28 @@ async def _run(
         )
         if result.error:
             print(f"         error: {result.error}")
+        if result.corrupt:
+            print("         ! corrupt: caller LLM emitted unfilled [Placeholder] text")
         for v in violations:
             total_violations += 1
             print(f"         ✗ {v}")
         if verbose:
             _print_transcript(result)
 
-    clean = len(pairs) - sum(1 for _, v in pairs if v) - errored
+    # Corrupt runs are excluded from clean/violation tallies — they tested
+    # garbage input (e.g. phone="[PHONE]") and their results are meaningless.
+    usable = len(pairs) - errored - corrupted
+    clean = usable - sum(1 for r, v in pairs if v and not r.error and not r.corrupt)
     print(
-        f"\n{clean}/{len(pairs)} clean, "
-        f"{sum(1 for _, v in pairs if v)} with violations, {errored} errored."
+        f"\n{clean}/{usable} clean"
+        + (f" ({corrupted} corrupt/skipped)" if corrupted else "")
+        + f", {sum(1 for r, v in pairs if v and not r.corrupt)} with violations"
+        + f", {errored} errored."
     )
     if total_violations:
         print("HALLUCINATION/MISTAKE CAUGHT — see violations above.", file=sys.stderr)
     # Exit non-zero on any invariant breach OR any crashed call.
+    # Corrupt runs do NOT trigger exit 1 — they are a data-quality warning only.
     return 1 if (total_violations or errored) else 0
 
 

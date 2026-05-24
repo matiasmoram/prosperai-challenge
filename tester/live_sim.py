@@ -25,7 +25,7 @@ from prosper.ehr.api import create_app
 from prosper.ehr_client import EHRClient
 from prosper.flows import State
 from prosper.llm import OpenAILLMAdapter
-from tester.personas import WORLDS, Persona
+from tester.personas import WORLDS, Persona, has_unfilled_placeholders
 from tester.recorder import RecordingBus
 
 
@@ -44,6 +44,23 @@ class CallResult:
     transcript: list[dict[str, Any]]
     duration_ms: float
     error: str | None = None
+    corrupt: bool = False  # True when the caller LLM emitted unfilled [Placeholder] text
+
+
+def _caller_utterance_corrupt(transcript: list[dict[str, Any]]) -> bool:
+    """Return True if any caller turn contains an unfilled ``[Placeholder]`` bracket.
+
+    When the caller LLM emits literal ``[PHONE]`` / ``[Your Name]`` etc. instead
+    of the concrete value from its persona prompt, the run is testing garbage
+    input (the bot may create a patient with phone ``[PHONE]``).  Such runs must
+    be excluded from clean/violation tallies — they are not violations, just
+    unusable data that would erode confidence in the continuous-gen signal.
+    """
+    return any(
+        has_unfilled_placeholders(ev.get("text", ""))
+        for ev in transcript
+        if ev.get("kind") == "user"
+    )
 
 
 def _terminal_outcome(events: list[ConsoleEvent]) -> str | None:
@@ -113,4 +130,5 @@ async def simulate_call(
         transcript=transcript,
         duration_ms=(time.perf_counter() - started) * 1000,
         error=error,
+        corrupt=_caller_utterance_corrupt(transcript),
     )
