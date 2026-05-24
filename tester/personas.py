@@ -20,6 +20,7 @@ the ``existing_with_appt`` world.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -31,6 +32,13 @@ from evals.scenarios import (
     _setup_existing_one_appt,
     _setup_new_patient_books,
 )
+
+# Regex that matches unfilled template placeholders such as [Your Name],
+# [Month, Day, Year], [Phone Number], [DOB], etc.  A generated persona whose
+# prompt or goal still contains brackets like these is unusable — the caller
+# LLM will emit the literal bracket text instead of real values, burning a
+# whole sim run and potentially masking real issues.
+_PLACEHOLDER_RE = re.compile(r"\[[A-Za-z][^\]]{0,60}\]")
 
 # world name -> EHR seed function. A persona names the world it needs.
 WORLDS: dict[str, Callable[[Session], None]] = {
@@ -152,30 +160,57 @@ CURATED: list[Persona] = [
 ]
 
 
+def has_unfilled_placeholders(text: str) -> bool:
+    """Return True if ``text`` contains unfilled template brackets like ``[Your Name]``.
+
+    Generated personas sometimes carry bracket placeholders the LLM forgot to
+    fill in (e.g. ``[Month, Day, Year]``, ``[PHONE]``).  A persona with such
+    placeholders will make the caller LLM emit the literal bracket text — the
+    run becomes useless and can mask real bot bugs.
+
+    We allow short square-bracket constructs that appear in legitimate prompt
+    text (e.g. ``[1]`` numbered lists, ``[sic]``).  The regex targets
+    ``[Capital word + up to 60 chars]`` which matches common placeholder
+    patterns while avoiding false positives on list indices.
+    """
+    return bool(_PLACEHOLDER_RE.search(text))
+
+
 def _persona_from_dict(d: dict[str, Any]) -> Persona | None:
     """Build a Persona from an LLM-produced dict, or None if malformed."""
     name = str(d.get("name", "")).strip()
     world = str(d.get("world", "")).strip()
     prompt = str(d.get("prompt", "")).strip()
+    goal = str(d.get("goal", "")).strip() or "(generated)"
     if not name or world not in WORLDS or not prompt:
+        return None
+    # Reject personas whose prompt or goal still have unfilled template
+    # placeholders — they produce useless sim runs with literal "[Your Name]"
+    # text and can hide real bot failures.
+    if has_unfilled_placeholders(prompt) or has_unfilled_placeholders(goal):
         return None
     if _STOP not in prompt:
         prompt = f"{prompt} {_STOP}"
     return Persona(
         name=name,
         world=world,
-        goal=str(d.get("goal", "")).strip() or "(generated)",
+        goal=goal,
         prompt=prompt,
         adversarial=True,
     )
 
 
-async def generate_personas(*, client: Any, n: int, model: str = "gpt-4o-mini") -> list[Persona]:
+async def generate_personas(
+    *, client: Any, n: int, model: str = "gpt-4o-mini", max_retries: int = 2
+) -> list[Persona]:
     """Ask the LLM to invent ``n`` fresh adversarial caller personas.
 
-    The fully-automatic path: no human writes the persona. Returns whatever
-    parses cleanly (malformed entries are dropped), so callers should check the
-    length.
+    The fully-automatic path: no human writes the persona.  Returns whatever
+    parses cleanly (malformed entries and those with unfilled template
+    placeholders are dropped).  Retries up to ``max_retries`` times if the
+    first batch yields fewer than ``n`` valid personas so a single bad
+    generation does not silently halve coverage.  Callers should still check
+    the returned length.
     """
     worlds = ", ".join(sorted(WORLDS))
     system = (
@@ -186,27 +221,45 @@ async def generate_personas(*, client: Any, n: int, model: str = "gpt-4o-mini") 
         "pressure to confirm without doing). Reply with ONLY a JSON array of "
         f"objects {{name, world, goal, prompt}}. world must be one of: {worlds}. "
         "The existing patient is Ada Lovelace, DOB 1990-12-10, phone 202 555 0100. "
-        "prompt is a 2nd-person instruction to the caller LLM."
+        "prompt is a 2nd-person instruction to the caller LLM. "
+        "IMPORTANT: use CONCRETE values in every prompt — real names, real phone "
+        "numbers (e.g. 555-0199), real dates (e.g. March 3rd 1985). "
+        "NEVER use placeholder brackets like [Your Name], [Phone Number], "
+        "[Month, Day, Year], [DOB], or any other [bracketed template]. "
+        "All details must be filled in so the caller LLM can read the prompt "
+        "and play the role with no ambiguity."
     )
-    resp = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": f"Generate {n} distinct caller personas."},
-        ],
-        temperature=0.9,
-        response_format={"type": "json_object"},
-    )
-    raw = resp.choices[0].message.content or "{}"
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    items = data if isinstance(data, list) else data.get("personas", data.get("callers", []))
+
     out: list[Persona] = []
-    for item in items if isinstance(items, list) else []:
-        if isinstance(item, dict):
-            persona = _persona_from_dict(item)
-            if persona is not None:
-                out.append(persona)
-    return out
+    attempts = 0
+    needed = n
+    while len(out) < n and attempts <= max_retries:
+        attempts += 1
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": f"Generate {needed} distinct caller personas.",
+                },
+            ],
+            temperature=0.9,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or "{}"
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        items = data if isinstance(data, list) else data.get("personas", data.get("callers", []))
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict):
+                persona = _persona_from_dict(item)
+                if persona is not None:
+                    out.append(persona)
+                    if len(out) >= n:
+                        break
+        needed = n - len(out)
+
+    return out[:n]
