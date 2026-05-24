@@ -1,4 +1,4 @@
-.PHONY: install seed ehr bot dev test eval mock-eval trace replay replay-record gen-list gen-eval eval-baseline lint type bench verify status pre-commit clean
+.PHONY: install seed ehr bot dev test eval mock-eval trace replay replay-record gen-list gen-eval eval-baseline tester lint type bench verify status pre-commit clean
 
 install:
 	uv sync
@@ -49,9 +49,22 @@ gen-eval:
 eval-baseline:
 	uv run python -m evals --json evals/results/current.json --baseline evals/results/baseline.json
 
+# Prototype harnesses that catch agent mistakes without hand-dialing
+# (tool-receipt hallucination gate). Offline, zero tokens.
+tester:
+	uv run pytest tester/ -v
+
+# Autonomous adversarial call simulator: the LLM plays goal-seeking callers
+# against the real bot (no scripted turns, no human dialing), and fails if any
+# call confirms something it didn't do. Live — needs OPENAI_API_KEY (.env).
+# Usage: make simulate            (all curated personas)
+#        make simulate ARGS="--generate 5 -v"
+simulate:
+	uv run python -m tester.simulate $(ARGS)
+
 lint:
-	uv run ruff check src/ tests/ evals/
-	uv run ruff format --check src/ tests/ evals/
+	uv run ruff check src/ tests/ evals/ tester/
+	uv run ruff format --check src/ tests/ evals/ tester/
 
 type:
 	uv run mypy src/prosper
@@ -65,10 +78,10 @@ status:
 # One-shot pre-submit gate: everything CI runs, locally. Use this before
 # pushing or opening a PR. Stops on first failure.
 verify:
-	@echo "==> lint" && uv run ruff check src/ tests/ evals/
-	@echo "==> format" && uv run ruff format --check src/ tests/ evals/
+	@echo "==> lint" && uv run ruff check src/ tests/ evals/ tester/
+	@echo "==> format" && uv run ruff format --check src/ tests/ evals/ tester/
 	@echo "==> type" && uv run mypy src/prosper
-	@echo "==> tests" && uv run pytest tests/ evals/test_types.py evals/test_runner_checks.py -q
+	@echo "==> tests" && uv run pytest tests/ evals/test_types.py evals/test_runner_checks.py tester/ -q
 	@echo "==> all green"
 
 pre-commit:

@@ -50,13 +50,16 @@ def test_redact_list_availability_slots_with_slots() -> None:
     out = _redact_for_llm(
         "list_availability_slots",
         {
+            "total_returned": 2,
             "slots": [
                 {"start_at_iso": "2026-05-21T10:00", "provider_name": "Dr. Patel"},
                 {"start_at_iso": "2026-05-21T10:30", "provider_name": "Dr. Patel"},
-            ]
+            ],
         },
     )
-    assert "available slots" in out
+    # The redacted line now leads with the total count so the LLM can apply
+    # the adaptive offer rule (many → invert; few → read 2-3).
+    assert "2 slots available" in out
     assert "Dr. Patel" in out
     # Slot ids must NOT leak into what the LLM sees.
     assert "slot_id" not in out
@@ -181,6 +184,39 @@ def test_validate_against_memory_patient_id_mismatch(ehr_client: EHRClient) -> N
     assert err is not None
     assert err.code == "patient_id_mismatch"
     assert err.retryable is False
+
+
+def test_resolve_handles_overrides_bogus_patient_id_for_get_upcoming(
+    ehr_client: EHRClient,
+) -> None:
+    """The LLM never has the real patient UUID (it's redacted), so it passes the
+    caller's NAME as patient_id. The dispatcher must OVERRIDE it with the
+    identified patient's real id — not just fill when absent. Filling-only-when-
+    absent let "Ada Lovelace" reach the EHR, which 404'd and silently broke the
+    whole cancel/reschedule flow (appointment list never loaded → FSM never
+    reached CONFIRM_CANCEL → cancel_appointment never mounted)."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(identified_patient={"id": "patient-real-uuid"})
+    args = {"patient_id": "Ada Lovelace"}  # name, as the LLM actually sends
+    d._resolve_memory_handles("get_upcoming_appointments", args)
+    assert args["patient_id"] == "patient-real-uuid"
+
+
+def test_resolve_handles_overrides_bogus_patient_id_for_create_appointment(
+    ehr_client: EHRClient,
+) -> None:
+    """Same override applies to create_appointment so a name-as-patient_id can't
+    slip past and bounce as patient_id_mismatch / 404."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(
+        identified_patient={"id": "patient-real-uuid"},
+        last_slots=[{"slot_id": "slot-1"}],
+    )
+    args = {"slot_id": "1", "patient_id": "Ada Lovelace"}
+    d._resolve_memory_handles("create_appointment", args)
+    assert args["patient_id"] == "patient-real-uuid"
 
 
 def test_validate_against_memory_hallucinated_appointment_id(ehr_client: EHRClient) -> None:
@@ -486,11 +522,14 @@ def test_plain_cancel_routes_to_end_not_book_flow(ehr_client: EHRClient) -> None
 
 
 def test_hard_goodbye_fires_mid_utterance(ehr_client: EHRClient) -> None:
-    """`bye` anywhere in the utterance routes to END (hard goodbye tier)."""
+    """An explicit goodbye ('goodbye'/'hang up'/'end the call') routes to END
+    from anywhere in the utterance (hard goodbye tier). Note: bare 'bye' is
+    NOT hard-anywhere — mid-utterance it's the STT homophone of 'by the way'
+    and must not hang up (audit F-012); it only ends at the utterance tail."""
     canned = CannedLLM([])
     d = Dispatcher(llm=canned, ehr_client=ehr_client)
     d.state = State.IDENTIFY_PATIENT
-    d._maybe_transition_from_user_text("ok bye let's stop here")
+    d._maybe_transition_from_user_text("ok goodbye let's stop here")
     assert d.state is State.END
 
 

@@ -6,9 +6,10 @@ docstring promises ambiguous input "should fail loudly so the LLM re-asks
 the user" — these tests prove it does the opposite, turning "May" into
 today's date and registering corrupt DOBs into the EHR.
 
-The xfail-marked tests assert the *correct* behaviour (an `Err`); they
-flip to XPASS the day `_parse_dob` is fixed to reject default-injected
-parses, forcing removal of the marker.
+FIXED: `_parse_dob` now parses with two differing sentinel defaults and
+rejects the input when the two parses disagree on year/month/day (i.e. a
+component was absent and default-injected). These tests now pass as plain
+assertions of the corrected behaviour.
 """
 
 from __future__ import annotations
@@ -30,28 +31,17 @@ from prosper.tools import _parse_dob
         "15",  # day only → today's month + year
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason="F-001: dateutil default-injects today's components; partial dates "
-    "must be rejected but currently parse to an Ok with a fabricated date.",
-)
 def test_partial_date_must_be_rejected(raw: str) -> None:
-    """A date string missing month/day/year should be an Err, not a guess."""
+    """A date string missing month/day/year is an Err, not a guess (F-001 fixed)."""
     result = _parse_dob(raw)
     assert is_err(result), f"{raw!r} parsed to {getattr(result, 'value', None)!r}"
 
 
-def test_partial_date_currently_returns_today_components() -> None:
-    """Documents the actual (buggy) behaviour so the regression is unambiguous.
-
-    This is the mirror of the xfail above: it asserts the *current* wrong
-    behaviour, so if the fix lands this test must be updated in lockstep with
-    removing the xfail marker. Kept as a plain (passing) test on purpose.
-    """
+def test_time_only_input_is_rejected() -> None:
+    """'3pm' carries no date at all → must be rejected, not resolved to today."""
     result = _parse_dob("3pm")
-    assert is_ok(result)
-    # "3pm" carries no date whatsoever, yet we get a concrete calendar date.
-    assert isinstance(result.value, date)
+    assert is_err(result)
+    assert result.code == "dob_unparseable"
 
 
 def test_full_iso_date_still_parses() -> None:

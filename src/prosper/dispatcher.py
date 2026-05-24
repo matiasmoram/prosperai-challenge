@@ -33,9 +33,9 @@ from prosper.flows import ALLOWED_TOOLS, TRANSITIONS, State
 from prosper.observability.redact import mask_name, mask_phone
 from prosper.observability.timing import TimingCollector
 from prosper.prompts import CLINIC_PERSONA, FALLBACK_LINES, build_task_message
-from prosper.result import Err, Result, is_err, is_ok
+from prosper.result import Err, Ok, Result, is_err, is_ok
 from prosper.speculation import build_disambiguation_message, classify_find_result
-from prosper.tools import HANDLERS, TOOL_SCHEMAS
+from prosper.tools import HANDLERS, ROUTE_INTENT_TOOL, TOOL_SCHEMAS
 
 
 @dataclass
@@ -130,17 +130,31 @@ _BOOK_INTENT = re.compile(
     r"see (?:a |the )?(?:doctor|provider|therapist)|sign up|get in|come in)\b",
     re.I,
 )
+# Strong, unambiguous verbs used to break ties when both cancel- and book-
+# intent match (audit F-006). The generic cancel verbs in `_CANCEL_INTENT`
+# (skip/move/drop/remove) also appear in booking phrasings ("let's skip the
+# chit-chat, I want to BOOK"); an explicit "cancel" or an explicit
+# "book/schedule" verb is decisive and is checked before the broad sets.
+_STRONG_CANCEL = re.compile(r"\bcancel\w*\b", re.I)
+_STRONG_BOOK = re.compile(r"\b(?:book\w*|schedul\w*|sign\s+up|set\s+up)\b", re.I)
 # Universal goodbye intent — hanging up is always legal from any state, so a
 # match routes us to END regardless of where we are. Split into two tiers
 # to avoid the "never mind the insurance, I want to book" false positive
 # that aborted a valid booking pre-fix.
 #
 # Tier 1: unambiguous explicit goodbyes — match ANYWHERE in the utterance.
-# "ok bye let's stop", "no, goodbye then" — these are always sign-offs.
+# "ok goodbye let's stop", "no, goodbye then" — these are always sign-offs.
+# NOTE: bare "bye" is deliberately NOT here — see `_GOODBYE_BYE_TRAILING`.
 _GOODBYE_HARD = re.compile(
-    r"\b(?:bye|goodbye|hang up|end (?:the )?call)\b",
+    r"\b(?:goodbye|hang up|end (?:the )?call)\b",
     re.I,
 )
+# Bare "bye" is a sign-off ONLY at the end of the utterance ("ok, bye",
+# "thanks bye"). Mid-sentence it is almost always the STT homophone of "by"
+# ("bye the way, can you book me Tuesday"); matching it anywhere falsely hung
+# up an in-progress task (audit F-012). "goodbye"/"hang up"/"end the call"
+# stay matchable anywhere via `_GOODBYE_HARD`.
+_GOODBYE_BYE_TRAILING = re.compile(r"\bbye\b\s*[.!?…]*\s*$", re.I)
 # Tier 2: softer sign-offs that can appear mid-utterance with a totally
 # different meaning ("never mind the insurance, book me"). Require they sit
 # at the END of the utterance so context is implicitly "wrapping up".
@@ -154,7 +168,11 @@ _GOODBYE_INTENT_TRAILING = re.compile(
 
 def _has_goodbye_intent(text: str) -> bool:
     """Return True if the user signalled they want to end the call."""
-    return bool(_GOODBYE_HARD.search(text) or _GOODBYE_INTENT_TRAILING.search(text))
+    return bool(
+        _GOODBYE_HARD.search(text)
+        or _GOODBYE_BYE_TRAILING.search(text)
+        or _GOODBYE_INTENT_TRAILING.search(text)
+    )
 
 
 # Matches the bracketed handles `_redact_for_llm` emits — `[1]`, `1`, `#1`,
@@ -191,8 +209,16 @@ _ORDINAL_WORDS: Final[dict[str, int]] = {
     "fourth": 3,
     "last": -1,
 }
-_PICK_NUMBER_RE = re.compile(
-    r"\b(?:number|option|the)?\s*#?\s*(\d{1,2})\b|\b(one|two|three|four)\b", re.I
+_PICK_DIGIT_RE = re.compile(r"\b(?:number|option|the)?\s*#?\s*(\d{1,2})\b", re.I)
+# Spoken cardinal as a pick: standalone ("two", "two please") or explicitly
+# cued ("number two", "option one"). A bare cardinal embedded in a phrase is
+# almost always a PRONOUN ("that one", "one more time", "the fifth one",
+# "which one", "neither one") and must NOT select a candidate — matching it
+# silently mis-identified the caller as candidate #1 (audit F-013).
+_PICK_CARDINAL_RE = re.compile(
+    r"^\s*(one|two|three|four)\b(?:\s+please)?[\s.!?]*$"
+    r"|\b(?:number|option)\s+(one|two|three|four)\b",
+    re.I,
 )
 _SPOKEN_NUMBERS: Final[dict[str, int]] = {"one": 1, "two": 2, "three": 3, "four": 4}
 
@@ -212,12 +238,17 @@ def _pick_candidate_index(user_text: str, count: int) -> int | None:
         if re.search(rf"\b{word}\b", lowered):
             resolved = count - 1 if idx == -1 else idx
             return resolved if 0 <= resolved < count else None
-    match = _PICK_NUMBER_RE.search(lowered)
-    if match is not None:
-        raw = match.group(1) or match.group(2)
-        n = _SPOKEN_NUMBERS.get(raw, None) if raw in _SPOKEN_NUMBERS else int(raw)
-        if n is not None and 1 <= n <= count:
-            return n - 1
+    digit_match = _PICK_DIGIT_RE.search(lowered)
+    if digit_match is not None:
+        n_digit = int(digit_match.group(1))
+        if 1 <= n_digit <= count:
+            return n_digit - 1
+    cardinal_match = _PICK_CARDINAL_RE.search(lowered)
+    if cardinal_match is not None:
+        raw = cardinal_match.group(1) or cardinal_match.group(2)
+        n_card = _SPOKEN_NUMBERS.get(raw)
+        if n_card is not None and 1 <= n_card <= count:
+            return n_card - 1
     return None
 
 
@@ -225,6 +256,18 @@ def _pick_candidate_index(user_text: str, count: int) -> int | None:
 # call begins. Module-level constant so the value lives in one place — the
 # frontend reads the spec, not the dispatcher source.
 _INIT_STATE_SENTINEL: Final[str] = "(init)"
+
+
+# HYBRID navigation: maps the LLM-declared ``route_intent`` intent to an FSM
+# transition label. The dispatcher still validates the label is a legal edge
+# from the current state (``_handle_route_intent``) — the LLM does the NLU,
+# the FSM keeps authority over the graph. ``done`` is the explicit hang-up.
+_INTENT_TO_LABEL: Final[dict[str, str]] = {
+    "book": "wants_book",
+    "cancel": "wants_cancel",
+    "reschedule": "wants_reschedule",
+    "done": "goodbye",
+}
 
 
 def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
@@ -242,9 +285,10 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
         next_day = value.get("next_day_with_slots")
         asked_date = value.get("asked_date", "that date")
         if not slots and next_day:
+            nd_total = next_day.get("total_returned", len(next_day["slots"]))
             return (
                 f"no slots on {asked_date}; next available is "
-                f"{next_day['date']} — slots: "
+                f"{next_day['date']} ({nd_total} free) — slots: "
                 + "; ".join(
                     f"[{i + 1}] {s['start_at_iso']} with {s['provider_name']}"
                     for i, s in enumerate(next_day["slots"][:6])
@@ -252,10 +296,15 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
             )
         if not slots:
             return f"no slots available for {asked_date} or the next 6 days"
-        return "available slots: " + "; ".join(
+        # Lead with the total so the model applies the adaptive rule: many →
+        # invert (ask preference, don't list); few → read 2-3. We still show
+        # the first 6 as concrete handles regardless.
+        total = value.get("total_returned", len(slots))
+        listed = "; ".join(
             f"[{i + 1}] {s['start_at_iso']} with {s['provider_name']}"
             for i, s in enumerate(slots[:6])
         )
+        return f"{total} slots available on {asked_date} (showing first {min(total, 6)}): {listed}"
     if name == "get_upcoming_appointments":
         appts = value.get("appointments", [])
         if not appts:
@@ -343,6 +392,14 @@ class Dispatcher:
         # the same id when an error fires.
         self.session_id: str = session_id or str(uuid.uuid4())
         self.turn_id: int = 0
+        # Monotonic per-session counter for console tool-call correlation.
+        # The LLM-provided ``ToolCall.id`` is the right key for OpenAI's
+        # tool_call_id wiring, but mock/canned LLMs reuse a stub id
+        # ("call_stub") so it is NOT unique per call. The operator console
+        # keys its tool-row DOM nodes on ``call_id``; a repeated id makes
+        # the end-event update the wrong row (rows stick on "running").
+        # This counter gives every tool execution a console-unique id.
+        self._tool_event_seq: int = 0
         # Propagate the session id into the EHR client so its X-Request-Id
         # header includes it on every httpx call.
         self._ehr.set_session_id(self.session_id)
@@ -580,13 +637,45 @@ class Dispatcher:
                         }
                     )
                     continue
-                result = await self._execute_tool(call)
+                # HYBRID navigation: route_intent is whitelisted but has no EHR
+                # handler — the dispatcher applies the transition itself after
+                # validating it against the FSM (LLM proposes, dispatcher
+                # disposes). Intercept here so it never reaches HANDLERS.
+                if call.name == ROUTE_INTENT_TOOL:
+                    result = self._handle_route_intent(call)
+                else:
+                    result = await self._execute_tool(call)
                 self._record_tool_result(call.name, result, tool_call_id=call.id)
                 self._maybe_transition_from_tool(call.name, result)
 
             msgs = self._messages_for_llm()
             tools = [TOOL_SCHEMAS[name] for name in sorted(ALLOWED_TOOLS[self.state])]
             if self.state is State.END:
+                # The reply that called the just-executed tool was generated
+                # BEFORE its result existed — at END its text can wrongly
+                # claim a write failed on a success (seen live: "there was an
+                # issue with the booking" after a 201). Generate ONE final
+                # confirmation turn (END exposes no tools) so the model speaks
+                # from the recorded Ok result. Fall back to the prior text if
+                # the model returns nothing (e.g. a mock script with no
+                # trailing line).
+                async with self.timing.measure(
+                    phase="llm",
+                    state=self.state.value,
+                    session_id=self.session_id,
+                    turn_id=self.turn_id,
+                ):
+                    final = await self._llm.generate(state=self.state.value, history=msgs, tools=[])
+                if final.text:
+                    self.history.append({"role": "assistant", "content": final.text})
+                    self.transcript.append(
+                        {"kind": "assistant", "state": self.state.value, "text": final.text}
+                    )
+                    self._publish(
+                        "transcript_turn",
+                        {"role": "bot", "text": final.text, "turn_id": self.turn_id},
+                    )
+                    reply = final
                 break
         else:
             # Loop exhausted (4 iterations) without ever hitting
@@ -611,6 +700,12 @@ class Dispatcher:
         number or DOB the LLM is feeding us.
         """
         handler = HANDLERS[call.name]
+        # Console-unique correlation id for this tool execution. Distinct
+        # from ``call.id`` (which feeds OpenAI's tool_call_id and may be a
+        # reused stub under mock LLMs). Paired across this call's
+        # tool_call_start / tool_call_end so the console matches rows.
+        event_call_id = f"t{self.turn_id}-{self._tool_event_seq}"
+        self._tool_event_seq += 1
         args = dict(call.arguments)
         # Test convenience: __use_first_slot__ pulls the slot id we just listed.
         if args.pop("__use_first_slot__", False) and self.memory.last_slots:
@@ -637,14 +732,14 @@ class Dispatcher:
                 {
                     "tool": call.name,
                     "args_redacted": _redact_tool_args(call.name, args),
-                    "call_id": call.id,
+                    "call_id": event_call_id,
                 },
             )
             self._publish(
                 "tool_call_end",
                 {
                     "tool": call.name,
-                    "call_id": call.id,
+                    "call_id": event_call_id,
                     "outcome": "err",
                     "code": guard_err.code,
                     "duration_ms": 0.0,
@@ -656,7 +751,7 @@ class Dispatcher:
             {
                 "tool": call.name,
                 "args_redacted": _redact_tool_args(call.name, args),
-                "call_id": call.id,
+                "call_id": event_call_id,
             },
         )
 
@@ -680,7 +775,7 @@ class Dispatcher:
             "tool_call_end",
             {
                 "tool": call.name,
-                "call_id": call.id,
+                "call_id": event_call_id,
                 "outcome": outcome_label,
                 "code": err_code,
                 "duration_ms": duration_ms,
@@ -688,6 +783,49 @@ class Dispatcher:
         )
         self._publish("latency_tick", {"phase": f"tool:{call.name}", "duration_ms": duration_ms})
         return result
+
+    def _handle_route_intent(self, call: ToolCall) -> Result[dict[str, Any]]:
+        """Apply an LLM-proposed navigation intent, validated against the FSM.
+
+        The HYBRID navigation path (ADR/council 2026-05-24): the LLM declares
+        the caller's intent via ``route_intent`` and the dispatcher maps it to
+        a transition label, applying it ONLY if the edge is legal from the
+        current state. This moves the NLU (which the regex did badly — audit
+        F-006/F-012/F-013) to the LLM while the dispatcher keeps authority over
+        the state graph. An unknown intent or an illegal edge returns an ``Err``
+        fed back to the LLM so it re-asks instead of the bot stalling silently.
+        Never touches the EHR — it is intercepted before ``_execute_tool``.
+        """
+        intent = str(call.arguments.get("intent") or "").strip().lower()
+        label = _INTENT_TO_LABEL.get(intent)
+        if label is None:
+            return Err(
+                code="unknown_intent",
+                message=(
+                    f"intent {intent!r} is not one of {sorted(_INTENT_TO_LABEL)}; "
+                    "ask the caller to clarify"
+                ),
+                retryable=True,
+            )
+        if label not in TRANSITIONS.get(self.state, {}):
+            return Err(
+                code="illegal_transition",
+                message=(
+                    f"cannot route to {intent!r} from {self.state.value}; "
+                    "ask the caller what they need"
+                ),
+                retryable=True,
+            )
+        self.transcript.append(
+            {
+                "kind": "route_intent",
+                "intent": intent,
+                "label": label,
+                "from": self.state.value,
+            }
+        )
+        self._transition(label)
+        return Ok(value={"routed_to": intent})
 
     @staticmethod
     def _filter_handler_kwargs(handler: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -716,13 +854,15 @@ class Dispatcher:
             idx = _maybe_handle_index(args.get("slot_id"))
             if idx is not None and 0 <= idx < len(self.memory.last_slots):
                 args["slot_id"] = self.memory.last_slots[idx]["slot_id"]
-            # Common LLM slip: pass `slot_id` but forget `patient_id`. Auto-fill
-            # from the identified patient so we don't bounce the call with a
-            # `missing_patient_id` error the user would hear as confusion.
-            if not args.get("patient_id"):
-                identified = self.memory.identified_patient or {}
-                if identified.get("id"):
-                    args["patient_id"] = identified["id"]
+            # The LLM never has the real patient UUID (audit A3 redacts it),
+            # so any patient_id it passes is a name/handle, not a valid id.
+            # ALWAYS override with the identified caller's real id — not just
+            # when omitted. Filling-only-when-absent let a name-as-patient_id
+            # ("Ada Lovelace") slip through to the EHR. This also enforces
+            # "book for the caller only" (cross-patient writes are forbidden).
+            identified = self.memory.identified_patient or {}
+            if identified.get("id"):
+                args["patient_id"] = identified["id"]
         elif name == "cancel_appointment":
             idx = _maybe_handle_index(args.get("appointment_id"))
             if idx is not None and 0 <= idx < len(self.memory.last_upcoming_appointments):
@@ -734,7 +874,13 @@ class Dispatcher:
             idx_slot = _maybe_handle_index(args.get("slot_id"))
             if idx_slot is not None and 0 <= idx_slot < len(self.memory.last_slots):
                 args["slot_id"] = self.memory.last_slots[idx_slot]["slot_id"]
-        elif name == "get_upcoming_appointments" and not args.get("patient_id"):
+        elif name == "get_upcoming_appointments":
+            # Same as create_appointment: the LLM only ever has the patient's
+            # name (UUID is redacted), so it passes the name as patient_id and
+            # the EHR 404s with patient_not_found — which silently breaks the
+            # entire cancel/reschedule flow (the appointment list never loads,
+            # so the FSM never reaches CONFIRM_CANCEL / CONFIRM_RESCHEDULE and
+            # cancel_appointment is never even mounted). Always override.
             identified = self.memory.identified_patient or {}
             if identified.get("id"):
                 args["patient_id"] = identified["id"]
@@ -971,9 +1117,20 @@ class Dispatcher:
         # exposing a `goodbye` label from every non-terminal state; if a
         # state doesn't, `_transition` is a no-op (safe by construction).
         if _has_goodbye_intent(user_text):
-            self._transition("goodbye")
-            if self.state is State.END:
-                return
+            # F-009: at a CONFIRM_* state an utterance that ALSO affirms
+            # ("yes, book it, thanks bye") must let the pending action run
+            # first — hanging up here would jump to END (no tools) and the
+            # just-confirmed booking/cancel/reschedule would never fire. The
+            # affirmation wins; the goodbye is honoured on a later turn.
+            at_confirm = self.state in (
+                State.CONFIRM_BOOK,
+                State.CONFIRM_CANCEL,
+                State.CONFIRM_RESCHEDULE,
+            )
+            if not (at_confirm and _AFFIRM.search(user_text)):
+                self._transition("goodbye")
+                if self.state is State.END:
+                    return
         if self.state is State.GREETING:
             self._transition("go_identify")
             return
@@ -997,6 +1154,14 @@ class Dispatcher:
             if _RESCHEDULE_INTENT.search(user_text):
                 self.memory.wants_reschedule = False
                 self._transition("wants_reschedule")
+            # Explicit "cancel" or explicit "book/schedule" verbs are decisive
+            # and beat the broad generic verbs (skip/move/remove) that occur in
+            # both kinds of phrasing — "let's skip the chit-chat, I want to
+            # book" must route to BOOK_FLOW, not CANCEL_FLOW (audit F-006).
+            elif _STRONG_CANCEL.search(user_text):
+                self._transition("wants_cancel")
+            elif _STRONG_BOOK.search(user_text):
+                self._transition("wants_book")
             elif _CANCEL_INTENT.search(user_text):
                 self._transition("wants_cancel")
             elif _BOOK_INTENT.search(user_text):
@@ -1031,6 +1196,18 @@ class Dispatcher:
         self._transition("patient_found")
 
     def _maybe_transition_from_tool(self, tool_name: str, result: Result[dict[str, Any]]) -> None:
+        # F-011: a triage red flag (suggest_specialty → medical_emergency) is a
+        # hard stop. Route to END so the booking tools are physically
+        # unmounted; the LLM still sees the Err message instructing the 911
+        # redirect, but it can no longer book even if it ignores the guidance.
+        if (
+            self.state is State.BOOK_FLOW
+            and tool_name == "suggest_specialty"
+            and is_err(result)
+            and result.code == "medical_emergency"
+        ):
+            self._transition("medical_emergency")
+            return
         if self.state is State.IDENTIFY_PATIENT and tool_name in (
             "find_patient_by_phone",
             "find_patient_by_name_dob",
@@ -1154,17 +1331,21 @@ class Dispatcher:
         Four outcome categories — chosen so a clinic-analytics dashboard
         can answer the four questions that actually matter:
 
-        - ``booked``     — `_transition` fired with label ``booked``.
-        - ``cancelled``  — `_transition` fired with label ``cancelled``.
-        - ``refused``    — the bot reached a confirmation state and the
-                           caller declined (the LLM steered us through
-                           CONFIRM_BOOK / CONFIRM_CANCEL without an
-                           actual booked/cancelled trigger).
-        - ``abandoned``  — everything else: a goodbye that landed before
-                           confirmation, even if a registration or
-                           lookup tool already ran. Post-registration
-                           hangups are NOT refusals — the bot was never
-                           rejected, the caller just left.
+        - ``booked``      — `_transition` fired with label ``booked``.
+        - ``cancelled``   — `_transition` fired with label ``cancelled``.
+        - ``rescheduled`` — `_transition` fired with label ``rescheduled``
+                            (CONFIRM_RESCHEDULE → END). A completed move is
+                            a positive outcome, NOT an abandoned call.
+        - ``refused``     — the bot reached a confirmation state and the
+                            caller declined (the LLM steered us through
+                            CONFIRM_BOOK / CONFIRM_CANCEL / CONFIRM_RESCHEDULE
+                            without an actual booked/cancelled/rescheduled
+                            trigger).
+        - ``abandoned``   — everything else: a goodbye that landed before
+                            confirmation, even if a registration or
+                            lookup tool already ran. Post-registration
+                            hangups are NOT refusals — the bot was never
+                            rejected, the caller just left.
 
         The distinction matters: "refused" implies an offer was made and
         declined (a UX or trust signal); "abandoned" is a generic drop.
@@ -1174,9 +1355,12 @@ class Dispatcher:
             outcome = "booked"
         elif trigger_label == "cancelled":
             outcome = "cancelled"
+        elif trigger_label == "rescheduled":
+            outcome = "rescheduled"
         else:
             reached_confirm = any(
-                t.get("kind") == "transition" and t.get("to") in ("CONFIRM_BOOK", "CONFIRM_CANCEL")
+                t.get("kind") == "transition"
+                and t.get("to") in ("CONFIRM_BOOK", "CONFIRM_CANCEL", "CONFIRM_RESCHEDULE")
                 for t in self.transcript
             )
             outcome = "refused" if reached_confirm else "abandoned"
@@ -1309,15 +1493,20 @@ class Dispatcher:
         providers = sorted({str(s.get("provider_name") or "?") for s in slots})
         first_date = str(slots[0].get("start_at_iso") or slots[0].get("start_at") or "")
         last_date = str(slots[-1].get("start_at_iso") or slots[-1].get("start_at") or "")
-        self._publish(
-            "slots_offered",
-            {
-                "count": len(slots),
-                "providers": providers,
-                "first_date": first_date,
-                "last_date": last_date,
-            },
-        )
+        payload: dict[str, Any] = {
+            "count": len(slots),
+            "providers": providers,
+            "first_date": first_date,
+            "last_date": last_date,
+        }
+        # Surface the triage recommendation alongside availability so the
+        # operator/receptionist sees WHY this caller is routed to a given
+        # specialty + visit length (the handoff context a doctor needs).
+        if self.memory.recommended_specialty:
+            payload["recommended_specialty"] = self.memory.recommended_specialty
+        if self.memory.recommended_duration_minutes:
+            payload["recommended_duration_minutes"] = self.memory.recommended_duration_minutes
+        self._publish("slots_offered", payload)
 
 
 def _redact_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:

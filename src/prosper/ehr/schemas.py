@@ -61,9 +61,7 @@ class PatientCreate(BaseModel):
         this only blocks obviously-hostile or unusable input at the boundary.
         """
         if not _PHONE_ALLOWED.match(v):
-            raise ValueError(
-                "phone may contain only digits and the punctuation + - . ( ) space"
-            )
+            raise ValueError("phone may contain only digits and the punctuation + - . ( ) space")
         if sum(c.isdigit() for c in v) < _MIN_PHONE_DIGITS:
             raise ValueError(f"phone must contain at least {_MIN_PHONE_DIGITS} digits")
         return v

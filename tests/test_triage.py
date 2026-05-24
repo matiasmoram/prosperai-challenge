@@ -146,6 +146,47 @@ async def test_classify_symptoms_transport_error_is_err() -> None:
     assert r.retryable is True
 
 
+async def test_classify_symptoms_non_object_json_is_err() -> None:
+    """A bare array / string / number is valid JSON but not a classification."""
+    for payload in ("[1, 2, 3]", '"just a string"', "42", "null"):
+        r = await classify_symptoms(symptoms="x", client=_FakeOpenAI(content=payload))
+        assert is_err(r), payload
+        assert r.code == "triage_unavailable", payload
+
+
+async def test_classify_symptoms_missing_specialty_key_is_err() -> None:
+    client = _FakeOpenAI(content=json.dumps({"duration_minutes": 30, "confidence": 0.9}))
+    r = await classify_symptoms(symptoms="x", client=client)
+    assert is_err(r)
+    assert r.code == "unknown_specialty"
+
+
+async def test_classify_symptoms_non_numeric_confidence_is_err() -> None:
+    """A string confidence ('high') must not raise — coerced to a typed Err."""
+    client = _FakeOpenAI(content=_classification_json(confidence="high"))
+    r = await classify_symptoms(symptoms="x", client=client)
+    assert is_err(r)
+    assert r.code == "triage_unavailable"
+
+
+async def test_classify_symptoms_extra_keys_ignored() -> None:
+    """Unexpected extra keys are tolerated as long as required ones are valid."""
+    client = _FakeOpenAI(content=_classification_json(injected="ignore me", another=123))
+    r = await classify_symptoms(symptoms="x", client=client)
+    assert is_ok(r)
+    assert r.value.specialty == "General Practice"
+
+
+async def test_classify_symptoms_confidence_boundaries_preserved() -> None:
+    """Confidence is passed through verbatim (routing-threshold policy lives in
+    the agent prompt, not the classifier) — pin 0.0 and 1.0 extremes."""
+    for c in (0.0, 1.0):
+        client = _FakeOpenAI(content=_classification_json(confidence=c))
+        r = await classify_symptoms(symptoms="x", client=client)
+        assert is_ok(r)
+        assert r.value.confidence == pytest.approx(c)
+
+
 # ---------------------------------------------------------------------------
 # suggest_specialty_handler — wraps classify_symptoms, adds red-flag escalation
 # ---------------------------------------------------------------------------

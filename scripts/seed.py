@@ -1,8 +1,8 @@
 """Seed the local SQLite EHR with demo data.
 
 Inserts five providers across five specialties (Therapist, Psychiatrist,
-General Practice, Dermatologist, Physiotherapist) and ~500 slots (next 14
-days, 9am-5pm UTC, every 30 min, lunch noon-1pm skipped) plus 2 demo
+General Practice, Dermatologist, Physiotherapist) and ~980 slots (next 14
+days, 9am-5pm UTC, every 30 min, lunch noon-1pm skipped) plus 10 demo
 patients. Idempotent: skips inserts if matching rows already exist.
 
 Run: ``uv run python scripts/seed.py``
@@ -26,21 +26,29 @@ PROVIDERS = [
     ("Dr. Yuki Tanaka", "America/New_York", "Physiotherapist"),
 ]
 
+def _patient(first: str, last: str, dob: date, phone: str) -> dict[str, object]:
+    return {
+        "first_name": first,
+        "last_name": last,
+        "name_normalized": f"{first} {last}".lower(),
+        "dob": dob,
+        "phone": phone,
+    }
+
+
+# A fuller roster so the demo DB looks like a real clinic (10 patients).
+# Phones are distinct +1-202-555-01xx test numbers (NANP 555 reserved range).
 DEMO_PATIENTS = [
-    {
-        "first_name": "Ada",
-        "last_name": "Lovelace",
-        "name_normalized": "ada lovelace",
-        "dob": date(1990, 12, 10),
-        "phone": "+12025550100",
-    },
-    {
-        "first_name": "Grace",
-        "last_name": "Hopper",
-        "name_normalized": "grace hopper",
-        "dob": date(1906, 12, 9),
-        "phone": "+12025550111",
-    },
+    _patient("Ada", "Lovelace", date(1990, 12, 10), "+12025550100"),
+    _patient("Grace", "Hopper", date(1906, 12, 9), "+12025550111"),
+    _patient("John", "Smith", date(1985, 3, 12), "+12025550102"),
+    _patient("Maria", "Garcia", date(1972, 11, 4), "+12025550103"),
+    _patient("James", "Williams", date(1968, 7, 21), "+12025550104"),
+    _patient("Patricia", "Brown", date(1995, 2, 28), "+12025550105"),
+    _patient("Robert", "Jones", date(1959, 9, 15), "+12025550106"),
+    _patient("Linda", "Nguyen", date(2001, 6, 3), "+12025550107"),
+    _patient("Michael", "O'Brien", date(1980, 1, 30), "+12025550108"),
+    _patient("Fatima", "Al-Sayed", date(1993, 10, 18), "+12025550109"),
 ]
 
 

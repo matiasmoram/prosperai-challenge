@@ -32,7 +32,11 @@ ALLOWED_TOOLS: dict[State, set[str]] = {
     State.GREETING: set(),
     State.IDENTIFY_PATIENT: {"find_patient_by_phone", "find_patient_by_name_dob"},
     State.REGISTER_PATIENT: {"create_patient"},
-    State.CHOOSE_INTENT: set(),
+    # ``route_intent`` is the HYBRID navigation tool: the LLM proposes the
+    # caller's intent and the dispatcher validates the edge (see
+    # ``Dispatcher._handle_route_intent``). It is whitelisted here but handled
+    # internally — it has no EHR handler in ``HANDLERS`` (see ``INTERNAL_TOOLS``).
+    State.CHOOSE_INTENT: {"route_intent"},
     State.BOOK_FLOW: {"list_availability_slots", "suggest_specialty"},
     State.CANCEL_FLOW: {"get_upcoming_appointments"},
     # Reschedule needs BOTH lookups in one state so the bot can pick the
@@ -44,6 +48,14 @@ ALLOWED_TOOLS: dict[State, set[str]] = {
     State.CONFIRM_RESCHEDULE: {"reschedule_appointment"},
     State.END: set(),
 }
+
+
+# Tools the dispatcher handles internally (no EHR call, no latency, no entry in
+# ``tools.HANDLERS``). They are whitelisted in ``ALLOWED_TOOLS`` so the LLM can
+# call them, but ``Dispatcher._llm_turn`` intercepts them before ``_execute_tool``.
+# Kept here so both the dispatcher (interception) and ``bot._should_emit_filler``
+# (which must not predict latency for a tool that fires none) share one source.
+INTERNAL_TOOLS: frozenset[str] = frozenset({"route_intent"})
 
 
 TRANSITIONS: Mapping[State, Mapping[str, State]] = {
@@ -63,6 +75,11 @@ TRANSITIONS: Mapping[State, Mapping[str, State]] = {
     State.BOOK_FLOW: {
         "slot_chosen": State.CONFIRM_BOOK,
         "nothing_to_book": State.END,
+        # Triage red flag (suggest_specialty → medical_emergency): unmount the
+        # booking tools immediately so the agent cannot book a routine visit
+        # for a caller in a medical emergency — the 911 redirect is then a
+        # hard FSM guarantee, not just prompt guidance (audit F-011).
+        "medical_emergency": State.END,
         "goodbye": State.END,
     },
     State.CANCEL_FLOW: {

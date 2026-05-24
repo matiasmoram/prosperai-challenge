@@ -210,7 +210,9 @@ async def _live_event_iter(
     Sends a heartbeat every `_HEARTBEAT_INTERVAL_S` seconds even when no
     events arrive — without it, idle clients get disconnected by proxies.
     """
-    async with bus.subscribe() as queue:
+    # Subscribe scoped to this session so a chatty unrelated session cannot
+    # evict this stream's events from a shared bounded queue (audit F-010).
+    async with bus.subscribe(session_id) as queue:
         while True:
             if await request.is_disconnected():
                 return
@@ -222,9 +224,9 @@ async def _live_event_iter(
             except asyncio.TimeoutError:
                 yield _sse_heartbeat()
                 continue
+            # Defence in depth: the bus already filters by session_id; keep the
+            # guard so a future unfiltered subscription can't leak cross-session.
             if event.session_id != session_id:
-                # The bus is global; one subscriber sees every session's
-                # events. Filter here so the browser only receives its own.
                 continue
             yield _sse_format(event)
 
@@ -249,3 +251,8 @@ async def _replay_event_iter(
             await asyncio.sleep(min(gap, _REPLAY_MAX_GAP_S))
         last_ts = event.ts
         yield _sse_format(event)
+    # Terminal sentinel: a named SSE event the client listens for so it
+    # can close the EventSource. Without it the browser treats the closed
+    # stream as a dropped connection and auto-reconnects, replaying the
+    # whole session again and duplicating every rendered row.
+    yield "event: replay_complete\ndata: {}\n\n"

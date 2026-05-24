@@ -18,6 +18,7 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -26,11 +27,32 @@ import aiofiles
 from prosper.console._utils import check_session_id
 from prosper.console.bus import ConsoleBus
 from prosper.console.events import ConsoleEvent
+from prosper.observability.redact import redact_pii
 
 if TYPE_CHECKING:
     from aiofiles.threadpool.text import AsyncTextIOWrapper
 
 logger = logging.getLogger(__name__)
+
+
+def _redact_event_for_audit(event: ConsoleEvent) -> ConsoleEvent:
+    """Scrub free-form PII from an event before it is persisted to disk.
+
+    ``transcript_turn`` carries the caller's (and bot's) raw utterance in
+    ``payload['text']``, which can contain a spoken phone number or DOB. The
+    live SSE stream keeps the raw text (the operator legitimately needs it),
+    but the durable JSONL must not (audit F-007). Every other event type
+    already arrives PII-redacted at the publish boundary
+    (``dispatcher._redact_tool_args`` + the bus ``*_masked`` check).
+    """
+    if event.type == "transcript_turn":
+        text = event.payload.get("text")
+        if isinstance(text, str) and text:
+            new_payload = dict(event.payload)
+            new_payload["text"] = redact_pii(text)
+            return replace(event, payload=new_payload)
+    return event
+
 
 # Default audit root. Override via env var for tests that want an isolated
 # directory without touching the repo's `data/audit/`. The env var is read
@@ -87,6 +109,7 @@ class AuditJSONLWriter:
         blocking syscall does not stall the event loop on slow disks.
         """
         check_session_id(event.session_id)
+        event = _redact_event_for_audit(event)
         async with self._lock:
             handle = self._handles.get(event.session_id)
             if handle is None:

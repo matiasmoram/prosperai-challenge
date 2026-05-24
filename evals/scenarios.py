@@ -561,6 +561,40 @@ SCENARIOS: list[Scenario] = [
         max_turns=10,
     ),
     Scenario(
+        name="ambiguous_intent_routed_via_tool",
+        tags=frozenset({"edge", "hybrid"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You want to cancel a Friday visit but you NEVER use the word "
+            "'cancel' or 'reschedule'. When the bot asks what you need, say "
+            "VERBATIM: \"I don't think I'm going to be able to make it in on "
+            'Friday after all." Let the bot work out that you want to cancel. '
+            "After it tells you there's nothing on your calendar, end VERBATIM "
+            'with: "ah okay, never mind then. goodbye."'
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=0,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            # route_intent firing proves the HYBRID path carried the navigation
+            # the user-text regex could not classify.
+            expected_tool_call_codes=["route_intent", "get_upcoming_appointments"],
+            forbidden_tool_calls=[
+                "cancel_appointment",
+                "create_appointment",
+                "create_patient",
+            ],
+        ),
+        judge_criteria=[
+            "the bot identified the caller and understood they wanted to cancel",
+            "the bot stated there were no upcoming appointments",
+            "the bot did not invent an appointment or claim to cancel anything",
+        ],
+        max_turns=10,
+    ),
+    Scenario(
         name="multi_turn_drift_hallucinated_slot",
         tags=frozenset({"adversarial", "hallucination"}),
         persona=(

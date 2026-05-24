@@ -99,7 +99,19 @@ class EHRClient:
             headers = dict(kwargs.pop("headers", {}) or {})
             headers.setdefault("X-Request-Id", req_id)
             kwargs["headers"] = headers
-        r = await self._c().request(method, path, **kwargs)
+        try:
+            r = await self._c().request(method, path, **kwargs)
+        except httpx.HTTPError as e:
+            # Transport-level failure (EHR process down → ConnectError, slow →
+            # ReadTimeout, DNS, etc). These are NOT EHRHTTPError, so without
+            # this they'd propagate uncaught out of the tool handlers (which
+            # only catch EHRHTTPError) and crash the dispatcher turn (audit
+            # F-008). Re-raise as a 503 EHRHTTPError so each handler converts
+            # it to Err(ehr_error, retryable=True) and the bot degrades
+            # gracefully instead of dropping the call.
+            raise EHRHTTPError(
+                503, {"code": "ehr_unreachable", "message": f"{type(e).__name__}: {e}"}
+            ) from e
         if r.status_code >= 400:
             try:
                 detail = r.json().get("detail")

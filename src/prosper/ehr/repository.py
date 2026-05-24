@@ -230,6 +230,13 @@ def list_available_slots(
     # starting near end-of-day can still see the next morning's slot — but
     # we cap at "today's last_minute + slots_needed * grid" to keep the
     # working set small.
+    # TODO(hours>17:00): the horizon intentionally spills past midnight so a
+    # late anchor can chain into the next calendar day. With the current
+    # 9am-5pm seed no slot exists late enough to trigger this, so a chain
+    # never actually crosses midnight in practice. If clinic hours ever
+    # extend past ~22:30, constrain the chain to a single calendar day (or
+    # to published business hours) so a booking can't silently span the
+    # overnight gap. Pinned by test_multislot_chain_can_cross_midnight.
     horizon_end = day_end + timedelta(minutes=SLOT_GRID_MINUTES * slots_needed)
     horizon_stmt = (
         select(Slot)
@@ -323,12 +330,42 @@ def create_appointment(
         .where(Appointment.status == AppointmentStatus.SCHEDULED)
     ).scalar_one_or_none()
     if existing is not None:
-        # Same patient already holds this anchor slot → idempotent return,
-        # regardless of the requested duration. A caller can't hold two
-        # appointments starting at the same slot; re-asking with a different
-        # duration is a no-op, not a "taken by someone else" 409. (Changing
-        # the duration of an existing booking is a reschedule, not a create.)
         if existing.patient_id == patient_id:
+            if existing.duration_minutes == duration_minutes:
+                return existing  # exact same booking → idempotent
+            # F-005: same patient changing their OWN booking's duration on the
+            # same anchor ("actually make it an hour"). Re-acquire the chain in
+            # place instead of raising SlotTakenError with owner == the caller
+            # (which tools.py would mislabel as "taken by another patient").
+            # Release this appointment's own locks first so the chain check
+            # sees those slots as free.
+            session.execute(
+                delete(AppointmentSlotLock).where(AppointmentSlotLock.appointment_id == existing.id)
+            )
+            session.flush()
+            own_chain = _resolve_slot_chain(
+                session, anchor_slot_id=slot_id, slots_needed=slots_needed
+            )
+            existing.duration_minutes = duration_minutes
+            if notes is not None:
+                existing.notes = notes
+            for sid in own_chain:
+                session.add(AppointmentSlotLock(slot_id=sid, appointment_id=existing.id))
+            try:
+                session.commit()
+            except IntegrityError as e:
+                session.rollback()
+                owner_id = "unknown"
+                for sid in own_chain:
+                    race_lock = session.execute(
+                        select(AppointmentSlotLock).where(AppointmentSlotLock.slot_id == sid)
+                    ).scalar_one_or_none()
+                    if race_lock is not None and race_lock.appointment_id != existing.id:
+                        owning = session.get(Appointment, race_lock.appointment_id)
+                        if owning is not None:
+                            owner_id = owning.patient_id
+                            break
+                raise SlotTakenError(slot_id=slot_id, owner_patient_id=owner_id) from e
             return existing
         raise SlotTakenError(slot_id=slot_id, owner_patient_id=existing.patient_id)
     chain = _resolve_slot_chain(session, anchor_slot_id=slot_id, slots_needed=slots_needed)

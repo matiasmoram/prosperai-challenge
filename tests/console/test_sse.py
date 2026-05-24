@@ -95,7 +95,12 @@ async def test_replay_endpoint_returns_events_in_order(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     frames = _parse_sse_data_frames(response.text)
-    assert [f["ts"] for f in frames] == [0.0, 1.0, 2.0]
+    # The recorded events come first, in order. A terminal `replay_complete`
+    # sentinel frame (payload `{}`, no `ts`) follows so the browser closes
+    # the EventSource instead of auto-reconnecting and re-replaying.
+    event_frames = [f for f in frames if "ts" in f]
+    assert [f["ts"] for f in event_frames] == [0.0, 1.0, 2.0]
+    assert "event: replay_complete" in response.text
 
 
 @pytest.mark.asyncio

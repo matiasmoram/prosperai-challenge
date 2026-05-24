@@ -71,6 +71,23 @@ def build_app(bus: ConsoleBus, audit: AuditJSONLWriter) -> FastAPI:
     isolated app without touching module-level state.
     """
     app = FastAPI(title="Prosper · Operator Console", docs_url=None, redoc_url=None)
+
+    @app.middleware("http")
+    async def _no_store_static(request, call_next):  # type: ignore[no-untyped-def]
+        """Never let the browser cache console assets.
+
+        The operator console JS/HTML changes between deploys; a stale,
+        memory-cached ``console.js`` silently breaks the live view (rows
+        stuck, missing renderers) with no error. ``no-store`` forces a
+        fresh fetch every load — these files are a few KB, so the cost is
+        negligible and correctness wins.
+        """
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith("/console/static") or path.startswith("/call/static"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     app.include_router(build_router(bus, audit))
     # Mount static AFTER include_router so the `/console/static` path
     # resolves correctly (the router itself sits under `/console`).

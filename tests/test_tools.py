@@ -36,6 +36,9 @@ async def test_create_then_find_then_book_then_cancel(client: EHRClient) -> None
         )
         assert is_ok(created)
         pid = created.value["patient_id"]
+        # DOB must round-trip in the Ok value so the operator console's
+        # patient_identified handoff card shows a year for new patients.
+        assert created.value["dob"] == "1990-12-10"
 
         slots_r = await list_availability_slots_handler(
             client,

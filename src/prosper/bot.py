@@ -77,7 +77,7 @@ from prosper.console.bus import ConsoleBus
 from prosper.console.server import run as run_console_server
 from prosper.dispatcher import Dispatcher
 from prosper.ehr_client import EHRClient
-from prosper.flows import ALLOWED_TOOLS, State
+from prosper.flows import ALLOWED_TOOLS, INTERNAL_TOOLS, State
 from prosper.llm import OpenAILLMAdapter
 from prosper.observability.redact import redact_pii
 from prosper.observers import TTSAudibleObserver
@@ -142,7 +142,10 @@ FILLER_LATENCY_THRESHOLD_MS = 700
 
 def _should_emit_filler(dispatcher: Dispatcher, state: State) -> bool:
     """Predict whether the next turn will be slow enough to need a filler."""
-    tools = ALLOWED_TOOLS.get(state, set())
+    # Internal nav tools (route_intent) fire no EHR call and have no latency —
+    # exclude them so a state whose only tool is internal (CHOOSE_INTENT) stays
+    # silent instead of predicting a phantom 500 ms tool wait.
+    tools = ALLOWED_TOOLS.get(state, set()) - INTERNAL_TOOLS
     if not tools:
         return False
     summary = dispatcher.timing.summary()
@@ -482,19 +485,23 @@ async def bot(runner_args: RunnerArguments) -> None:
         "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            # VAD tuning for naturalness:
-            # - stop_secs=1.2: longer silence threshold so the bot doesn't
-            #   jump in during natural pauses between digits / sentences.
-            # - min_volume=0.3: softer voices were getting missed at 0.4+,
-            #   the bot would then talk over the caller because it never
-            #   saw a user_started_speaking event to interrupt the TTS.
-            # - confidence=0.5: matched lower volume tier for better recall.
+            # VAD tuning — biased toward BARGE-IN: the caller must be able to
+            # cut the bot off mid-sentence. With higher thresholds the bot
+            # kept talking over the caller because it never saw a
+            # user_started_speaking event to interrupt the TTS ("no se calla").
+            # - confidence=0.35: lower speech-probability gate so the caller's
+            #   voice is detected even layered over the bot's own audio.
+            # - min_volume=0.15: catch softer interjections ("wait", "no").
+            # - start_secs=0.1: trigger the interrupt fast so the bot stops
+            #   within ~100ms of the caller speaking.
+            # - stop_secs=1.0: still long enough not to clip natural pauses
+            #   between digits / sentences while the caller is talking.
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
-                    confidence=0.5,
-                    start_secs=0.15,
-                    stop_secs=1.2,
-                    min_volume=0.3,
+                    confidence=0.35,
+                    start_secs=0.1,
+                    stop_secs=1.0,
+                    min_volume=0.15,
                 ),
             ),
         ),

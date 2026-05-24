@@ -288,6 +288,16 @@ async def classify_symptoms(
             message=f"mini-LLM returned non-JSON: {content[:120]}",
             retryable=False,
         )
+    # A valid JSON document need not be an object — the model could emit a
+    # bare array/string/number. Anything that isn't a dict can't carry the
+    # classification fields, so treat it as a malformed triage response
+    # rather than letting ``.get`` raise AttributeError past the contract.
+    if not isinstance(parsed, dict):
+        return Err(
+            code="triage_unavailable",
+            message=f"mini-LLM returned non-object JSON: {content[:120]}",
+            retryable=False,
+        )
     specialty = parsed.get("specialty", "")
     if specialty not in SPECIALTY_DURATION_TABLE:
         return Err(
@@ -302,12 +312,23 @@ async def classify_symptoms(
             message=f"mini-LLM returned duration_minutes={duration!r} outside {{30,60,90}}",
             retryable=False,
         )
+    # ``confidence`` should be a number, but a misbehaving model might emit a
+    # string ("high") or omit it. Coerce defensively — a bad value must yield
+    # a typed Err, never an uncaught ValueError that escapes the contract.
+    try:
+        confidence = float(parsed.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        return Err(
+            code="triage_unavailable",
+            message=f"mini-LLM returned non-numeric confidence: {parsed.get('confidence')!r}",
+            retryable=False,
+        )
     follow_up_raw = parsed.get("follow_up")
     return Ok(
         value=SpecialtyClassification(
             specialty=specialty,
             duration_minutes=int(duration),
-            confidence=float(parsed.get("confidence", 0.0)),
+            confidence=confidence,
             follow_up=follow_up_raw if isinstance(follow_up_raw, str) and follow_up_raw else None,
             red_flag=bool(parsed.get("red_flag", False)),
         )

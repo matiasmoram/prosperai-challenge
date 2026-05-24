@@ -48,5 +48,8 @@ def test_redact_empty() -> None:
 
 def test_mask_name() -> None:
     assert mask_name("Maria Lopez") == "M**** L****"
-    assert mask_name("X") == "X"
+    # A single-letter part still gets a mask char so the operator-console
+    # event validator never rejects it (audit F-004).
+    assert mask_name("X") == "X*"
+    assert mask_name("A B") == "A* B*"
     assert mask_name("") == ""

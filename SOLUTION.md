@@ -358,6 +358,64 @@ Runs the whole suite in ~5 s offline. CLI flags:
 - `--mock-llm` — swap in the deterministic mock LLM.
 - `--only NAME` — run a single scenario.
 
+### Catching hallucinations without hand-dialing (eval strategy)
+
+The challenge asks specifically for *ways to automatically test or simulate
+calls so hallucinations and agent mistakes are caught without dialing in by
+hand*. The field converges on one shape — a **synthetic caller** (LLM with
+persona + goal) talks to the agent, scored by **deterministic state/tool
+assertions + an LLM judge** — and the deterministic half must stay the hard
+gate, because LLM-simulated callers drift off-goal (arXiv *"Lost in
+Simulation"*). That is exactly the paired `state_pass AND judge_pass` design
+already in place (ADR 003).
+
+We organise the work as a cost-tiered pyramid; the right-hand column is where
+this repo sits:
+
+| Tier | Method | Cost | Status here |
+|---|---|---|---|
+| every commit | FSM/handle invariants, golden-trace replay, scripted mock scenarios | $0 offline | shipped (`evals/`, `trace_replay.py`, `tester/`) |
+| every commit | **property-based FSM fuzzing** (Hypothesis `RuleBasedStateMachine`) | $0 offline | planned (see §14) |
+| every commit | **tool-receipt hallucination gate** | $0 offline | shipped (`tester/`) |
+| broad coverage | **autonomous adversarial persona caller** (persona+goal+stop) | cheap (tokens) | shipped (`tester/simulate.py`) |
+| nightly | live persona-sim + judge, `pass^k` reliability, latency/cost gate | $ tokens | partial (`evals/sim.py`, `judge.py`, `eval-baseline`) |
+| pre-release | full audio loop TTS→agent→STT + noise/accent/barge-in | $$ telephony | intentionally cut (§16) |
+
+The prototypes off this brainstorm live in **`tester/`** (build order chosen by
+an LLM council; see `tester/README.md`):
+
+- **Tool-receipt gate** (`tester/receipt_gate.py`). A standing invariant over
+  the operator-console event stream, the NABAOS *tool-receipt* pattern at its
+  smallest. The terminal `outcome` event (`booked` / `cancelled` /
+  `rescheduled`) is a **claim**; each `tool_call_end` with `outcome=="ok"` is a
+  **receipt**. A positive claim with no matching receipt earlier in the same
+  session is a `Violation`. This guards the FSM's *outcome accounting* — a
+  different surface from the spoken-text regex in
+  `runner._check_hallucinated_confirmation`, which it complements.
+- **Recorder** (`tester/recorder.py`). `RecordingBus` + `record_call()` drive a
+  scenario through the offline mock LLMs with a capturing bus attached, closing
+  the gap that nothing in the harness consumed the bus as an eval oracle.
+- **Offline tests** (`tester/test_receipt_gate.py`). Unit tests on hand-built
+  tampered streams, plus an integration check that **every** mock scenario backs
+  its outcome with a real write. Green today; goes red the moment a refactor lets
+  a positive outcome fire without its tool. `make tester`; folded into
+  `make verify`.
+- **Autonomous call simulator** (`tester/simulate.py`, `personas.py`,
+  `live_sim.py`, `invariants.py`). The literal *simulate-calls-without-dialing*
+  piece: the LLM plays a goal-seeking adversarial **caller** (persona + goal +
+  stop condition, generating each turn) against the **real bot**; a
+  `RecordingBus` captures the call and `check_call()` audits it for the two
+  hallucination invariants (unbacked outcome + spoken false confirmation). A
+  curated persona library (confused elderly, wrong-then-corrected DOB, mid-call
+  cancel→reschedule flip, prompt-injection name, demands an unoffered slot,
+  rude-but-completes, off-topic, hallucination bait) plus `--generate N` to have
+  the LLM invent fresh ones. An adversarial caller *not getting its way is not a
+  failure* — only a dishonest confirmation is; exit non-zero == a real
+  hallucination caught. Live (`make simulate`, needs `OPENAI_API_KEY`); the
+  pytest smoke test is gated on `PROSPER_EVAL_LIVE=1` so `make verify` stays
+  free. Validated: the injection persona books normally (override ignored) and
+  the bait persona is refused a fake "it's cancelled" — both PASS.
+
 ## 12. Reliability
 
 Seven layers, all in `src/prosper/llm.py`, `bot.py`, `dispatcher.py`:
@@ -438,6 +496,15 @@ Active work the main branch does not yet reflect:
 - **Speculative race.** `docs/research/speculative_race.md` — research
   notes on overlapping STT partials with speculative LLM kickoff to
   reduce TTFT. Not yet wired.
+- **Property-based FSM fuzzer (`tester/`).** Next prototype after the
+  tool-receipt gate and the autonomous call simulator (§11). A Hypothesis
+  `RuleBasedStateMachine` over the
+  dispatcher generates random-but-valid caller-action programs (`@rule` =
+  give phone / give DOB / pick slot / change mind) and asserts the FSM
+  invariants on every dialog — tool ∈ `ALLOWED_TOOLS[state]`, no UUID
+  reaches the LLM, handle round-trip, no double-book,
+  confirm-only-after-successful-write. Finds whole bug *classes* via
+  shrinking rather than one hand-written scenario at a time.
 
 The eval suite already has scenarios pinning the current specialty
 behaviour (`specialty_filter_therapist`, `specialty_unknown_falls_back`,

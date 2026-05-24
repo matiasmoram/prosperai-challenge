@@ -48,6 +48,7 @@ select = ["I", "E", "F", "W", "B", "UP", "ARG", "SIM", "RET", "RUF", "S"]
 "src/prosper/bot.py" = ["E402"]  # env-check intentionally precedes the 17s pipecat import wall
 "tests/*" = ["S101", "ARG"]  # pytest uses `assert`; mock callbacks accept unused fixture params
 "evals/*" = ["S101", "ARG"]  # eval scenarios use `assert`; setup-lambdas have fixed signatures
+"tester/*" = ["S101", "ARG"]  # prototype test harness: pytest `assert`; parametrized fixtures
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

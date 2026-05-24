@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from dateutil import parser as dateparser
@@ -26,11 +26,25 @@ from prosper.result import Err, Ok, Result
 
 ToolHandler = Callable[..., Awaitable[Result[dict[str, Any]]]]
 
+# HYBRID navigation tool. Whitelisted in ``flows.ALLOWED_TOOLS`` for
+# CHOOSE_INTENT but deliberately ABSENT from ``HANDLERS`` — the dispatcher
+# intercepts it (``Dispatcher._handle_route_intent``) because it manipulates
+# FSM state, not the EHR. Named here so dispatcher + tests share one string.
+ROUTE_INTENT_TOOL: str = "route_intent"
+
 # Defensive bounds for any parsed date used downstream — DOBs and availability
 # query dates alike. Catches obviously-wrong values (year 9999 typos, dateutil
 # fuzzy-parser inventing 1990 from a stray digit) before they hit the DB.
 _MIN_PARSED_YEAR = 1900
 _MAX_PARSED_YEAR = 2100
+
+# Two sentinel defaults that differ in EVERY component. dateutil fills any
+# date field missing from the input with the default; parsing the same string
+# against both reveals which fields were absent (they differ between parses).
+# Used by ``_parse_dob`` to reject partial/ambiguous dates instead of silently
+# completing them to today (audit F-001).
+_DOB_DEFAULT_A = datetime(2000, 1, 1)
+_DOB_DEFAULT_B = datetime(2001, 2, 2)
 
 # Map spoken-number words to their digit. ElevenLabs realtime STT (no smart-
 # format flag) frequently transcribes phone numbers as words ("five five five
@@ -62,12 +76,24 @@ def _phone_words_to_digits(raw: str) -> str:
     """
     if not isinstance(raw, str):
         return raw
-    tokens = re.findall(r"[A-Za-z]+|\d+", raw)
+    lowered = [t.lower() for t in re.findall(r"[A-Za-z]+|\d+", raw)]
+
+    def _is_spoken_digit(idx: int) -> bool:
+        # A spoken number-word neighbour (zero..nine), excluding the ambiguous
+        # "for" itself — used to decide whether a "for" is really the digit 4.
+        return 0 <= idx < len(lowered) and lowered[idx] in _NUMBER_WORDS and lowered[idx] != "for"
+
     out: list[str] = []
-    for tok in tokens:
-        low = tok.lower()
+    for i, low in enumerate(lowered):
         if low.isdigit():
             out.append(low)
+        elif low == "for":
+            # "for" is both the STT slip of "four" AND a ubiquitous English
+            # filler. Only treat it as 4 when flanked by spoken number-words
+            # ("five-for-six" → 546); adjacent to a literal digit run it is
+            # filler and would splice a spurious 4 into a valid number (F-002).
+            if _is_spoken_digit(i - 1) and _is_spoken_digit(i + 1):
+                out.append("4")
         elif low in _NUMBER_WORDS:
             out.append(_NUMBER_WORDS[low])
         # else: silently drop non-number alphabetic noise
@@ -79,15 +105,34 @@ def _phone_words_to_digits(raw: str) -> str:
 
 def _parse_dob(raw: str) -> Result[date]:
     # `fuzzy=True` previously made the parser silently extract a year from
-    # arbitrary text ("hello 1990" → 1990-05-20). For both DOB and date-of-
-    # service we want strict parsing; ambiguous input should fail loudly so the
-    # LLM re-asks the user.
+    # arbitrary text ("hello 1990" → 1990-05-20). `fuzzy=False` stops that,
+    # but dateutil STILL fills any missing year/month/day component from a
+    # default (datetime.now() by default), so "March" / "15" / "3pm" used to
+    # resolve to today (audit F-001). We pass two sentinel defaults that differ
+    # in every component and parse twice: any component absent from the input
+    # is taken from the (differing) default, so the two parses disagree there.
+    # A disagreement => the input was partial/ambiguous => fail loudly so the
+    # LLM re-asks for a full year-month-day.
     if not isinstance(raw, str) or not raw.strip():
         return Err(code="dob_unparseable", message=f"empty date input: {raw!r}", retryable=True)
     try:
-        parsed = dateparser.parse(raw, dayfirst=False, fuzzy=False).date()
+        parsed_a = dateparser.parse(raw, dayfirst=False, fuzzy=False, default=_DOB_DEFAULT_A)
+        parsed_b = dateparser.parse(raw, dayfirst=False, fuzzy=False, default=_DOB_DEFAULT_B)
     except (ValueError, TypeError, AttributeError, OverflowError) as e:
         return Err(code="dob_unparseable", message=f"could not parse '{raw}': {e}", retryable=True)
+    if parsed_a is None or parsed_b is None:
+        return Err(code="dob_unparseable", message=f"could not parse '{raw}'", retryable=True)
+    if (parsed_a.year, parsed_a.month, parsed_a.day) != (
+        parsed_b.year,
+        parsed_b.month,
+        parsed_b.day,
+    ):
+        return Err(
+            code="dob_unparseable",
+            message=f"ambiguous or partial date '{raw}' — need a full year, month, and day",
+            retryable=True,
+        )
+    parsed = parsed_a.date()
     if not (_MIN_PARSED_YEAR <= parsed.year <= _MAX_PARSED_YEAR):
         return Err(
             code="dob_unparseable",
@@ -152,6 +197,11 @@ async def create_patient_handler(
             "first_name": created["first_name"],
             "last_name": created["last_name"],
             "phone": created["phone"],
+            # Echo the validated DOB back so the dispatcher's
+            # patient_identified event carries dob_year for a
+            # newly-registered caller — otherwise the operator console
+            # shows "DOB —" on the handoff card for new patients.
+            "dob": dob_r.value.isoformat(),
         }
     )
 
@@ -263,6 +313,10 @@ async def list_availability_slots_handler(
 
     value: dict[str, Any] = {
         "asked_date": asked.isoformat(),
+        # total_returned lets the dispatcher/LLM gauge abundance and pick the
+        # right UX: few → read 2-3 options; many → invert and ask the caller
+        # to narrow rather than dumping a long list.
+        "total_returned": len(slots),
         "slots": [
             {
                 "slot_id": s["id"],
@@ -275,6 +329,7 @@ async def list_availability_slots_handler(
         ],
     }
     if next_day_with_slots is not None:
+        next_day_with_slots["total_returned"] = len(next_day_with_slots["slots"])
         value["next_day_with_slots"] = next_day_with_slots
     return Ok(value=value)
 
@@ -396,6 +451,33 @@ async def reschedule_appointment_handler(
 
 
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "route_intent": {
+        "type": "function",
+        "function": {
+            "name": "route_intent",
+            "description": (
+                "Tell the system which thing the caller wants to do next so "
+                "the conversation moves to the right step. Call this as soon "
+                "as the caller's intent is clear in CHOOSE_INTENT — you cannot "
+                "navigate yourself. Pass intent='book' to schedule a new "
+                "appointment, 'cancel' to cancel one, 'reschedule' to move "
+                "one, or 'done' if the caller wants to end the call. If the "
+                "caller is ambiguous, ask ONE short clarifying question "
+                "instead of guessing — do not call this with a wrong intent."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "enum": ["book", "cancel", "reschedule", "done"],
+                        "description": "The caller's current intent.",
+                    },
+                },
+                "required": ["intent"],
+            },
+        },
+    },
     "find_patient_by_phone": {
         "type": "function",
         "function": {
@@ -688,6 +770,7 @@ HANDLERS: dict[str, ToolHandler] = {
 # evals) can reach the canonical defaults without re-importing prompts.py.
 __all__ = [
     "HANDLERS",
+    "ROUTE_INTENT_TOOL",
     "SPECIALTY_DURATION_TABLE",
     "TOOL_SCHEMAS",
     "ToolHandler",

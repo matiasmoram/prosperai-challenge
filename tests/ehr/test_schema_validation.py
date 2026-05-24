@@ -101,24 +101,18 @@ def test_dob_rejects_future_date() -> None:
 
 def test_dob_rejects_before_1900() -> None:
     with pytest.raises(ValidationError):
-        PatientCreate(
-            first_name="Ada", last_name="L", dob=date(1899, 12, 31), phone="2025550100"
-        )
+        PatientCreate(first_name="Ada", last_name="L", dob=date(1899, 12, 31), phone="2025550100")
 
 
 def test_dob_accepts_1900_lower_boundary() -> None:
     """1900-01-01 is the inclusive floor — must be accepted."""
-    p = PatientCreate(
-        first_name="Ada", last_name="L", dob=date(1900, 1, 1), phone="2025550100"
-    )
+    p = PatientCreate(first_name="Ada", last_name="L", dob=date(1900, 1, 1), phone="2025550100")
     assert p.dob == date(1900, 1, 1)
 
 
 def test_dob_accepts_today() -> None:
     """A newborn registered the day they are born — today is inclusive."""
-    p = PatientCreate(
-        first_name="Baby", last_name="New", dob=date.today(), phone="2025550100"
-    )
+    p = PatientCreate(first_name="Baby", last_name="New", dob=date.today(), phone="2025550100")
     assert p.dob == date.today()
 
 

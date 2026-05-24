@@ -22,16 +22,18 @@ from __future__ import annotations
 import re
 
 # Phone: a contiguous run of digits and the common voice-agent separators
-# +, -, space, ., (, ). To rule out UUIDs (which embed 4-12 digit hex
-# groups) we (a) forbid the run from being preceded or followed by a hex
-# char, AND (b) re-check inside ``redact_pii`` that the total digit count
-# is in the realistic phone range (10-15). The latter is easier to express
-# in Python than in pure regex.
+# +, -, space, ., (, ). UUIDs are stashed BEFORE the phone pass runs (see
+# ``redact_pii``), so the matcher never sees their digit-rich interior — we
+# therefore only need a digit boundary (not a hex one) to avoid splitting a
+# longer digit run. The earlier hex lookarounds also skipped any phone glued
+# to a word ending in a-f ("ref2025550142"), leaking it (audit F-003); a
+# plain digit boundary fixes that. ``_looks_like_phone`` then re-checks the
+# total digit count is in the realistic phone range (10-15).
 _PHONE_RE = re.compile(
     r"""
-    (?<![0-9A-Fa-f])
+    (?<![0-9])
     \+?[\d\s\-\(\)\.]{9,25}
-    (?![0-9A-Fa-f])
+    (?![0-9])
     """,
     re.VERBOSE,
 )
@@ -102,7 +104,11 @@ def mask_name(name: str) -> str:
     if not name:
         return name
     parts = name.split()
-    return " ".join(p[0] + "*" * max(0, len(p) - 1) for p in parts)
+    # ``max(1, len-1)`` guarantees at least one mask character per part, even
+    # for single-letter names ("A B" → "A* B*"). Without it an all-initials
+    # name produced no mask char and the operator-console event validator
+    # rejected it, silently dropping the patient_identified event (audit F-004).
+    return " ".join(p[0] + "*" * max(1, len(p) - 1) for p in parts)
 
 
 def mask_phone(phone: str) -> str:

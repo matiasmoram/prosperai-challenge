@@ -22,8 +22,10 @@ const STATE_PALETTE = {
   CHOOSE_INTENT: "bg-amber-100 text-amber-700",
   BOOK_FLOW: "bg-emerald-100 text-emerald-700",
   CANCEL_FLOW: "bg-rose-100 text-rose-700",
+  RESCHEDULE_FLOW: "bg-orange-100 text-orange-700",
   CONFIRM_BOOK: "bg-emerald-200 text-emerald-800",
   CONFIRM_CANCEL: "bg-rose-200 text-rose-800",
+  CONFIRM_RESCHEDULE: "bg-orange-200 text-orange-800",
   END: "bg-slate-200 text-slate-700",
 };
 
@@ -34,8 +36,10 @@ const HUMAN_ACTIVITY = {
   CHOOSE_INTENT: "Asking what they need…",
   BOOK_FLOW: "Finding a time…",
   CANCEL_FLOW: "Looking up upcoming visits…",
+  RESCHEDULE_FLOW: "Moving an existing visit…",
   CONFIRM_BOOK: "Confirming the booking…",
   CONFIRM_CANCEL: "Confirming the cancellation…",
+  CONFIRM_RESCHEDULE: "Confirming the reschedule…",
   END: "Wrapping up.",
 };
 
@@ -92,10 +96,19 @@ function renderPatient(ev) {
 }
 
 function renderSlots(ev) {
-  const { count, providers, first_date, last_date } = ev.payload;
+  const { count, providers, first_date, last_date, recommended_specialty, recommended_duration_minutes } = ev.payload;
   const ul = document.getElementById("slots-list");
   if (!ul) return;
   ul.innerHTML = "";
+  // Triage handoff context: show the routed specialty + visit length so a
+  // receptionist/doctor sees why this caller is being booked where.
+  if (recommended_specialty) {
+    const rec = document.createElement("li");
+    rec.className = "inline-flex items-center gap-1.5 text-xs font-semibold text-violet-700 bg-violet-50 px-2 py-0.5 rounded-full mb-1";
+    const dur = recommended_duration_minutes ? ` · ${recommended_duration_minutes} min` : "";
+    rec.textContent = `Triage → ${recommended_specialty}${dur}`;
+    ul.appendChild(rec);
+  }
   const summary = document.createElement("li");
   summary.className = "text-xs text-slate-500";
   summary.textContent = `${count} slot${count === 1 ? "" : "s"} · ${formatDateShort(first_date)} – ${formatDateShort(last_date)}`;
@@ -110,15 +123,25 @@ function renderSlots(ev) {
 
 function renderToolStart(ev) {
   const { tool, args_redacted, call_id } = ev.payload;
-  const tr = document.createElement("tr");
-  tr.id = `tool-${call_id}`;
-  tr.className = "border-t border-zinc-800";
-  tr.innerHTML = `
+  const rowHtml = `
     <td class="px-2 py-1 text-sky-300">${escapeHtml(tool)}</td>
     <td class="px-2 py-1 text-zinc-400 max-w-[200px] truncate" title="${escapeHtml(JSON.stringify(args_redacted))}">${escapeHtml(JSON.stringify(args_redacted))}</td>
     <td class="px-2 py-1 text-right text-zinc-500">…</td>
     <td class="px-2 py-1 text-zinc-500">running</td>
   `;
+  // Idempotent: a reconnect/replay can re-deliver the same call_id. Reuse
+  // the existing row instead of appending a duplicate (otherwise the
+  // matching tool_call_end updates the FIRST row and the dupes stick on
+  // "running"). Safe for live too — call_ids are unique within a session.
+  const existing = document.getElementById(`tool-${call_id}`);
+  if (existing) {
+    existing.innerHTML = rowHtml;
+    return;
+  }
+  const tr = document.createElement("tr");
+  tr.id = `tool-${call_id}`;
+  tr.className = "border-t border-zinc-800";
+  tr.innerHTML = rowHtml;
   appendTo("tool-tbody", tr, { cap: 20 });
 }
 
@@ -137,8 +160,13 @@ function renderToolEnd(ev) {
 
 function renderTranscript(ev) {
   const { role, text, turn_id } = ev.payload;
-  const li = document.createElement("li");
   const isUser = role === "user";
+  // Idempotent on (role, turn_id) so a replay/reconnect doesn't double the
+  // transcript. Distinct ids within a live session keep every turn.
+  const key = `turn-${role}-${turn_id}`;
+  if (document.getElementById(key)) return;
+  const li = document.createElement("li");
+  li.id = key;
   li.className = "flex gap-2";
   li.innerHTML = `
     <span class="text-xs ${isUser ? "text-sky-700" : "text-emerald-700"} font-medium shrink-0 mono">${isUser ? "Caller" : "Bot   "} #${turn_id}</span>
@@ -153,6 +181,7 @@ function renderOutcome(ev) {
   if (!banner) return;
   const palette = {
     booked: "bg-emerald-50 text-emerald-800 border-emerald-200",
+    rescheduled: "bg-orange-50 text-orange-800 border-orange-200",
     cancelled: "bg-amber-50 text-amber-800 border-amber-200",
     refused: "bg-slate-100 text-slate-700 border-slate-200",
     abandoned: "bg-slate-100 text-slate-500 border-slate-200",
@@ -160,6 +189,24 @@ function renderOutcome(ev) {
   banner.className = "px-5 py-3 text-sm font-semibold border-t " + (palette[outcome] || palette.abandoned);
   banner.textContent = `Call ended · ${outcome.toUpperCase()} · ${details.turns} turns`;
   banner.classList.remove("hidden");
+}
+
+function renderInterrupted(ev) {
+  // The caller talked over the bot. Surface it in the transcript stream so
+  // the operator sees the bot was cut off mid-sentence (and what it had
+  // managed to say). spoken_text is the bot audio that reached the caller.
+  const { spoken_text, state, turn_id } = ev.payload;
+  const key = `interrupt-${turn_id}`;
+  if (document.getElementById(key)) return;
+  const li = document.createElement("li");
+  li.id = key;
+  li.className = "flex gap-2 items-start";
+  const heard = spoken_text ? `“${escapeHtml(spoken_text)}…”` : "(nothing heard)";
+  li.innerHTML = `
+    <span class="text-xs text-amber-700 font-medium shrink-0 mono">⚠ interrupted</span>
+    <span class="text-amber-700 text-sm">caller cut the bot off in ${escapeHtml((state || "").toLowerCase().replace("_", " "))} — bot had said ${heard}</span>
+  `;
+  appendTo("transcript-list", li, { cap: 24, scrollBottom: true });
 }
 
 function renderLatency(ev) {
@@ -268,6 +315,14 @@ function connect(sessionId) {
         // Bad frame is silently dropped — operator UI must not error.
       }
     };
+    // Replay sends a terminal `replay_complete` named event once the JSONL
+    // is exhausted. Close the source on it — otherwise the browser treats
+    // the closed stream as a dropped connection and auto-reconnects,
+    // replaying the whole session again and duplicating every row.
+    src.addEventListener("replay_complete", () => {
+      src.close();
+      setText("conn-label", "replay complete");
+    });
   }
   attach(source);
 }
@@ -282,6 +337,7 @@ function dispatch(ev) {
     case "transcript_turn":  return renderTranscript(ev);
     case "outcome":          return renderOutcome(ev);
     case "latency_tick":     return renderLatency(ev);
+    case "turn_interrupted": return renderInterrupted(ev);
   }
 }
 

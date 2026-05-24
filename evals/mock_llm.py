@@ -438,6 +438,22 @@ def _script_cancel_when_nothing_to_cancel() -> list[LLMReply]:
     ]
 
 
+def _script_ambiguous_intent_routed_via_tool() -> list[LLMReply]:
+    # Existing patient, no appts. The CHOOSE_INTENT utterance is phrased so the
+    # user-text regex can't classify it ("...able to make it in on Friday...")
+    # — the LLM carries the navigation via route_intent (the HYBRID path)
+    # instead of the regex. get_upcoming then finds nothing → END.
+    return [
+        _t("Hi, you've reached Prosper Health — what's your name and how can I help?"),
+        _t("Sure — what's the phone number on file?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Thanks, Ada — what would you like to do today?"),
+        _tool("route_intent", intent="cancel"),
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t("I don't see anything on your calendar right now — want me to book something instead?"),
+    ]
+
+
 def _script_multi_turn_drift_hallucinated_slot() -> list[LLMReply]:
     # Ada exists, no appts. Persona books a NEW appt. Bot ignores fake slot id.
     return [
@@ -1412,6 +1428,7 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "hallucinated_confirmation_trap": _script_hallucinated_confirmation_trap,
     "off_topic_steering_and_budget": _script_off_topic_steering_and_budget,
     "cancel_when_nothing_to_cancel": _script_cancel_when_nothing_to_cancel,
+    "ambiguous_intent_routed_via_tool": _script_ambiguous_intent_routed_via_tool,
     "multi_turn_drift_hallucinated_slot": _script_multi_turn_drift_hallucinated_slot,
     "phone_format_chaos": _script_phone_format_chaos,
     "patient_correction_mid_register": _script_patient_correction_mid_register,
@@ -1550,6 +1567,12 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         # 'book' keyword required for CHOOSE_INTENT -> BOOK_FLOW transition.
         "Book me into any morning slot tomorrow.",
         "Yes please.",
+    ],
+    "ambiguous_intent_routed_via_tool": [
+        "Hi, this is Ada Lovelace.",
+        "It's 202-555-0100.",
+        "I don't think I'm going to be able to make it in on Friday after all.",
+        "ah okay, never mind then. goodbye.",
     ],
     "cancel_when_nothing_to_cancel": [
         "I want to cancel my appointment.",

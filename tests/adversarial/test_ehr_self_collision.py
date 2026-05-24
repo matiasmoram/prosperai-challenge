@@ -69,32 +69,24 @@ def test_same_patient_same_slot_same_duration_is_idempotent(repo_session) -> Non
     assert a1.id == a2.id
 
 
-def test_self_collision_reports_self_as_owner(repo_session) -> None:
-    """Documents the trap: the SlotTakenError owner is the caller themselves.
-
-    This is why `tools.slot_taken_other_patient` is a lie in this path —
-    the owner is not "another" patient. Plain (passing) test pinning the
-    current behaviour so the F-005 fix has a clear before/after.
-    """
+def test_same_patient_extend_does_not_raise_other_patient(repo_session) -> None:
+    """F-005 fixed: extending your own booking must NOT raise a slot-taken
+    error blaming another patient — it updates the booking in place."""
     session, patient_id, slot_ids = repo_session
-    repo.create_appointment(
+    first = repo.create_appointment(
         session, patient_id=patient_id, slot_id=slot_ids[0], duration_minutes=30
     )
-    with pytest.raises(repo.SlotTakenError) as excinfo:
-        repo.create_appointment(
-            session, patient_id=patient_id, slot_id=slot_ids[0], duration_minutes=60
-        )
-    assert excinfo.value.owner_patient_id == patient_id  # the caller, not "another"
+    extended = repo.create_appointment(
+        session, patient_id=patient_id, slot_id=slot_ids[0], duration_minutes=60
+    )
+    # Same appointment row, now 60 minutes — no SlotTakenError.
+    assert extended.id == first.id
+    assert extended.duration_minutes == 60
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="F-005: a patient extending their OWN booking on the same anchor "
-    "to 60 min (adjacent block free) should succeed or raise a self-distinct "
-    "error — never be reported as taken by another patient.",
-)
 def test_same_patient_can_extend_own_booking_on_free_chain(repo_session) -> None:
-    """Extending your own 30-min booking to 60 min on a free chain should work."""
+    """Extending your own 30-min booking to 60 min on a free chain works and
+    locks the adjacent slot (F-005 fixed)."""
     session, patient_id, slot_ids = repo_session
     repo.create_appointment(
         session, patient_id=patient_id, slot_id=slot_ids[0], duration_minutes=30
@@ -104,3 +96,9 @@ def test_same_patient_can_extend_own_booking_on_free_chain(repo_session) -> None
         session, patient_id=patient_id, slot_id=slot_ids[0], duration_minutes=60
     )
     assert appt.duration_minutes == 60
+    # The adjacent slot is now locked by the extension: a fresh booking on it
+    # hits the slot lock and surfaces as SlotTakenError.
+    with pytest.raises(repo.SlotTakenError):
+        repo.create_appointment(
+            session, patient_id=patient_id, slot_id=slot_ids[1], duration_minutes=30
+        )

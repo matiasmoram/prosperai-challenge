@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterator
 from datetime import date as date_t
+from datetime import timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from loguru import logger
@@ -50,15 +51,21 @@ def _session_dep() -> Iterator[Session]:
 
 
 def _appt_to_out(a: Appointment) -> AppointmentOut:
+    # ``end_at`` reflects the FULL visit length, not just the anchor slot's
+    # 30-min block: a 60-min appointment anchored at 9:00 ends at 10:00, not
+    # 9:30. Derive it from the anchor start + duration so the caller-facing
+    # time is honest for multi-slot bookings.
+    visit_end = a.slot.start_at + timedelta(minutes=a.duration_minutes)
     return AppointmentOut(
         id=a.id,
         patient_id=a.patient_id,
         slot_id=a.slot_id,
         status=a.status.value,
         start_at=a.slot.start_at,
-        end_at=a.slot.end_at,
+        end_at=visit_end,
         provider_id=a.slot.provider_id,
         provider_name=a.slot.provider.name,
+        duration_minutes=a.duration_minutes,
         notes=a.notes,
     )
 

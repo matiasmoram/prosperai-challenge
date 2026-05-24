@@ -8,28 +8,17 @@ valid phone number.
 
 from __future__ import annotations
 
-import pytest
-
 from prosper.tools import _phone_words_to_digits
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="F-002: 'for' adjacent to a real digit run injects a spurious 4. "
-    "A clean 10-digit number passed with a filler 'for' must come back "
-    "unchanged (10 digits), not 11.",
-)
 def test_for_filler_does_not_corrupt_a_real_phone() -> None:
-    """`for` as filler before a complete number must not add a 4."""
+    """`for` as filler before a complete number must not add a 4 (F-002 fixed)."""
     out = _phone_words_to_digits("for 5551234567")
     assert out == "5551234567", f"got {out!r} (spurious 4 injected)"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="F-002: 'for' spliced between digit groups corrupts the number.",
-)
 def test_for_filler_mid_number_does_not_corrupt() -> None:
+    """`for` spliced between digit groups must not corrupt the number (F-002 fixed)."""
     out = _phone_words_to_digits("555 for 1234567")
     assert out == "5551234567", f"got {out!r}"
 

@@ -42,14 +42,9 @@ def _route_from_choose_intent(text: str) -> State:
         "remove all this confusion and just schedule me",
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason="F-006: a phrase with an explicit booking word (book/booking/"
-    "schedule) must route to BOOK_FLOW even when it also contains a "
-    "cancel-ish filler verb (skip/move/remove). Cancel intent is checked "
-    "first and wins.",
-)
 def test_explicit_booking_phrase_routes_to_book_flow(text: str) -> None:
+    """A phrase with an explicit booking word routes to BOOK_FLOW even when it
+    also contains a cancel-ish filler verb (skip/move/remove) — F-006 fixed."""
     assert _route_from_choose_intent(text) is State.BOOK_FLOW
 
 

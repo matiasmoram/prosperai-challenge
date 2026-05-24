@@ -216,3 +216,146 @@ def test_x_request_id_is_echoed_in_response_headers(client: TestClient) -> None:
     r = client.get("/health", headers={"X-Request-Id": "sess-abc-1-1"})
     assert r.status_code == 200
     assert r.headers["X-Request-Id"] == "sess-abc-1-1"
+
+
+# ---------------------------------------------------------------------------
+# Variable visit duration over HTTP (ADR 005). Fixture seeds 3 consecutive
+# slots (9:00, 9:30, 10:00) under one General Practice provider.
+# ---------------------------------------------------------------------------
+
+
+def _book_phone_patient(client: TestClient) -> str:
+    r = client.post(
+        "/patients",
+        json={
+            "first_name": "Dur",
+            "last_name": "Ation",
+            "dob": "1990-01-01",
+            "phone": "2025559000",
+        },
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def test_availability_duration_60_returns_only_valid_anchors(client: TestClient) -> None:
+    day = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    r = client.get("/availability", params={"date": day, "duration_minutes": 60})
+    assert r.status_code == 200, r.text
+    # 9:00 (→9:30 free) and 9:30 (→10:00 free) qualify; 10:00 has no 10:30.
+    assert len(r.json()["slots"]) == 2
+
+
+def test_availability_duration_90_returns_single_anchor(client: TestClient) -> None:
+    day = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    r = client.get("/availability", params={"date": day, "duration_minutes": 90})
+    assert r.status_code == 200, r.text
+    assert len(r.json()["slots"]) == 1  # only 9:00 has two successors
+
+
+def test_availability_invalid_duration_returns_400(client: TestClient) -> None:
+    day = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    r = client.get("/availability", params={"date": day, "duration_minutes": 45})
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"]["code"] == "invalid_duration"
+
+
+def test_create_60min_appointment_locks_two_slots(client: TestClient) -> None:
+    patient_id = _book_phone_patient(client)
+    day = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    slots = client.get("/availability", params={"date": day, "duration_minutes": 60}).json()[
+        "slots"
+    ]
+    anchor = slots[0]["id"]
+    r = client.post(
+        "/appointments",
+        json={"patient_id": patient_id, "slot_id": anchor, "duration_minutes": 60},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["duration_minutes"] == 60
+    # 9:00 + 9:30 now locked → a 30-min search sees only 10:00.
+    left = client.get("/availability", params={"date": day, "duration_minutes": 30}).json()["slots"]
+    assert len(left) == 1
+
+
+def test_create_60min_on_last_slot_returns_409_no_consecutive(client: TestClient) -> None:
+    patient_id = _book_phone_patient(client)
+    day = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    all30 = client.get("/availability", params={"date": day, "duration_minutes": 30}).json()[
+        "slots"
+    ]
+    last_anchor = all30[-1]["id"]  # 10:00 — no 10:30 after it
+    r = client.post(
+        "/appointments",
+        json={"patient_id": patient_id, "slot_id": last_anchor, "duration_minutes": 60},
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "no_consecutive_slots"
+
+
+def test_create_invalid_duration_returns_400(client: TestClient) -> None:
+    patient_id = _book_phone_patient(client)
+    day = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    anchor = client.get("/availability", params={"date": day}).json()["slots"][0]["id"]
+    r = client.post(
+        "/appointments",
+        json={"patient_id": patient_id, "slot_id": anchor, "duration_minutes": 45},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"]["code"] == "invalid_duration"
+
+
+def test_default_duration_is_30_and_single_slot(client: TestClient) -> None:
+    patient_id = _book_phone_patient(client)
+    day = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    anchor = client.get("/availability", params={"date": day}).json()["slots"][0]["id"]
+    r = client.post("/appointments", json={"patient_id": patient_id, "slot_id": anchor})
+    assert r.status_code == 201, r.text
+    assert r.json()["duration_minutes"] == 30
+    # Only the anchor consumed; the other two 30-min slots remain.
+    left = client.get("/availability", params={"date": day}).json()["slots"]
+    assert len(left) == 2
+
+
+# ---------------------------------------------------------------------------
+# Result-contract: malformed input never escapes as a 500 (council item 7).
+# ---------------------------------------------------------------------------
+
+
+def test_no_endpoint_returns_500_on_malformed_input(client: TestClient) -> None:
+    """Every public endpoint must answer malformed/edge input with a typed
+    4xx (validation 422, business 400/404/409) — never an uncaught 500."""
+    day = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    calls = [
+        # Pydantic validation failures → 422.
+        ("POST", "/patients", {"json": {"first_name": "A"}}),  # missing required
+        (
+            "POST",
+            "/patients",
+            {
+                "json": {
+                    "first_name": "A",
+                    "last_name": "B",
+                    "dob": "1990-01-01",
+                    "phone": "abc<script>",
+                }
+            },
+        ),  # hostile phone
+        # Bad query params.
+        ("GET", "/patients/by-phone", {"params": {"phone": "x"}}),  # min_length
+        ("GET", "/availability", {"params": {"date": "not-a-date"}}),  # bad date
+        ("GET", "/availability", {"params": {"date": day, "duration_minutes": 45}}),  # invalid dur
+        # Nonexistent ids.
+        (
+            "POST",
+            "/appointments",
+            {"json": {"patient_id": "nope", "slot_id": "nope", "duration_minutes": 30}},
+        ),
+        ("POST", "/appointments/ghost/cancel", {"json": {"reason": "x"}}),
+        ("PATCH", "/appointments/ghost", {"json": {"new_slot_id": "ghost"}}),
+        ("GET", "/patients/ghost/appointments", {}),
+    ]
+    for method, path, kw in calls:
+        r = client.request(method, path, **kw)
+        assert r.status_code < 500, f"{method} {path} -> {r.status_code}: {r.text}"
+        assert r.status_code >= 400, f"{method} {path} unexpectedly OK: {r.text}"

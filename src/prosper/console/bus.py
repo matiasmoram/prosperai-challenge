@@ -50,7 +50,12 @@ class ConsoleBus:
         if queue_depth < 1:
             raise ValueError(f"queue_depth must be >= 1, got {queue_depth}")
         self._queue_depth = queue_depth
-        self._subscribers: list[asyncio.Queue[ConsoleEvent]] = []
+        # Each subscriber is (queue, session_filter). A ``None`` filter receives
+        # every session's events (the audit drain wants all); a concrete
+        # session_id receives only that session's events, so a chatty session
+        # can no longer evict a quiet watched session's events from a shared
+        # queue (audit F-010).
+        self._subscribers: list[tuple[asyncio.Queue[ConsoleEvent], str | None]] = []
         self._overflow_sessions: set[str] = set()
 
     @property
@@ -67,7 +72,9 @@ class ConsoleBus:
         level exactly once per session_id to avoid log spam.
         """
         validate_event(event)
-        for queue in self._subscribers:
+        for queue, session_filter in self._subscribers:
+            if session_filter is not None and session_filter != event.session_id:
+                continue
             self._enqueue_with_drop(queue, event)
 
     def _enqueue_with_drop(
@@ -102,11 +109,20 @@ class ConsoleBus:
             queue.put_nowait(event)
 
     @asynccontextmanager
-    async def subscribe(self) -> AsyncIterator[asyncio.Queue[ConsoleEvent]]:
+    async def subscribe(
+        self, session_id: str | None = None
+    ) -> AsyncIterator[asyncio.Queue[ConsoleEvent]]:
         """Register a subscriber; yield its private event queue.
 
+        Args:
+            session_id: When given, the subscriber receives ONLY events for
+                that session — unrelated sessions' traffic never enters this
+                queue, so it cannot evict the watched session's events under
+                load (audit F-010). When ``None`` (the audit drain), every
+                session's events are delivered.
+
         Usage:
-            async with bus.subscribe() as q:
+            async with bus.subscribe(session_id) as q:
                 while True:
                     event = await q.get()
                     ...
@@ -115,8 +131,9 @@ class ConsoleBus:
         fan-out list. There is no way to leak a subscriber.
         """
         queue: asyncio.Queue[ConsoleEvent] = asyncio.Queue(maxsize=self._queue_depth)
-        self._subscribers.append(queue)
+        entry = (queue, session_id)
+        self._subscribers.append(entry)
         try:
             yield queue
         finally:
-            self._subscribers.remove(queue)
+            self._subscribers.remove(entry)

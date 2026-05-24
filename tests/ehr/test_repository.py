@@ -4,11 +4,19 @@ availability query, idempotent appointment creation, cancellation."""
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from prosper.ehr import repository as repo
-from prosper.ehr.models import AppointmentStatus, Base, Patient, Provider, Slot
+from prosper.ehr.models import (
+    Appointment,
+    AppointmentSlotLock,
+    AppointmentStatus,
+    Base,
+    Patient,
+    Provider,
+    Slot,
+)
 
 
 @pytest.fixture
@@ -654,45 +662,141 @@ def test_reschedule_failure_preserves_original_locks(session: Session) -> None:
     # Original booking must be intact: still anchored at 9:00, still 30 min,
     # and its lock row must still exist (slot 9:00 unavailable to others).
     session.expire_all()
-    refreshed = session.get(repo.Appointment, appt.id) if hasattr(repo, "Appointment") else None
-    # repo doesn't re-export Appointment; query via models import already at top.
-    from prosper.ehr.models import Appointment, AppointmentSlotLock
-
     refreshed = session.get(Appointment, appt.id)
     assert refreshed is not None
     assert refreshed.slot_id == slots[0].id
     assert refreshed.duration_minutes == 30
     lock = session.execute(
-        select_lock := __import__("sqlalchemy").select(AppointmentSlotLock).where(
-            AppointmentSlotLock.appointment_id == appt.id
-        )
+        select(AppointmentSlotLock).where(AppointmentSlotLock.appointment_id == appt.id)
     ).scalar_one_or_none()
     assert lock is not None
     assert lock.slot_id == slots[0].id
 
 
-def test_create_same_patient_same_anchor_different_duration_returns_existing(
-    session: Session,
-) -> None:
-    """Regression (prober SEV-med): same patient re-booking the same anchor
-    at a different duration is idempotent (returns the existing row), NOT a
-    misleading slot_taken_other_patient against themselves."""
-    prov = _seed_provider(session)
-    slots = _seed_consecutive(session, prov, 3)
-    patient = Patient(
+def _seed_patient_ada(session: Session) -> Patient:
+    p = Patient(
         first_name="Ada",
         last_name="Lovelace",
         name_normalized="ada lovelace",
         dob=date(1990, 12, 10),
         phone="+12025550100",
     )
-    session.add(patient)
+    session.add(p)
     session.commit()
-    a30 = repo.create_appointment(
-        session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=30
+    return p
+
+
+def test_reschedule_30_to_60_acquires_adjacent_lock(session: Session) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 4)  # 9:00,9:30,10:00,10:30
+    ada = _seed_patient_ada(session)
+    appt = repo.create_appointment(
+        session, patient_id=ada.id, slot_id=slots[0].id, duration_minutes=30
     )
-    a60 = repo.create_appointment(
-        session, patient_id=patient.id, slot_id=slots[0].id, duration_minutes=60
+    # Move to a 60-min visit anchored at 10:00 (needs 10:00 + 10:30).
+    moved = repo.reschedule_appointment(
+        session, appointment_id=appt.id, new_slot_id=slots[2].id, new_duration_minutes=60
     )
-    assert a60.id == a30.id
-    assert a60.duration_minutes == 30  # unchanged — duration change is a reschedule
+    assert moved.id == appt.id
+    assert moved.slot_id == slots[2].id
+    assert moved.duration_minutes == 60
+    locks = (
+        session.execute(
+            select(AppointmentSlotLock).where(AppointmentSlotLock.appointment_id == appt.id)
+        )
+        .scalars()
+        .all()
+    )
+    assert {lk.slot_id for lk in locks} == {slots[2].id, slots[3].id}
+    # Original anchor 9:00 is free again.
+    day = slots[0].start_at.date()
+    free30 = {s.id for s in repo.list_available_slots(session, date_=day, duration_minutes=30)}
+    assert slots[0].id in free30 and slots[1].id in free30
+
+
+def test_reschedule_60_to_30_frees_excess_lock(session: Session) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 3)  # 9:00,9:30,10:00
+    ada = _seed_patient_ada(session)
+    appt = repo.create_appointment(
+        session, patient_id=ada.id, slot_id=slots[0].id, duration_minutes=60
+    )  # locks 9:00 + 9:30
+    moved = repo.reschedule_appointment(
+        session, appointment_id=appt.id, new_slot_id=slots[0].id, new_duration_minutes=30
+    )
+    assert moved.duration_minutes == 30
+    locks = (
+        session.execute(
+            select(AppointmentSlotLock).where(AppointmentSlotLock.appointment_id == appt.id)
+        )
+        .scalars()
+        .all()
+    )
+    assert {lk.slot_id for lk in locks} == {slots[0].id}
+    # 9:30 freed.
+    day = slots[0].start_at.date()
+    free30 = {s.id for s in repo.list_available_slots(session, date_=day, duration_minutes=30)}
+    assert slots[1].id in free30
+
+
+def test_reschedule_same_anchor_extend_duration(session: Session) -> None:
+    """Same anchor, longer duration → acquires the adjacent slot (not a no-op)."""
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 3)
+    ada = _seed_patient_ada(session)
+    appt = repo.create_appointment(
+        session, patient_id=ada.id, slot_id=slots[0].id, duration_minutes=30
+    )
+    moved = repo.reschedule_appointment(
+        session, appointment_id=appt.id, new_slot_id=slots[0].id, new_duration_minutes=60
+    )
+    assert moved.duration_minutes == 60
+    locks = (
+        session.execute(
+            select(AppointmentSlotLock).where(AppointmentSlotLock.appointment_id == appt.id)
+        )
+        .scalars()
+        .all()
+    )
+    assert {lk.slot_id for lk in locks} == {slots[0].id, slots[1].id}
+
+
+def test_reschedule_noop_same_anchor_same_duration(session: Session) -> None:
+    prov = _seed_provider(session)
+    slots = _seed_consecutive(session, prov, 2)
+    ada = _seed_patient_ada(session)
+    appt = repo.create_appointment(
+        session, patient_id=ada.id, slot_id=slots[0].id, duration_minutes=30
+    )
+    moved = repo.reschedule_appointment(session, appointment_id=appt.id, new_slot_id=slots[0].id)
+    assert moved.id == appt.id
+    assert moved.duration_minutes == 30
+
+
+def test_multislot_chain_can_cross_midnight(session: Session) -> None:
+    """Documents the deliberate horizon spill (repository.py TODO(hours>17:00)).
+
+    With synthetic late slots at 23:00 / 23:30 / 00:00(next day), a 60-min
+    anchor at 23:30 chains into the next calendar day. Unreachable with the
+    real 9-5 seed; pinned so a future hours-extension change is forced to
+    revisit it consciously."""
+    prov = _seed_provider(session)
+    base = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+        hour=23, minute=0, second=0, microsecond=0
+    )
+    late = [
+        Slot(
+            provider=prov,
+            start_at=base + timedelta(minutes=30 * i),
+            end_at=base + timedelta(minutes=30 * (i + 1)),
+        )
+        for i in range(3)  # 23:00, 23:30, 00:00(+1d)
+    ]
+    session.add_all(late)
+    session.commit()
+    day = base.date()
+    sixty = repo.list_available_slots(session, date_=day, duration_minutes=60)
+    ids = {s.id for s in sixty}
+    # 23:00 (→23:30) and 23:30 (→00:00 next day, via the horizon spill) qualify.
+    assert late[0].id in ids
+    assert late[1].id in ids
