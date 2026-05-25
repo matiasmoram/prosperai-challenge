@@ -177,6 +177,14 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `7a285e3` — **AvailabilityCache adjudicated spec** (FUTURE 1.3, council-decided): full 4-tuple
   key, repo-layer placement, evict-on-commit (reschedule=2 dates, multi-slot=all chained dates),
   TTL 10s default-off, DB-409 stays the guard. Documented, not built (remote-EHR-only payoff).
+- `27bf511` — **specialty wording normalised to canonical EHR value (from live log)**: caller chose
+  "Dermatology", bot looped "no slots … next six days" forever though Dermatologist was wide open.
+  Root (data/contract, not the LLM): `providers.specialty` stores "Dermatologist"/"Therapist"/… and
+  the EHR filters case-insensitive EXACT, but the caller-facing menu says "Dermatology"/"Therapy"/… —
+  the LLM passes the menu word, matches nothing, 4 of 5 specialties silently unbookable. mock-eval was
+  green because scenarios pass the canonical value. Fix: `tools._normalize_specialty` (difflib fuzzy
+  map to SPECIALTY_DURATION_TABLE keys, cutoff 0.6) at the tool boundary, before primary + scan probes;
+  unknown specialties pass through. +unit test. ARCHITECTURE §13.3. 769 tests, mock-eval 108/108.
 - `e8f23de` — **CONFIRM_BOOK lists specialties, never refuses (prompt, from live log — Phase 1)**:
   caller in CONFIRM_BOOK asked "what type of doctors are there?" and the bot refused (in-scope
   question). Root (design smell, ARCHITECTURE §14): `BOOK_FLOW→CONFIRM_BOOK` fires on *slots listed*,
