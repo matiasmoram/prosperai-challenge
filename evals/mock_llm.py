@@ -93,10 +93,15 @@ def _tool(_tool_name: str, **kwargs: object) -> LLMReply:
 # rules must precede the vague catch-all.
 # ---------------------------------------------------------------------------
 
-# (regex, specialty, duration_minutes, confidence, follow_up, red_flag).
+# (regex, specialty, duration_minutes, confidence, follow_up, red_flag[, minimum_safe_minutes]).
 # follow_up is only meaningful when confidence < 0.7 (matches the real
-# prompt's contract). Order matters — checked top to bottom.
-_TRIAGE_RULES: list[tuple[str, str, int, float, str | None, bool]] = [
+# prompt's contract). The optional 7th element overrides the default
+# minimum_safe_minutes=30; omitting it means 30. Order matters — checked top to bottom.
+_TriageRule = (
+    tuple[str, str, int, float, str | None, bool]
+    | tuple[str, str, int, float, str | None, bool, int]
+)
+_TRIAGE_RULES: list[_TriageRule] = [
     (
         r"chest pain|can'?t breathe|suicid|bleeding heavily|anaphyla",
         "General Practice",
@@ -113,6 +118,9 @@ _TRIAGE_RULES: list[tuple[str, str, int, float, str | None, bool]] = [
         None,
         False,
     ),
+    # Intake assessment → floor=60 (F-001: exercises the below_minimum_safe_duration guard).
+    # Must precede the generic therapist/physio rules so "therapy intake" hits this first.
+    (r"intake|first.?time.?(therap|physio|counsel)", "Therapist", 60, 0.92, None, False, 60),
     (r"therap|counsel", "Therapist", 60, 0.9, None, False),
     (r"skin|rash|acne|mole|eczema", "Dermatologist", 30, 0.9, None, False),
     (r"back|knee|muscle|joint|sprain|sore|physio", "Physiotherapist", 60, 0.88, None, False),
@@ -129,9 +137,8 @@ _TRIAGE_RULES: list[tuple[str, str, int, float, str | None, bool]] = [
 ]
 
 # Rationale strings for mock triage payloads, keyed by (specialty, duration).
-# All mock rules have minimum_safe_minutes=30 (the universal floor for demo
-# purposes) — only a full intake assessment might raise it, and the mock
-# doesn't need that level of clinical fidelity.
+# Most mock rules have minimum_safe_minutes=30; the intake rule raises it to 60
+# to exercise the F-002 clinical floor guard (below_minimum_safe_duration).
 _MOCK_TRIAGE_RATIONALE: dict[tuple[str, int], str] = {
     ("General Practice", 30): "Brief visit; thirty minutes is standard for this complaint.",
     ("Psychiatrist", 60): (
@@ -173,13 +180,16 @@ class _MockTriageCompletions:
                 if isinstance(m, dict) and m.get("role") == "user":
                     user_text = str(m.get("content") or "")
         low = user_text.lower()
-        for pattern, specialty, duration, conf, follow_up, red_flag in _TRIAGE_RULES:
+        for rule in _TRIAGE_RULES:
+            pattern, specialty, duration, conf, follow_up, red_flag = rule[:6]
+            # Optional 7th element overrides the default minimum_safe_minutes=30.
+            # Used by the intake rule to exercise the F-002 floor guard.
+            minimum_safe = int(rule[6]) if len(rule) > 6 else 30
             if re.search(pattern, low):
                 payload = {
                     "specialty": specialty,
                     "duration_minutes": duration,
-                    # Clinical floor: always 30 in the mock (demo fidelity).
-                    "minimum_safe_minutes": 30,
+                    "minimum_safe_minutes": minimum_safe,
                     "rationale": _MOCK_TRIAGE_RATIONALE.get((specialty, duration), ""),
                     "confidence": conf,
                     "follow_up": follow_up if conf < 0.7 else None,
@@ -1531,6 +1541,53 @@ def _script_duration_extend_accepted() -> list[LLMReply]:
     ]
 
 
+def _script_duration_below_floor_refused() -> list[LLMReply]:
+    # New patient registers, enters BOOK_FLOW, says "first time therapy intake"
+    # → triage: Therapist, recommended=60, minimum_safe=60 (floor raised by intake rule).
+    # Bot communicates the sixty-minute minimum; caller accepts sixty minutes.
+    # End-to-end path exercises: intake triage rule → floor=60 stored in SessionMemory
+    # → list at 60 → create_appointment(60) passes the F-002 guard → booked.
+    # The guard firing on a sub-floor attempt is exercised at unit-test level.
+    return [
+        _t("Hi, you've reached Prosper Health — how can I help?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="555-300-3333"),
+        _t("I don't see you — what's your full name and date of birth?"),
+        _tool("find_patient_by_name_dob", name="River Stone", dob="March 3 1992"),
+        _t("I'll register River Stone, born March 3rd 1992, phone 555-300-3333 — right?"),
+        _tool(
+            "create_patient",
+            first_name="River",
+            last_name="Stone",
+            dob="1992-03-03",
+            phone="5553003333",
+        ),
+        # CHOOSE_INTENT
+        _t("Great — book, reschedule, or cancel?"),
+        # BOOK_FLOW: "first time therapy intake" matches intake rule → floor=60
+        _tool(
+            "suggest_specialty",
+            symptoms="I want to book — this is my first time therapy intake session",
+        ),
+        # triage Ok: Therapist, recommended=60, minimum_safe=60.
+        # Bot communicates the sixty-minute minimum and books at 60.
+        _t(
+            "For a first-time therapy intake we need the full sixty minutes — "
+            "that's both the recommended and minimum safe duration. "
+            "I can only offer sixty-minute slots. What day works for you?"
+        ),
+        _tool(
+            "list_availability_slots",
+            date=_tomorrow_iso(),
+            specialty="Therapist",
+            duration_minutes=60,
+        ),
+        _t("I have ten tomorrow with Dr. Chen for sixty minutes — shall I book that?"),
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=60),
+        _t("You're all set for tomorrow at ten with Dr. Chen for sixty minutes — take care."),
+    ]
+
+
 def _script_route_intent_resolves_to_cancel() -> list[LLMReply]:
     # Ada has 1 appointment. Her CHOOSE_INTENT utterance is ambiguous enough
     # that the LLM uses route_intent(intent="cancel") rather than the regex.
@@ -2138,6 +2195,286 @@ def _script_book_appointment_with_notes() -> list[LLMReply]:
     ]
 
 
+def _script_goodbye_mid_register() -> list[LLMReply]:
+    # New caller: phone miss → name+DOB miss → REGISTER_PATIENT. Bot reads
+    # back the proposed record. Persona says "actually, goodbye." →
+    # _has_goodbye_intent → goodbye → END. create_patient MUST NOT fire.
+    # Tests the REGISTER_PATIENT → goodbye → END path.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="555-900-1234"),
+        _t("I don't see that number — what's your full name and date of birth?"),
+        _tool("find_patient_by_name_dob", name="Dana Reeves", dob="June 6 1985"),
+        _t(
+            "I'll register you as Dana Reeves, born June 6th 1985, "
+            "phone 555-900-1234 — does that sound right?"
+        ),
+        # Persona says "actually, goodbye." → _has_goodbye_intent → END.
+        # No further LLM call needed; MockPersonaLLM emits goodbye, runner detects it.
+    ]
+
+
+def _script_route_intent_unknown_then_clarifies() -> list[LLMReply]:
+    # In CHOOSE_INTENT the LLM calls route_intent(intent="inquire") →
+    # _handle_route_intent returns Err(code="unknown_intent") → LLM gets the
+    # error back and calls route_intent(intent="book") → BOOK_FLOW → books.
+    # First test of the unknown_intent error code path.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — what can I help you with today?"),
+        # CHOOSE_INTENT: LLM emits unknown intent → unknown_intent Err.
+        _tool("route_intent", intent="inquire"),
+        # Dispatcher feeds error back; next generate() call uses a valid intent.
+        _tool("route_intent", intent="book"),
+        # Now in BOOK_FLOW.
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set — ten tomorrow with Dr. Patel. Have a great day."),
+    ]
+
+
+def _script_book_60min_exact_two_slots() -> list[LLMReply]:
+    # Ada asks for a 60-minute visit. Provider has EXACTLY two consecutive
+    # 30-min slots — the minimum needed. create_appointment succeeds (no
+    # no_consecutive_slots error). Distinct from no_consecutive_slots_90min
+    # (which tests the failure case) — this tests the passing boundary.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        _tool("list_availability_slots", date=_tomorrow_iso(), duration_minutes=60),
+        _t("I have ten tomorrow with Dr. Patel for sixty minutes — shall I book that?"),
+        _tool("create_appointment", __use_first_slot__=True, duration_minutes=60),
+        _t("You're all set — sixty minutes tomorrow at ten with Dr. Patel. Have a great day."),
+    ]
+
+
+def _script_stop_word_aborts_confirm_book() -> list[LLMReply]:
+    # In CONFIRM_BOOK the persona says "stop, that's the wrong one" →
+    # _DENY regex matches "stop" AND "wrong" → abort → BOOK_FLOW.
+    # Bot re-lists, persona picks the second slot → books on the second pass.
+    # Tests that "stop"/"wrong" keywords (not just "no") fire the FSM abort.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        # Persona says "stop, that's the wrong one" → _DENY → abort → BOOK_FLOW.
+        # Bot re-lists availability.
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("Sure — I also have ten-thirty tomorrow with Dr. Patel. Shall I book that instead?"),
+        _t("Great — shall I go ahead and book ten-thirty with Dr. Patel?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set — ten-thirty tomorrow with Dr. Patel. Have a great day."),
+    ]
+
+
+def _script_book_flow_forbidden_tool_rejected() -> list[LLMReply]:
+    # In BOOK_FLOW the LLM mistakenly calls cancel_appointment (not in
+    # ALLOWED_TOOLS[BOOK_FLOW]). The dispatcher emits tool_rejected and feeds
+    # the error back to the LLM. The next generate() call corrects course with
+    # list_availability_slots → booking completes normally.
+    # First test of the tool_rejected code path in the mock suite.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        # BOOK_FLOW: LLM emits a forbidden tool → tool_rejected event fires.
+        _tool("cancel_appointment", appointment_id="1"),
+        # Dispatcher feeds error back; next generate() call corrects.
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set — ten tomorrow with Dr. Patel. Have a great day."),
+    ]
+
+
+def _script_wrong_word_aborts_confirm_reschedule() -> list[LLMReply]:
+    # In CONFIRM_RESCHEDULE the persona says "that's wrong, swap the times" →
+    # _DENY matches "wrong" → abort → RESCHEDULE_FLOW (the CONFIRM_RESCHEDULE
+    # → abort → RESCHEDULE_FLOW edge — distinct from the CONFIRM_BOOK abort).
+    # Bot re-fetches upcoming appointments and re-lists availability. Caller
+    # picks the same slot on the second pass → reschedule fires.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        # RESCHEDULE_FLOW: fetch upcoming.
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t("Your appointment is tomorrow at ten with Dr. Patel — what new time works?"),
+        # RESCHEDULE_FLOW: list new slots.
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I can move you from ten to ten-thirty with Dr. Patel tomorrow — shall I?"),
+        # Persona says "that's wrong, swap the times" → _DENY → abort → RESCHEDULE_FLOW.
+        # Bot re-fetches upcoming + re-lists from RESCHEDULE_FLOW.
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t("Your appointment is still at ten with Dr. Patel — what new time works?"),
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I can move you to ten-thirty with Dr. Patel — shall I go ahead?"),
+        _tool("reschedule_appointment", appointment_id="1", __use_first_slot__=True),
+        _t("Done — your appointment has been moved to ten-thirty. Have a great day."),
+    ]
+
+
+def _script_confirm_cancel_abort_then_re_picks() -> list[LLMReply]:
+    # Ada has 2 appointments. Bot reads back appointment #1 and asks to confirm.
+    # Persona says "no, cancel the other one" → deny/abort → back to CANCEL_FLOW.
+    # Bot re-lists with get_upcoming_appointments, persona picks #2 → cancel fires.
+    # Covers the CONFIRM_CANCEL → abort → CANCEL_FLOW path (mirrors
+    # confirm_book_abort_then_rebook but for the cancel branch).
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book or cancel?"),
+        # CANCEL_FLOW: fetch 2 appointments → CONFIRM_CANCEL on first
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        # Bot reads back #1 and asks to confirm
+        _t(
+            "You have two upcoming visits — I can cancel your first visit"
+            " at ten with Dr. Patel. Shall I?"
+        ),
+        # Persona says "no, the second one" → deny → abort → CANCEL_FLOW.
+        # Bot re-fetches upcoming to re-present list.
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t("Got it — cancel the second visit at ten-thirty instead?"),
+        # Persona confirms → cancel_appointment for index 1.
+        _tool("cancel_appointment", appointment_id="__use_upcoming__", **{_USE_UPCOMING_N: 1}),
+        _t("Cancelled your second visit — have a great day."),
+    ]
+
+
+def _script_goodbye_at_confirm_cancel() -> list[LLMReply]:
+    # Ada has 1 appointment. Bot enters CONFIRM_CANCEL, reads back the
+    # appointment. Caller says "goodbye" from CONFIRM_CANCEL directly —
+    # no abort, no re-pick, just hang up. Tests goodbye transition from
+    # CONFIRM_CANCEL. Mirrors reschedule_goodbye_at_confirm for the cancel branch.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book or cancel?"),
+        # CANCEL_FLOW: list appointment(s) → CONFIRM_CANCEL
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        # appointment_chosen → CONFIRM_CANCEL. Bot reads back and asks to confirm.
+        _t("Your upcoming visit is tomorrow at ten with Dr. Patel — shall I cancel it?"),
+        # Persona says goodbye from CONFIRM_CANCEL state — no cancel fires.
+        # Dispatcher _has_goodbye_intent → END without cancel_appointment.
+    ]
+
+
+def _script_new_patient_asks_to_reschedule_after_register() -> list[LLMReply]:
+    # New patient registers (create_patient) → CHOOSE_INTENT → asks to reschedule.
+    # RESCHEDULE_FLOW: get_upcoming_appointments → empty → nothing_to_reschedule → END.
+    # Distinct from reschedule_no_upcoming_appointments (existing Ada found by phone).
+    # This covers the NEW-patient path: registration precedes the reschedule attempt.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="555-900-1234"),
+        _t("I don't see that number — what's your full name and date of birth?"),
+        _tool("find_patient_by_name_dob", name="Dana Reeves", dob="June 6 1985"),
+        _t("I'll register Dana Reeves, June 6th 1985, phone 555-900-1234 — right?"),
+        _tool(
+            "create_patient",
+            first_name="Dana",
+            last_name="Reeves",
+            dob="1985-06-06",
+            phone="5559001234",
+        ),
+        _t("Got it, Dana — book, reschedule, or cancel?"),
+        # RESCHEDULE_FLOW: get_upcoming → empty → nothing_to_reschedule → END.
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t("I don't see any upcoming appointments for you — nothing to reschedule."),
+    ]
+
+
+def _script_cancel_fourth_appointment_of_four() -> list[LLMReply]:
+    # Ada has 4 appointments. Cancel the FOURTH (index 3).
+    # Off-by-one guard at the top boundary — patient_four_appts_cancel_third
+    # covers index 2; this covers the last item in the list (index 3).
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        _t("Got it, Ada — book or cancel?"),
+        # CANCEL_FLOW: list all 4 → CONFIRM_CANCEL
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t("You have four upcoming visits — which number would you like to cancel?"),
+        # Persona says "the fourth one" — cancel index 3.
+        _tool("cancel_appointment", appointment_id="__use_upcoming__", **{_USE_UPCOMING_N: 3}),
+        _t("Cancelled your fourth visit — have a great day."),
+    ]
+
+
+def _script_identify_disambiguation_picks_second() -> list[LLMReply]:
+    # Two fuzzy candidates: Jamie Reyes (index 0) and James Reyes (index 1).
+    # identify_by_name_dob_disambiguation picks the FIRST. This covers
+    # the SECOND — guards the off-by-one at index 1 in the candidate list.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        # Persona says no phone; bot asks for name+DOB.
+        _t("No problem — what's your full name and date of birth?"),
+        # find by name+DOB → 2 fuzzy candidates → pending_identity_candidates set
+        _tool("find_patient_by_name_dob", name="Jaime Reyes", dob="April 15 1990"),
+        # stays IDENTIFY_PATIENT; read back both candidates
+        _t(
+            "I found two records with that date of birth — "
+            "[1] Jamie Reyes DOB 1990-04-15; [2] James Reyes DOB 1990-04-15. "
+            "Which one is you?"
+        ),
+        # Caller says "the second one" → _resolve_pending_identity picks index 1 = James Reyes
+        _t("Got it — welcome, James. Book, reschedule, or cancel?"),
+        # BOOK_FLOW: list slots → CONFIRM_BOOK
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        # create → END
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set for tomorrow at ten with Dr. Patel — have a great day."),
+    ]
+
+
+def _script_caller_partial_name_then_corrects() -> list[LLMReply]:
+    # Caller initially gives only a first name ("Dana"), bot asks for full
+    # name. Caller then gives full name "Dana Reeves" + DOB. Not found →
+    # registers. Exercises the bot's prompt-side retry for incomplete identity
+    # info without erroring. Uses phone-first path for determinism.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="555-900-1234"),
+        _t("I don't see that number — what's your full name and date of birth?"),
+        # First reply is just a first name → bot asks for last name (no tool call).
+        _t("I'll need your last name and date of birth as well — could you share those?"),
+        # Caller provides full name + DOB.
+        _tool("find_patient_by_name_dob", name="Dana Reeves", dob="June 6 1985"),
+        # Not found → REGISTER_PATIENT
+        _t("I'll register Dana Reeves, June 6th 1985, phone 555-900-1234 — right?"),
+        _tool(
+            "create_patient",
+            first_name="Dana",
+            last_name="Reeves",
+            dob="1985-06-06",
+            phone="5559001234",
+        ),
+        _t("Registered — book, reschedule, or cancel?"),
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I have ten tomorrow with Dr. Patel — shall I book that?"),
+        _tool("create_appointment", __use_first_slot__=True),
+        _t("You're all set — ten tomorrow with Dr. Patel. Have a great day."),
+    ]
+
+
 def _script_reschedule_requested_day_fully_booked() -> list[LLMReply]:
     # Ada has one appointment tomorrow at 10. Tomorrow is fully booked (slots
     # 1-3 held by another patient). Bot calls list_availability_slots for
@@ -2363,9 +2700,10 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "symptom_routes_to_gp": _script_symptom_routes_to_gp,
     "symptom_ambiguous_followup": _script_symptom_ambiguous_followup,
     "direct_specialty_skips_triage": _script_direct_specialty_skips_triage,
-    # Wave-1: duration negotiation (soft-override + extend-accepted)
+    # Wave-1: duration negotiation (soft-override + extend-accepted + floor-refused)
     "duration_soft_override": _script_duration_soft_override,
     "duration_extend_accepted": _script_duration_extend_accepted,
+    "duration_below_floor_refused": _script_duration_below_floor_refused,
     # GAP-5: hybrid route_intent coverage
     "route_intent_resolves_to_cancel": _script_route_intent_resolves_to_cancel,
     "route_intent_resolves_to_reschedule": _script_route_intent_resolves_to_reschedule,
@@ -2404,6 +2742,24 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "reschedule_requested_day_fully_booked": _script_reschedule_requested_day_fully_booked,
     "reschedule_goodbye_at_confirm": _script_reschedule_goodbye_at_confirm,
     "specialty_fallback_accepts_alternative": _script_specialty_fallback_accepts_alternative,
+    # Cycle 7: novel adversarial / edge cases
+    "cancel_fourth_appointment_of_four": _script_cancel_fourth_appointment_of_four,
+    "identify_disambiguation_picks_second": _script_identify_disambiguation_picks_second,
+    "caller_partial_name_then_corrects": _script_caller_partial_name_then_corrects,
+    # Cycle 10: novel adversarial / edge cases
+    "goodbye_mid_register": _script_goodbye_mid_register,
+    "route_intent_unknown_then_clarifies": _script_route_intent_unknown_then_clarifies,
+    "book_60min_exact_two_slots": _script_book_60min_exact_two_slots,
+    # Cycle 9: novel adversarial / edge cases
+    "stop_word_aborts_confirm_book": _script_stop_word_aborts_confirm_book,
+    "book_flow_forbidden_tool_rejected": _script_book_flow_forbidden_tool_rejected,
+    "wrong_word_aborts_confirm_reschedule": _script_wrong_word_aborts_confirm_reschedule,
+    # Cycle 8: novel adversarial / edge cases
+    "confirm_cancel_abort_then_re_picks": _script_confirm_cancel_abort_then_re_picks,
+    "goodbye_at_confirm_cancel": _script_goodbye_at_confirm_cancel,
+    "new_patient_asks_to_reschedule_after_register": (
+        _script_new_patient_asks_to_reschedule_after_register
+    ),
     # TRACK 1: adversarial contradiction + off-by-one guards
     "claims_not_in_system_but_exists": _script_claims_not_in_system_but_exists,
     "patient_four_appts_cancel_third": _script_patient_four_appts_cancel_third,
@@ -2863,6 +3219,18 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "Actually I'd like ninety minutes if that's possible.",
         "Yes, ninety minutes — please book that.",
     ],
+    "duration_below_floor_refused": [
+        "Hi, I'd like to book an appointment.",
+        "555-300-3333.",
+        "River Stone, March 3rd 1992.",
+        "Yes that's right.",
+        # "book" keyword + "first time therapy intake" → intake rule → floor=60
+        "I want to book — this is my first time therapy intake session.",
+        # Bot explains floor=60 is both recommended and minimum; caller accepts
+        "Okay, sixty minutes is fine.",
+        "Yes, please book that.",
+        "thanks, goodbye.",
+    ],
     # GAP-5: hybrid route_intent coverage
     "route_intent_resolves_to_cancel": [
         "Hi.",
@@ -3162,6 +3530,125 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "Sure, General Practice works — book me in tomorrow.",
         "the first one works.",
         "yes that's correct.",
+    ],
+    # Cycle 7: novel adversarial / edge cases
+    "cancel_fourth_appointment_of_four": [
+        "Hi, I'd like to cancel one of my appointments.",
+        "202-555-0100.",
+        "Cancel please.",
+        # Bot reads out 4 appointments; caller picks the last.
+        "the fourth one, please.",
+        "thanks, goodbye.",
+    ],
+    "identify_disambiguation_picks_second": [
+        "Hi, I need to book an appointment.",
+        # No phone available.
+        "I don't have my phone handy.",
+        "Jaime Reyes, April 15th 1990.",
+        # Bot lists two candidates; caller picks the second.
+        "the second one, James Reyes.",
+        "Book please.",
+        "the first one works.",
+        "yes that's correct.",
+    ],
+    "caller_partial_name_then_corrects": [
+        "Hi, I'd like to register and book.",
+        "555-900-1234.",
+        # Give only first name first.
+        "Dana.",
+        # Bot asks for full name; provide it.
+        "Dana Reeves, June 6th 1985.",
+        "Yes that's right.",
+        "Book please.",
+        "the first one works.",
+        "yes that's correct.",
+    ],
+    # Cycle 10: novel adversarial / edge cases
+    "goodbye_mid_register": [
+        "Hi, I'd like to register.",
+        "555-900-1234.",
+        "Dana Reeves, June 6th 1985.",
+        # Bot reads back proposed record; caller hangs up before confirming.
+        "actually, goodbye.",
+    ],
+    "route_intent_unknown_then_clarifies": [
+        "Hi, I'd like some information.",
+        "202-555-0100.",
+        # CHOOSE_INTENT: user says something ambiguous — no _STRONG_BOOK/cancel regex fires.
+        # _llm_turn() runs; mock LLM calls route_intent(inquire) → unknown_intent err,
+        # then route_intent(book) → BOOK_FLOW.
+        "I'm not quite sure what I need.",
+        "the first one works.",
+        "yes that's correct.",
+    ],
+    "book_60min_exact_two_slots": [
+        "Hi, I'd like a sixty-minute appointment tomorrow.",
+        "202-555-0100.",
+        "Book please — sixty minutes.",
+        "the first one works.",
+        "yes that's correct.",
+    ],
+    # Cycle 9: novel adversarial / edge cases
+    "stop_word_aborts_confirm_book": [
+        "Hi, I'd like to book an appointment.",
+        "202-555-0100.",
+        # "Book please." → BOOK_FLOW → list_slots → slot_chosen → CONFIRM_BOOK.
+        # Bot offers ten tomorrow. Caller denies immediately.
+        "Book please.",
+        # "stop, that's the wrong one" → _DENY matches "stop" + "wrong" → abort → BOOK_FLOW.
+        "stop, that's the wrong one.",
+        # Bot re-lists and re-enters CONFIRM_BOOK. Caller picks.
+        "the first one works.",
+        "yes that's correct.",
+    ],
+    "book_flow_forbidden_tool_rejected": [
+        "Hi, I'd like to book an appointment.",
+        "202-555-0100.",
+        "Book please.",
+        "the first one works.",
+        "yes that's correct.",
+    ],
+    "wrong_word_aborts_confirm_reschedule": [
+        "Hi, I'd like to reschedule my appointment.",
+        "202-555-0100.",
+        "Reschedule please.",
+        "tomorrow morning works.",
+        "the first one works.",
+        # "that's wrong, swap the times" → _DENY matches "wrong" → abort → RESCHEDULE_FLOW.
+        "that's wrong, swap the times.",
+        "tomorrow morning works.",
+        "the first one works.",
+        "yes that's correct.",
+    ],
+    # Cycle 8: novel adversarial / edge cases
+    "confirm_cancel_abort_then_re_picks": [
+        "Hi, I'd like to cancel an appointment.",
+        "202-555-0100.",
+        "Cancel please.",
+        # Bot reads back appointment #1 and asks to confirm.
+        # Caller says "no, the second one" → abort → CANCEL_FLOW re-entry.
+        "no, not that one — the second one please.",
+        # Bot re-presents list; caller confirms #2.
+        # NOTE: must NOT contain "cancel that" (matches _DENY regex → second abort).
+        "yes, please go ahead.",
+        "thanks, goodbye.",
+    ],
+    "goodbye_at_confirm_cancel": [
+        "Hi, I'd like to cancel my appointment.",
+        "202-555-0100.",
+        "Cancel please.",
+        # Bot enters CONFIRM_CANCEL and reads back the appointment.
+        # Caller hangs up from CONFIRM_CANCEL state.
+        "actually, goodbye.",
+    ],
+    "new_patient_asks_to_reschedule_after_register": [
+        "Hi, I'd like to register.",
+        "555-900-1234.",
+        "Dana Reeves, June 6th 1985.",
+        "Yes that's right.",
+        # CHOOSE_INTENT: immediately asks to reschedule (just registered).
+        "Reschedule please.",
+        "ok, nothing to move. goodbye.",
     ],
 }
 
