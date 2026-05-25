@@ -1,4 +1,4 @@
-.PHONY: install seed ehr bot dev test eval mock-eval trace replay replay-record gen-list gen-eval eval-baseline tester lint type bench verify status pre-commit clean
+.PHONY: install seed ehr bot run-all dev test eval mock-eval trace replay replay-record gen-list gen-eval eval-baseline tester lint type bench verify status pre-commit clean
 
 install:
 	uv sync
@@ -11,6 +11,10 @@ ehr:
 
 bot:
 	uv run bot.py
+
+# One command, every process + surface (EHR :8000, bot :7860, console+call+frontdesk :7861).
+run-all:
+	uv run python scripts/run_all.py
 
 dev:
 	@echo "Run 'make seed' once, then 'make ehr' in one terminal and 'make bot' in another."
