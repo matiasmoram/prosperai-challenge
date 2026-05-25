@@ -316,14 +316,14 @@ non-blocking drain task. PII redaction runs at the event boundary
 
 Original proposal kept below for reference.
 
-**Why this matters to Prosper:** SECURITY.md documents PII redaction in log lines but not a durable, structured audit trail of every tool invocation and outcome. For a HIPAA-adjacent product, an auditor needs "who called `cancel_appointment` for patient X at time T" — not just the absence of PII in journald.
+**Why this matters to Prosper:** the repo documents PII redaction in log lines but not a durable, structured audit trail of every tool invocation and outcome. For a HIPAA-adjacent product, an auditor needs "who called `cancel_appointment` for patient X at time T" — not just the absence of PII in journald.
 
 - Add `src/prosper/observability/audit.py` with an `AuditEvent` dataclass: `ts`, `call_sid`, `state`, `tool_name`, `outcome_code`, `redacted_args` (args passed through `redact_pii` before storage).
 - Append-only writes to a `data/audit.jsonl` file via a non-blocking `asyncio.Queue` drain loop (never blocks the call path).
 - Expose `GET /audit?call_sid=&from=&to=` on the EHR for ops-tier queries; gate behind `PROSPER_AUDIT_ENABLED=1` so tests don't produce junk files.
 - Add a unit test asserting that a `cancel_appointment` invocation produces an audit entry with `outcome_code` and no raw phone number in `redacted_args`.
 
-**Files to touch:** `src/prosper/observability/audit.py` (new), `src/prosper/dispatcher.py`, `src/prosper/ehr/api.py`, `env.example`, `SECURITY.md`
+**Files to touch:** `src/prosper/observability/audit.py` (new), `src/prosper/dispatcher.py`, `src/prosper/ehr/api.py`, `env.example`
 **Effort:** M | **Risk:** low
 
 ---
@@ -337,7 +337,7 @@ Original proposal kept below for reference.
 - Strip HTML/script tags from `notes` and `reason` fields via a one-line `bleach.clean` (or a lightweight equivalent with no new deps — just `re.sub` on `<[^>]+>` is sufficient for this threat model).
 - Update existing EHR tests to assert the 422 response body on invalid input.
 
-**Files to touch:** `src/prosper/ehr/schemas.py`, `tests/test_ehr.py`, `SECURITY.md`
+**Files to touch:** `src/prosper/ehr/schemas.py`, `tests/test_ehr.py`
 **Effort:** S | **Risk:** low
 
 ---

@@ -103,7 +103,7 @@ def _validated_ehr_url() -> str:
     anyway (DNS rebinding, IPv6, and httpx connecting by hostname not the parsed
     IP would all bypass it), and adding one would be false security. Egress
     control to dangerous IP ranges is the deploy environment's job (network
-    policy / egress firewall) — see SECURITY.md.
+    policy / egress firewall).
     """
     raw = os.environ.get("PROSPER_EHR_URL", "http://127.0.0.1:8000")
     parsed = urlparse(raw)

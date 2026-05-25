@@ -110,7 +110,7 @@ America/New_York, in English.
 
 - Tenacity retry + single fallback model on transient LLM errors; SSRF-guarded EHR
   base URL; PII redaction before the LLM and before logs; loopback-gated `/frontdesk`;
-  mail filename sanitisation. Full threat model in `SECURITY.md`.
+  mail filename sanitisation.
 
 ---
 

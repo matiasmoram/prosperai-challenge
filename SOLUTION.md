@@ -83,10 +83,13 @@ asks you to repeat rather than guess when it didn't catch you.
   of birth, sorts out look-alikes by reading the options back, and registers new
   patients. It will not touch anyone's appointments until it's sure who's on the
   line.
-- **Book the right kind of visit** — it reads the caller's complaint and routes
-  them to the right specialty and the right visit length (a first psychiatry
-  visit needs more time than a routine check-up), then offers a few fitting times
-  rather than reading out a long list.
+- **Book the right kind of visit** — a small dedicated **mini-LLM** (a separate,
+  cheaper triage model, distinct from the main conversation model) reads the
+  caller's complaint and classifies it into the right specialty and the right
+  visit length (a first psychiatry visit needs more time than a routine
+  check-up). The agent then offers a few fitting times rather than reading out a
+  long list. Splitting this off keeps the classification cheap and focused while
+  the main model stays on the conversation.
 - **Cancel and reschedule safely** — moving an appointment is a single, all-or-
   nothing operation: if the new time is taken, the original is never lost.
 - **Know its limits** — if someone describes a medical emergency it stops and

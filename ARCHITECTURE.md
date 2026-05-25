@@ -10,7 +10,7 @@
 > `docs/architecture.md` (process + FSM diagrams) and `docs/adr/001..006`
 > (load-bearing decisions). Companion docs: `docs/FEATURES.md` (exhaustive
 > capability list), `docs/cases.md` (test-case catalogue), `docs/tester.md` (test
-> machinery). Rules live in `CLAUDE.md`, recipes in `CONTRIBUTING.md`.
+> machinery).
 
 ## 0. Summary
 
@@ -488,7 +488,7 @@ This is a deliberate higher-trust tier than the masked operator-console bus.
 In the demo the console uvicorn binds to `127.0.0.1` (loopback-only) so no
 inbound internet path exists. In production this endpoint must sit behind
 authentication (clinic SSO or shared-secret header) before being exposed beyond
-localhost. See `SECURITY.md` for the threat note.
+localhost.
 
 The router is wired in `console/server.py::build_app`; it is included only when
 both `store` and `calendar_fetch` are supplied (guarded in `bot.py` under the
@@ -631,7 +631,7 @@ canonical list is the file itself, run via `make mock-eval`:
 | hybrid | `ambiguous_intent_routed_via_tool`, `route_intent_resolves_to_cancel`, `route_intent_resolves_to_reschedule`, `cancel_then_rebook_intent_flip` | The `route_intent` navigation tool (CHOOSE_INTENT) end-to-end + the cancel→rebook intent-flip chain |
 | identity | `identify_by_name_dob_disambiguation` | Two fuzzy candidates → caller's pick resolves to the correct patient (F-013 class, end-to-end) |
 
-Adding a scenario is a ~20-line PR per `CONTRIBUTING.md` — pure data
+Adding a scenario is a ~20-line PR — pure data
 (`Scenario` dataclass), no framework changes.
 
 ### Mock-LLM mode (`make mock-eval`)
@@ -795,8 +795,7 @@ Three guards on the network + log surface:
 3. **DoS caps on request bodies.** Every Pydantic schema in
    `ehr/schemas.py` carries `Field(max_length=…)`.
 
-Audit trail: `docs/research/2026-05-20-security-audit.md` +
-`SECURITY.md`.
+Audit trail: `docs/research/2026-05-20-security-audit.md`.
 
 ## 14. In-flight work
 
@@ -1126,6 +1125,5 @@ handling (TTSAudibleObserver + mark_last_assistant_interrupted, Wave 7)**.
   design, speculative race.
 - `docs/superpowers/specs/2026-05-19-prosper-challenge-design.md` —
   full deliberation trail (LLM council verdict per decision).
-- `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`,
-  `FUTURE.md`, `.editorconfig`, `.gitattributes` — repo hygiene +
-  contributor surface.
+- `CHANGELOG.md`, `FUTURE.md`, `.editorconfig`, `.gitattributes` — repo
+  hygiene + contributor surface.

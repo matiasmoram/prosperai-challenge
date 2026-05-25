@@ -132,8 +132,6 @@ docs/superpowers/              # design specs + implementation plan
 scripts/seed.py                # one-shot DB seeding
 scripts/bench.py               # re-runnable EHR-endpoint micro-bench (`make bench`)
 scripts/status.py              # repo health snapshot (`make status`)
-CONTRIBUTING.md                # how to add scenarios / tools / states
-SECURITY.md                    # SSRF guard, PII redaction, threat model
 CHANGELOG.md                   # reverse-chronological delivery log
 .editorconfig / .gitattributes # consistent line endings + indent across editors
 ```
