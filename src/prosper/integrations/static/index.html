@@ -93,32 +93,42 @@
     .cal-nav button:hover { background: #f5f9ff; border-color: var(--accent); }
     .cal-nav button:active { background: var(--sel); }
     .cal-empty { padding: 32px; color: var(--muted); }
-    .cal-grid { flex: 1; overflow: auto; display: grid;
-                grid-template-columns: repeat(7, minmax(150px, 1fr)); gap: 1px;
-                background: var(--line); }
-    .cal-col { background: var(--bg); display: flex; flex-direction: column; min-width: 0; }
-    .cal-col.today .day-head { background: #eaf2ff; color: var(--accent); }
-    .day-head { position: sticky; top: 0; background: var(--panel); z-index: 1;
-                padding: 10px 10px 8px; border-bottom: 1px solid var(--line); }
-    .day-head .dow { font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
-                     color: var(--muted); }
-    .day-head .dnum { font-size: 18px; font-weight: 600; }
-    .day-body { padding: 8px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
-    .day-body .none { color: #c2cad3; text-align: center; padding-top: 14px; font-size: 18px; }
-    .event {
-      border-radius: 6px; padding: 7px 9px; border-left: 4px solid var(--ev-accent, #94a3b8);
-      background: var(--ev-bg, #eef1f4); color: var(--ink);
-    }
-    .event .etime { font-weight: 700; font-size: 13px; }
-    .event .epat { font-weight: 600; margin-top: 1px; overflow: hidden;
-                   text-overflow: ellipsis; white-space: nowrap; }
-    .event .eprov { font-size: 12px; color: #455; overflow: hidden;
-                    text-overflow: ellipsis; white-space: nowrap; }
-    .event .espec { font-size: 11px; color: var(--ev-accent, #64748b); font-weight: 600;
-                    margin-top: 2px; }
-    .event .enote { font-size: 11px; font-style: italic; color: var(--muted);
-                    margin-top: 3px; overflow: hidden; text-overflow: ellipsis;
-                    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .cal-grid { flex: 1; overflow: auto; }
+    /* Time-axis week view: an hours gutter + 7 day columns. Events are
+       absolutely positioned by start time, with height = duration, so you can
+       see when each appointment starts AND ends. --hour-px is set in JS. */
+    .cal-matrix { display: grid; grid-template-columns: 60px repeat(7, minmax(130px, 1fr));
+                  min-width: 920px; }
+    .cal-corner { position: sticky; top: 0; left: 0; z-index: 4; background: var(--panel);
+                  border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); }
+    .cal-dayhead { position: sticky; top: 0; z-index: 3; background: var(--panel);
+                   border-bottom: 1px solid var(--line); border-left: 1px solid var(--line);
+                   padding: 8px 10px; }
+    .cal-dayhead.today { background: #eaf2ff; }
+    .cal-dayhead .dow { font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+                        color: var(--muted); }
+    .cal-dayhead.today .dow, .cal-dayhead.today .dnum { color: var(--accent); }
+    .cal-dayhead .dnum { font-size: 18px; font-weight: 600; }
+    .cal-hours { position: relative; background: var(--panel);
+                 border-right: 1px solid var(--line); }
+    .cal-hours .hr { position: absolute; right: 7px; transform: translateY(-50%);
+                     font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .cal-daycol { position: relative; border-left: 1px solid var(--line); background: var(--bg);
+                  /* faint hour gridlines, one per --hour-px */
+                  background-image: repeating-linear-gradient(
+                    to bottom, transparent 0, transparent calc(var(--hour-px) - 1px),
+                    var(--line) calc(var(--hour-px) - 1px), var(--line) var(--hour-px)); }
+    .cal-daycol.today { background-color: #f5f9ff; }
+    .cal-event { position: absolute; border-radius: 5px; padding: 2px 6px; overflow: hidden;
+                 border-left: 3px solid var(--ev-accent, #94a3b8);
+                 background: var(--ev-bg, #eef1f4); color: var(--ink);
+                 box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+    .cal-event .etime { font-weight: 700; font-size: 11px; white-space: nowrap;
+                        color: var(--ev-accent, #475569); }
+    .cal-event .epat { font-weight: 600; font-size: 12px; overflow: hidden;
+                       text-overflow: ellipsis; white-space: nowrap; }
+    .cal-event .eprov { font-size: 11px; color: #556; overflow: hidden;
+                        text-overflow: ellipsis; white-space: nowrap; }
 
     /* Authoritative: id selectors (#mail-view/#cal-view) set `display`, which
        out-specifies a bare `.hidden`, so the tab toggle needs !important. */

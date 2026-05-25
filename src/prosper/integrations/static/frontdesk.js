@@ -142,6 +142,18 @@ const SPECIALTY_COLORS = {
 };
 const specColor = (s) => SPECIALTY_COLORS[s] || { bg: "#eef1f4", accent: "#64748b" };
 
+// Time-axis window: clinic hours. Slots run 09:00–17:00; show 9am→5pm.
+const DAY_START_H = 9;
+const DAY_END_H = 17;
+const HOUR_PX = 64; // vertical pixels per hour
+
+// "9 AM", "12 PM", "1 PM", "5 PM"
+function fmtHour(h) {
+  const ampm = h < 12 || h === 24 ? "AM" : "PM";
+  const hr = h % 12 === 0 ? 12 : h % 12;
+  return `${hr} ${ampm}`;
+}
+
 // Which week the grid is showing, in weeks from today (0 = current week,
 // -1 = last week, +1 = next week). Nav buttons mutate this; the poll reads it.
 let weekOffset = 0;
@@ -174,58 +186,96 @@ function renderCalendar(entries) {
     days[6].toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   calRange.textContent = weekOffset === 0 ? "This week · " + span : span;
 
-  // Bucket appointments by calendar day, ordered by time within each day.
+  // Bucket appointments by calendar day.
   const byDay = new Map();
-  let placed = 0;
   entries.forEach((e) => {
     const start = parseNaive(e.start_at);
     if (!start) return;
     const k = dayKey(start);
     if (!byDay.has(k)) byDay.set(k, []);
     byDay.get(k).push({ start, e });
-    placed++;
   });
-  byDay.forEach((arr) => arr.sort((a, b) => a.start - b.start));
 
-  calGrid.replaceChildren();
-  if (placed === 0) {
-    const when = weekOffset === 0 ? "this week" : "in " + span;
-    calGrid.appendChild(el("div", "cal-empty", "No appointments " + when + "."));
-    return;
-  }
-
+  const bodyH = (DAY_END_H - DAY_START_H) * HOUR_PX;
   const todayKey = dayKey(new Date());
+
+  const matrix = el("div", "cal-matrix");
+  matrix.style.setProperty("--hour-px", HOUR_PX + "px");
+
+  // Row 1: empty corner over the hours gutter, then the 7 day headers.
+  matrix.appendChild(el("div", "cal-corner"));
   days.forEach((d) => {
-    const col = el("div", "cal-col");
-    if (dayKey(d) === todayKey) col.classList.add("today");
-
-    const head = el("div", "day-head");
-    head.appendChild(el("div", "dow", d.toLocaleDateString("en-US", { weekday: "short" })));
-    head.appendChild(el("div", "dnum", String(d.getDate())));
-    col.appendChild(head);
-
-    const body = el("div", "day-body");
-    const items = byDay.get(dayKey(d)) || [];
-    if (!items.length) {
-      body.appendChild(el("div", "none", "—"));
-    } else {
-      items.forEach(({ start, e }) => {
-        const c = specColor(e.specialty);
-        const ev = el("div", "event");
-        ev.style.setProperty("--ev-bg", c.bg);
-        ev.style.setProperty("--ev-accent", c.accent);
-        ev.appendChild(el("div", "etime", hhmm(start)));
-        ev.appendChild(el("div", "epat", e.patient_name));
-        ev.appendChild(el("div", "eprov", e.provider_name));
-        ev.appendChild(el("div", "espec", e.specialty));
-        if (e.notes) ev.appendChild(el("div", "enote", e.notes));
-        body.appendChild(ev);
-      });
-    }
-    col.appendChild(body);
-    calGrid.appendChild(col);
+    const h = el("div", "cal-dayhead");
+    if (dayKey(d) === todayKey) h.classList.add("today");
+    h.appendChild(el("div", "dow", d.toLocaleDateString("en-US", { weekday: "short" })));
+    h.appendChild(el("div", "dnum", String(d.getDate())));
+    matrix.appendChild(h);
   });
 
+  // Row 2 col 1: the hours gutter (one label per hour, aligned to gridlines).
+  const hours = el("div", "cal-hours");
+  hours.style.height = bodyH + "px";
+  for (let hh = DAY_START_H; hh <= DAY_END_H; hh++) {
+    const lbl = el("div", "hr", fmtHour(hh));
+    lbl.style.top = (hh - DAY_START_H) * HOUR_PX + "px";
+    hours.appendChild(lbl);
+  }
+  matrix.appendChild(hours);
+
+  // Row 2 cols 2-8: each day column with absolutely-positioned events.
+  days.forEach((d) => {
+    const col = el("div", "cal-daycol");
+    if (dayKey(d) === todayKey) col.classList.add("today");
+    col.style.height = bodyH + "px";
+
+    // Build items with start/end ms, sorted, then assign lanes so overlapping
+    // appointments sit side-by-side instead of on top of each other.
+    const items = (byDay.get(dayKey(d)) || [])
+      .map(({ start, e }) => {
+        const dur = Number(e.duration_minutes) || 30;
+        return { start, e, dur, startMs: start.getTime(), endMs: start.getTime() + dur * 60000 };
+      })
+      .sort((a, b) => a.startMs - b.startMs);
+
+    const laneEnds = [];
+    items.forEach((it) => {
+      let lane = 0;
+      for (; lane < laneEnds.length; lane++) {
+        if (laneEnds[lane] <= it.startMs) break;
+      }
+      it.lane = lane;
+      laneEnds[lane] = it.endMs;
+    });
+    const lanes = Math.max(1, laneEnds.length);
+
+    items.forEach((it) => {
+      const { start, e, dur } = it;
+      const startMin = (start.getHours() - DAY_START_H) * 60 + start.getMinutes();
+      const top = Math.max(0, (startMin / 60) * HOUR_PX);
+      const height = Math.max((dur / 60) * HOUR_PX - 2, 18);
+      const end = new Date(start.getTime() + dur * 60000);
+      const c = specColor(e.specialty);
+      const w = 100 / lanes;
+
+      const ev = el("div", "cal-event");
+      ev.style.top = top + "px";
+      ev.style.height = height + "px";
+      ev.style.left = `calc(${it.lane * w}% + 3px)`;
+      ev.style.width = `calc(${w}% - 5px)`;
+      ev.style.setProperty("--ev-bg", c.bg);
+      ev.style.setProperty("--ev-accent", c.accent);
+      const range = `${hhmm(start)}–${hhmm(end)}`;
+      ev.title = `${range} · ${e.patient_name} · ${e.provider_name} (${e.specialty})`;
+      ev.appendChild(el("div", "etime", range));
+      ev.appendChild(el("div", "epat", e.patient_name));
+      ev.appendChild(el("div", "eprov", `${e.provider_name} · ${e.specialty}`));
+      col.appendChild(ev);
+    });
+
+    matrix.appendChild(col);
+  });
+
+  calGrid.replaceChildren(matrix);
   calGrid.scrollTop = scrollTop;
   calGrid.scrollLeft = scrollLeft;
 }
