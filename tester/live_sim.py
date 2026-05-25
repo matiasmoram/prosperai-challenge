@@ -25,8 +25,27 @@ from prosper.ehr.api import create_app
 from prosper.ehr_client import EHRClient
 from prosper.flows import State
 from prosper.llm import OpenAILLMAdapter
+from tester.clarification import Turn, check_recovers_gracefully
+from tester.noise import garble
 from tester.personas import WORLDS, Persona, has_unfilled_placeholders
 from tester.recorder import RecordingBus
+
+# Write tools whose successful firing while a garble is pending = plowed-ahead.
+_WRITE_TOOLS = frozenset({"create_appointment", "cancel_appointment", "reschedule_appointment"})
+
+
+def _write_tool_in(events: list[ConsoleEvent]) -> str | None:
+    """Name of the first successful write tool in ``events``, else None.
+
+    Scans ``tool_call_end`` events (payload ``{tool, outcome, ...}``) for a write
+    that completed ``ok`` — used to annotate which bot turn committed a change.
+    """
+    for e in events:
+        if e.type == "tool_call_end":
+            tool = str(e.payload.get("tool", ""))
+            if tool in _WRITE_TOOLS and e.payload.get("outcome") == "ok":
+                return tool
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +64,8 @@ class CallResult:
     duration_ms: float
     error: str | None = None
     corrupt: bool = False  # True when the caller LLM emitted unfilled [Placeholder] text
+    # plowed_ahead_on_garble breaches — non-empty only for noise_profile personas.
+    clarification_violations: tuple[str, ...] = ()
 
 
 def _caller_utterance_corrupt(transcript: list[dict[str, Any]]) -> bool:
@@ -89,6 +110,7 @@ async def simulate_call(
     transcript: list[dict[str, Any]] = []
     state_val = "UNKNOWN"
     turns = 0
+    clarification_violations: tuple[str, ...] = ()
     with _isolated_engine() as engine:
         with Session(engine) as setup_session:
             WORLDS[persona.world](setup_session)
@@ -103,14 +125,35 @@ async def simulate_call(
         )
         async with ehr:
             sim = PersonaSimulator(client=client, persona=persona.prompt, model=model)
+            turn_log: list[Turn] = []
             try:
                 bot_text = await dispatcher.start()
+                turn_log.append(Turn(role="bot", text=bot_text))
                 while dispatcher.state is not State.END and turns < max_turns:
-                    user_text = await sim.reply_to(bot_text)
-                    if _is_persona_stop(user_text):
+                    clean = await sim.reply_to(bot_text)
+                    # Stop on the persona's CLEAN intent — never garble the
+                    # goodbye, or the bot would mishear it and never end.
+                    if _is_persona_stop(clean):
                         dispatcher.state = State.END
                         break
-                    bot_text = await dispatcher.handle_user_turn(user_text)
+                    heard = (
+                        garble(clean, seed=turns, profile=persona.noise_profile)
+                        if persona.noise_profile
+                        else clean
+                    )
+                    turn_log.append(
+                        Turn(
+                            role="caller",
+                            text=heard,
+                            garbled=persona.noise_profile is not None,
+                            original=clean if persona.noise_profile else None,
+                        )
+                    )
+                    before = len(bus.events)
+                    bot_text = await dispatcher.handle_user_turn(heard)
+                    turn_log.append(
+                        Turn(role="bot", text=bot_text, wrote=_write_tool_in(bus.events[before:]))
+                    )
                     turns += 1
             except Exception as exc:  # capture, don't crash the batch
                 error = f"{type(exc).__name__}: {exc}"
@@ -118,6 +161,7 @@ async def simulate_call(
                 await asyncio.gather(*list(dispatcher._inflight_publishes), return_exceptions=True)
         transcript = list(dispatcher.transcript)
         state_val = dispatcher.state.value
+        clarification_violations = tuple(v.detail for v in check_recovers_gracefully(turn_log))
     return CallResult(
         persona=persona.name,
         adversarial=persona.adversarial,
@@ -131,4 +175,5 @@ async def simulate_call(
         duration_ms=(time.perf_counter() - started) * 1000,
         error=error,
         corrupt=_caller_utterance_corrupt(transcript),
+        clarification_violations=clarification_violations,
     )

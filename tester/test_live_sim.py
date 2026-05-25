@@ -38,6 +38,56 @@ def test_corrupt_when_caller_emits_phone_placeholder() -> None:
     assert _caller_utterance_corrupt(transcript) is True
 
 
+# ---------------------------------------------------------------------------
+# Unit tests: write-tool detection for the clarification audit (_write_tool_in)
+# ---------------------------------------------------------------------------
+
+
+def _ev(type_: str, payload: dict[str, Any]):
+    from prosper.console.events import ConsoleEvent
+
+    return ConsoleEvent(type=type_, ts=0.0, session_id="s1", payload=payload)
+
+
+def test_write_tool_in_detects_successful_write() -> None:
+    from tester.live_sim import _write_tool_in
+
+    events = [
+        _ev("tool_call_start", {"tool": "create_appointment", "args_redacted": {}, "call_id": "1"}),
+        _ev(
+            "tool_call_end",
+            {"tool": "create_appointment", "call_id": "1", "outcome": "ok", "duration_ms": 3.0},
+        ),
+    ]
+    assert _write_tool_in(events) == "create_appointment"
+
+
+def test_write_tool_in_ignores_failed_or_read_tools() -> None:
+    from tester.live_sim import _write_tool_in
+
+    # A failed write does not count (no change committed)…
+    failed = [
+        _ev(
+            "tool_call_end",
+            {"tool": "create_appointment", "call_id": "1", "outcome": "err", "duration_ms": 1.0},
+        )
+    ]
+    assert _write_tool_in(failed) is None
+    # …nor does a successful READ tool.
+    read = [
+        _ev(
+            "tool_call_end",
+            {
+                "tool": "get_upcoming_appointments",
+                "call_id": "2",
+                "outcome": "ok",
+                "duration_ms": 1.0,
+            },
+        )
+    ]
+    assert _write_tool_in(read) is None
+
+
 def test_corrupt_when_caller_emits_name_placeholder() -> None:
     from tester.live_sim import _caller_utterance_corrupt
 

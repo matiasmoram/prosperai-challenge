@@ -54,7 +54,14 @@ async def _run(
     async def _bounded(p: Persona) -> tuple[CallResult, list[InvariantViolation]]:
         async with sem:
             result = await simulate_call(p, client=client, model=model)
-            return result, check_call(result.events, result.transcript)
+            violations = check_call(result.events, result.transcript)
+            # Messy-human personas add a clarification audit: a write that landed
+            # on a garbled value with no re-prompt is a plowed_ahead_on_garble.
+            violations.extend(
+                InvariantViolation("plowed_ahead_on_garble", detail)
+                for detail in result.clarification_violations
+            )
+            return result, violations
 
     pairs = await asyncio.gather(*[_bounded(p) for p in personas])
 

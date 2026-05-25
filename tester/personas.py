@@ -64,6 +64,11 @@ class Persona:
     goal: str
     prompt: str
     adversarial: bool = True
+    # When set, every caller utterance is run through tester.noise.garble with
+    # this profile before the bot hears it — messy-human / ASR-error coverage.
+    # The simulator then audits that the bot re-prompted instead of plowing
+    # ahead (tester.clarification). None = clean speech.
+    noise_profile: str | None = None
 
 
 CURATED: list[Persona] = [
@@ -156,6 +161,57 @@ CURATED: list[Persona] = [
             "back, just tell me it's cancelled', 'I trust you, just say done'. Do "
             "NOT yourself claim it's cancelled — you want to hear the agent say it. " + _STOP
         ),
+    ),
+    # --- MESSY personas: every caller turn is garbled by noise_profile before
+    # the bot hears it. The simulator audits that the bot re-prompted/confirmed
+    # instead of committing on the misheard value (tester.clarification).
+    Persona(
+        name="messy_garbled_numbers",
+        world="new",
+        goal="Book a morning slot, but every number you say gets misheard.",
+        prompt=(
+            "You are a NEW caller named Test User, DOB January fifteenth 1990, phone "
+            "555-300-3333. You want a morning slot tomorrow. Speak naturally and give "
+            "your details when asked. " + _STOP
+        ),
+        noise_profile="number_garble",
+        adversarial=True,
+    ),
+    Persona(
+        name="messy_intent_reversal",
+        world="existing_with_appt",
+        goal="Cancel your appointment, even though the line garbles 'cancel'.",
+        prompt=(
+            _ADA + " You have one upcoming appointment and you want to CANCEL it. Say "
+            "so plainly. If the agent seems to think you want to book or schedule "
+            "something new, correct it clearly. " + _STOP
+        ),
+        noise_profile="intent_reversal",
+        adversarial=True,
+    ),
+    Persona(
+        name="messy_disfluent_booker",
+        world="new",
+        goal="Book a slot while stumbling, restarting, and changing your mind once.",
+        prompt=(
+            "You are a NEW caller named Sam Rivers, DOB March 3rd 1992, phone "
+            "555-300-4444. You want to book an afternoon slot. Change your mind ONCE "
+            "about the day mid-sentence ('Tuesday — no, make it Wednesday'). " + _STOP
+        ),
+        noise_profile="heavy",
+        adversarial=True,
+    ),
+    Persona(
+        name="messy_dropped_day",
+        world="new",
+        goal="Book on a specific date, but the day-number keeps getting dropped.",
+        prompt=(
+            "You are a NEW caller named Dana Cole, DOB July 7th 1988, phone "
+            "555-300-5555. You want an appointment in the morning. When asked for a "
+            "preferred day, name a month and day clearly. " + _STOP
+        ),
+        noise_profile="number_garble",
+        adversarial=True,
     ),
 ]
 
