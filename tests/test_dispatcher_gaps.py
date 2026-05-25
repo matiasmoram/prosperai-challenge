@@ -289,6 +289,78 @@ def test_validate_against_memory_allows_known_slot_id(ehr_client: EHRClient) -> 
 
 
 # ---------------------------------------------------------------------------
+# F-002: clinical floor guard in _validate_against_memory
+# ---------------------------------------------------------------------------
+
+
+def test_validate_against_memory_below_minimum_safe_duration(ehr_client: EHRClient) -> None:
+    """F-002: create_appointment with duration_minutes < minimum_safe_minutes must Err."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(
+        identified_patient={"id": "patient-A"},
+        last_slots=[{"slot_id": "slot-1"}],
+        minimum_safe_minutes=60,
+    )
+    err = d._validate_against_memory(
+        "create_appointment",
+        {"slot_id": "slot-1", "patient_id": "patient-A", "duration_minutes": 30},
+    )
+    assert err is not None
+    assert err.code == "below_minimum_safe_duration"
+    assert err.retryable is True
+
+
+def test_validate_against_memory_at_floor_passes(ehr_client: EHRClient) -> None:
+    """F-002: duration_minutes == minimum_safe_minutes must pass (floor is inclusive)."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(
+        identified_patient={"id": "patient-A"},
+        last_slots=[{"slot_id": "slot-1"}],
+        minimum_safe_minutes=60,
+    )
+    err = d._validate_against_memory(
+        "create_appointment",
+        {"slot_id": "slot-1", "patient_id": "patient-A", "duration_minutes": 60},
+    )
+    assert err is None
+
+
+def test_validate_against_memory_no_triage_skips_floor_check(ehr_client: EHRClient) -> None:
+    """F-002: when minimum_safe_minutes is None (no triage ran), the floor guard
+    must not fire even for a 30-min booking — callers who bypass triage are unconstrained."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(
+        identified_patient={"id": "patient-A"},
+        last_slots=[{"slot_id": "slot-1"}],
+        minimum_safe_minutes=None,
+    )
+    err = d._validate_against_memory(
+        "create_appointment",
+        {"slot_id": "slot-1", "patient_id": "patient-A", "duration_minutes": 30},
+    )
+    assert err is None
+
+
+def test_validate_against_memory_above_floor_passes(ehr_client: EHRClient) -> None:
+    """F-002: duration_minutes > minimum_safe_minutes must pass."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(
+        identified_patient={"id": "patient-A"},
+        last_slots=[{"slot_id": "slot-1"}],
+        minimum_safe_minutes=60,
+    )
+    err = d._validate_against_memory(
+        "create_appointment",
+        {"slot_id": "slot-1", "patient_id": "patient-A", "duration_minutes": 90},
+    )
+    assert err is None
+
+
+# ---------------------------------------------------------------------------
 # _record_tool_result — Err path
 # ---------------------------------------------------------------------------
 

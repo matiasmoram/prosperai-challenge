@@ -189,6 +189,17 @@ async def test_classify_symptoms_confidence_boundaries_preserved() -> None:
         assert r.value.confidence == pytest.approx(c)
 
 
+async def test_classify_symptoms_minimum_clamped_to_duration() -> None:
+    """F-007: when mini-LLM emits minimum_safe_minutes > duration_minutes, the
+    floor is silently clamped to duration so it never exceeds the recommendation.
+    (llm.py: minimum_safe_minutes = min(minimum_safe_raw, duration))"""
+    client = _FakeOpenAI(content=_classification_json(duration_minutes=60, minimum_safe_minutes=90))
+    r = await classify_symptoms(symptoms="back pain", client=client)
+    assert is_ok(r)
+    assert r.value.duration_minutes == 60
+    assert r.value.minimum_safe_minutes == 60  # clamped: min(90, 60) = 60
+
+
 # ---------------------------------------------------------------------------
 # suggest_specialty_handler — wraps classify_symptoms, adds red-flag escalation
 # ---------------------------------------------------------------------------

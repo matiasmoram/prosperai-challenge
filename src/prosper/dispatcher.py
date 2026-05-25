@@ -956,6 +956,21 @@ class Dispatcher:
                     message=(f"patient_id {patient_id!r} != identified patient {known_patient!r}"),
                     retryable=False,
                 )
+            # F-002 clinical floor guard: only fires when triage ran and set a
+            # floor. No triage (minimum_safe_minutes is None) → skip entirely so
+            # callers who bypassed triage can still book any valid duration.
+            floor = self.memory.minimum_safe_minutes
+            if floor is not None:
+                chosen = args.get("duration_minutes")
+                if isinstance(chosen, int) and chosen < floor:
+                    return Err(
+                        code="below_minimum_safe_duration",
+                        message=(
+                            f"duration_minutes={chosen} is below the clinical floor "
+                            f"of {floor} min set by triage — offer {floor} min or longer"
+                        ),
+                        retryable=True,
+                    )
         elif name == "cancel_appointment":
             appt_id = args.get("appointment_id")
             if not appt_id:

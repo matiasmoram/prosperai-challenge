@@ -143,7 +143,7 @@ the same commit.
 | `create_patient` | REGISTER | `dob_unparseable`, `patient_exists`, `ehr_error` |
 | `suggest_specialty` | BOOK_FLOW | `medical_emergency`; passes through `llm.classify_symptoms`: `triage_unavailable`, `unknown_specialty`, `invalid_duration` |
 | `list_availability_slots` | BOOK_FLOW, RESCHEDULE_FLOW | `date_unparseable`, `invalid_duration`, `ehr_error` |
-| `create_appointment` | CONFIRM_BOOK | `missing_slot_id`, `missing_patient_id`, `hallucinated_slot_id`, `patient_id_mismatch`, `slot_taken_other_patient`, `no_consecutive_slots`, `patient_or_slot_not_found`, `ehr_error` |
+| `create_appointment` | CONFIRM_BOOK | `missing_slot_id`, `missing_patient_id`, `hallucinated_slot_id`, `patient_id_mismatch`, `below_minimum_safe_duration`, `slot_taken_other_patient`, `no_consecutive_slots`, `patient_or_slot_not_found`, `ehr_error` |
 | `get_upcoming_appointments` | CANCEL_FLOW, RESCHEDULE_FLOW | `ehr_error` |
 | `cancel_appointment` | CONFIRM_CANCEL | `missing_appointment_id`, `hallucinated_appointment_id`, `appointment_not_found`, `ehr_error` |
 | `reschedule_appointment` | CONFIRM_RESCHEDULE | `missing_appointment_id`, `missing_slot_id`, `hallucinated_appointment_id`, `hallucinated_slot_id`, `slot_taken_other_patient`, `appointment_or_slot_not_found`, `ehr_error` |
