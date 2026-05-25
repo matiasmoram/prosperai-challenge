@@ -85,3 +85,19 @@ def test_root_serves_spa(tmp_path) -> None:
     resp = TestClient(_app(MailStore(root=tmp_path))).get("/frontdesk")
     assert resp.status_code == 200
     assert "Front Desk" in resp.text
+
+
+def test_static_js_is_served(tmp_path) -> None:
+    """Regression: the SPA's JS must load. router.mount() on a prefixed
+    APIRouter 404'd, so the page rendered as an inert shell."""
+    resp = TestClient(_app(MailStore(root=tmp_path))).get("/frontdesk/static/frontdesk.js")
+    assert resp.status_code == 200
+    assert "pollMail" in resp.text
+
+
+def test_static_rejects_traversal(tmp_path) -> None:
+    """A path-traversal filename must not escape the static dir."""
+    resp = TestClient(_app(MailStore(root=tmp_path))).get(
+        "/frontdesk/static/..%2f..%2f..%2fetc%2fpasswd"
+    )
+    assert resp.status_code == 404

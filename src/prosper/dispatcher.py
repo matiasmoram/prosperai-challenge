@@ -953,11 +953,11 @@ class Dispatcher:
             msg = make_message(
                 session_id=self.session_id,
                 kind="handoff",
-                to_label="reception@prosper.health",
-                subject=f"Callback — {name}",
+                to_label="Reception",
+                subject=f"Callback for {name} — {category}",
                 body=(
-                    f"Category: {category}\n"
-                    f"Callback wanted: {'yes' if callback else 'no'}\n\n"
+                    f"{name} ({phone}) asked for a callback.\n"
+                    f"Reason: {category}. Callback wanted: {'yes' if callback else 'no'}.\n\n"
                     f"{summary}"
                 ),
                 patient_name=name,
@@ -988,11 +988,11 @@ class Dispatcher:
         msg = make_message(
             session_id=self.session_id,
             kind="bot_failed",
-            to_label="reception@prosper.health",
-            subject=f"Assistant could not complete — {name}",
+            to_label="Reception",
+            subject=f"Assistant stuck — follow up with {name}",
             body=(
                 f"The assistant got stuck in state {self.state.value} and could not "
-                f"finish the caller's request. Please follow up."
+                f"finish {name}'s request ({phone}). Please follow up."
             ),
             patient_name=name,
             patient_phone=phone,
@@ -1027,12 +1027,12 @@ class Dispatcher:
         msg = make_message(
             session_id=self.session_id,
             kind="bot_failed",
-            to_label="reception@prosper.health",
-            subject=f"System failure — {name}",
+            to_label="Reception",
+            subject=f"System failure — follow up with {name}",
             body=(
-                f"The LLM call failed completely (retries + fallback exhausted) in "
-                f"state {self.state.value}. The caller heard a canned apology line. "
-                f"Please follow up with this caller."
+                f"The assistant's AI failed completely (retries + fallback exhausted) in "
+                f"state {self.state.value}. {name} ({phone}) heard a short apology line. "
+                f"Please call them back."
             ),
             patient_name=name,
             patient_phone=phone,
@@ -1062,15 +1062,18 @@ class Dispatcher:
         phone = str(patient.get("phone") or "(unknown)")
         provider = str(appt.get("provider_name") or "your provider")
         start = str(appt.get("start_at") or "")
+        # Addressed to the booked provider — the front-desk inbox is a staff
+        # surface, so a confirmed booking reads as a notification to the doctor
+        # ("Dr. Patel — new appointment"), not an email to the patient.
         msg = make_message(
             session_id=self.session_id,
             kind="booking_confirmation",
-            to_label=name,
-            subject="Your appointment is confirmed",
+            to_label=provider,
+            subject=f"New appointment — {name}" + (f" at {start}" if start else ""),
             body=(
-                f"Hi {name}, your appointment with {provider} is confirmed"
+                f"{name} ({phone}) booked a visit with {provider}"
                 + (f" for {start}" if start else "")
-                + ". Reply to reschedule."
+                + "."
             ),
             patient_name=name,
             patient_phone=phone,

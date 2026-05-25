@@ -14,9 +14,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from prosper.integrations.mail import MailStore
@@ -62,14 +61,20 @@ def build_frontdesk_router(store: MailStore, calendar_fetch: CalendarFetch) -> A
         """Serve the single-page front-desk app."""
         return FileResponse(_STATIC_DIR / "index.html")
 
-    # Mount static assets only when the directory exists. During early
-    # development (before the SPA is built) this is a no-op so the router
-    # still registers cleanly. Tests that need the SPA file create it first.
-    if _STATIC_DIR.exists():
-        router.mount(
-            "/static",
-            StaticFiles(directory=str(_STATIC_DIR)),
-            name="frontdesk-static",
-        )
+    @router.get("/static/{filename}", include_in_schema=False)
+    async def static_asset(filename: str) -> FileResponse:
+        """Serve a front-desk static asset by filename.
+
+        An explicit route rather than ``router.mount(StaticFiles(...))`` —
+        mounting a sub-app on a *prefixed* APIRouter does not route reliably
+        (the asset 404s), so the SPA's own JS never loaded. Restricted to plain
+        files directly inside the static dir: any path separator / ``..`` makes
+        ``(_STATIC_DIR / filename).parent`` differ from the static root, so a
+        traversal can never escape it.
+        """
+        target = (_STATIC_DIR / filename).resolve()
+        if target.parent != _STATIC_DIR.resolve() or not target.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        return FileResponse(target)
 
     return router

@@ -291,15 +291,17 @@ telemetry for an operator screen.
 `integrations/mail.py` (`MailStore`) appends `MailMessage` JSON records to
 `data/mail/<session>.jsonl` (one file per session). Three mail kinds:
 
-| Kind | Trigger | Source of identity |
-|---|---|---|
-| `handoff` | LLM calls `leave_message_for_front_desk` → `needs_human` transition | `SessionMemory` exclusively (never LLM args) |
-| `booking_confirmation` | `create_appointment` returns `Ok` → `_emit_booking_confirmation` | `SessionMemory.identified_patient` |
-| `bot_failed` | dispatcher inner LLM loop exhausts 4 iterations → `_emit_safety_net_handoff` | `SessionMemory.identified_patient` |
+| Kind | Trigger | Source of identity | Addressed to (`to_label`) |
+|---|---|---|---|
+| `handoff` | LLM calls `leave_message_for_front_desk` → `needs_human` transition | `SessionMemory` exclusively (never LLM args) | `Reception` |
+| `booking_confirmation` | `create_appointment` returns `Ok` → `_emit_booking_confirmation` | `SessionMemory.identified_patient` | the booked provider (`Dr. X`) |
+| `bot_failed` | inner LLM loop exhausts (`_emit_safety_net_handoff`) or total LLM failure (`_emit_system_failure_mail`) | `SessionMemory.identified_patient` | `Reception` |
 
-All writes are **fire-and-forget** via `_inflight_publishes` (same strong-ref
-pattern as console-bus publishes). A write failure is logged but never
-propagates to the call path.
+The inbox is a **staff surface**, so every message reads as a short note to a
+person — `Reception` for callbacks/failures, the booked `Dr. X` for a new-booking
+notification — with a one-line subject + body. All writes are **fire-and-forget**
+via `_inflight_publishes` (same strong-ref pattern as console-bus publishes); a
+write failure is logged but never propagates to the call path.
 
 ### /frontdesk router + SPA
 
@@ -317,7 +319,18 @@ The router is wired in `console/server.py::build_app`; it is included only when
 both `store` and `calendar_fetch` are supplied (guarded in `bot.py` under the
 console-enabled gate). `bot.py` constructs a `MailStore()` and an async
 `calendar_fetch` closure (thin wrapper over `EHRClient`) and passes both to
-`Dispatcher` and `build_frontdesk_router`.
+`Dispatcher` and `build_frontdesk_router`. The SPA's own assets are served by an
+explicit `GET /frontdesk/static/{filename}` `FileResponse` route (traversal-guarded)
+— a `router.mount(StaticFiles)` on a *prefixed* APIRouter does not route, so the
+JS would 404 and the page render as an inert shell.
+
+**Persistent standing site.** Because the bot only mounts `/frontdesk` per
+WebRTC connection, `scripts/frontdesk_server.py` runs the surface as an always-on
+site for staff: default mode reads the real `data/mail/` (where a running bot
+appends mail mid-call) + proxies the live EHR calendar, so a mail sent during a
+call appears within the SPA's 2 s poll; `--demo` mode serves an isolated seeded
+EHR + sample mail with no other process running. The calendar renders as a 7-day
+grid (one event block per appointment, coloured by specialty).
 
 ### handed_off outcome on the bus
 
@@ -720,6 +733,27 @@ shipped); the async prefetch itself is held. **Scope (light warm-path vs full
 | No proactive prefetch on STT partials | Brittle on partial-text changes; `ttft` phase is instrumented so we'll see the real pain before adding. |
 | No `AvailabilityCache` | A 30-line dict TTL cache would shave the ~10 ms `list_availability_slots` cost — far below the LLM-dominated budget, so deferred. |
 | No pre-recorded "everything is on fire" TTS fallback | Needs a checked-in WAV + regex phone capture; deferred behind the LLM retry layer that handles 99% of provider blips. |
+
+## 16.1. Discarded / deferred — `FUTURE.md` adjudication
+
+Every item proposed in `FUTURE.md` that is **not** implemented, with the explicit
+decision. "Deferred-by-design" = a reasoned no for this submission, not an
+oversight; "partial" = the high-value half shipped, the rest is a small follow-up;
+"not pursued" = reasonable next work, just not done. The shipped items
+(1.1, 2.1, 2.3, 5.1, 6.1, 6.2, and the fuzzy-disambiguation half of 3.3) are
+recorded in `CHANGELOG.md` and the relevant SOLUTION sections.
+
+| FUTURE item | Decision | Why |
+|---|---|---|
+| **1.2** STT/TTS multi-provider fallback | **deferred** | No first-class Pipecat `ServiceSwitcher` (issue #4139). LLM retry + fallback model shipped as the higher-value reliability win. |
+| **1.3** `AvailabilityCache` (60 s TTL) | **discarded for now** | Saves ~10 ms on `list_availability_slots` — far below the LLM-dominated budget. Revisit only when the EHR moves remote (100–300 ms round-trips). |
+| **2.2** Multi-model judge w/ disagreement | **not pursued** | Paired state-assertion + single judge (ADR 003) already gates; a second judge model adds cost for marginal signal in a demo. |
+| **3.1** Streaming TTS (flush-after-clause) | **deferred** | Biggest remaining perceived-latency win, but needs a custom Pipecat frame processor — out of the submission window. |
+| **3.2** Slot prefetch on STT partials | **discarded for now** | Brittle on noisy partial text; `ttft` is instrumented so the real pain is measurable before adding speculative EHR calls. |
+| **3.3** Async speculative race (full) | **deferred by design** | The fuzzy-disambiguation half **shipped** (`speculation.py`). The async prefetch itself saves <200 ms on local SQLite vs. real asyncio-cancellation complexity; revisit when remote. Scope (light warm-path vs full 3-branch race) wants an LLM-council pass first. |
+| **4.1** Provider preference capture/routing | **partial** | Doctor **choice** offering shipped (Wave 8 — bot offers providers when a specialty has 2+). The session-memory `preferred_provider_id` + automatic availability filtering is **not** built — small, low-risk follow-up. |
+| **4.2** Reason-for-visit / notes capture | **partial** | `notes` is plumbed through `create_appointment` + the EHR schema + a `book_appointment_with_notes` scenario. The proactive "anything you'd like the doctor to know?" ask + `pending_notes` pass-through is **not** wired — small follow-up. |
+| **5.2** Input-validation hardening (OWASP A03) | **not pursued** | `Field(max_length=…)` DoS caps shipped. E.164 `PhoneStr`, DOB plausibility bounds, and HTML-strip on `notes` are **not** — a reasonable next security increment (low risk, ~S effort). |
 
 ## 17. Future work (priority order)
 
