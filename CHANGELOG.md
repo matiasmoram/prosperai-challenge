@@ -185,6 +185,11 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
   green because scenarios pass the canonical value. Fix: `tools._normalize_specialty` (difflib fuzzy
   map to SPECIALTY_DURATION_TABLE keys, cutoff 0.6) at the tool boundary, before primary + scan probes;
   unknown specialties pass through. +unit test. ARCHITECTURE §13.3. 769 tests, mock-eval 108/108.
+- `00e3731` — **doc test-count reconciliation**: SOLUTION.md (×2) + ARCHITECTURE §0 still said
+  ~715 tests (`tests/` 544 + `tester/` 171) while the verify set now collects 770 (`tests/` 582 +
+  `tester/` 172 + evals 16; 769 pass / 1 skip). CHANGELOG already recorded 769 at `27bf511` — only
+  the two reference docs lagged, which a reviewer running the suite would catch. Doc counts only,
+  no code change. ruff + format + mypy --strict clean, 769 pass, mock-eval 108/108.
 - `e8f23de` — **CONFIRM_BOOK lists specialties, never refuses (prompt, from live log — Phase 1)**:
   caller in CONFIRM_BOOK asked "what type of doctors are there?" and the bot refused (in-scope
   question). Root (design smell, ARCHITECTURE §14): `BOOK_FLOW→CONFIRM_BOOK` fires on *slots listed*,
