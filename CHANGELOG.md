@@ -177,6 +177,13 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `7a285e3` — **AvailabilityCache adjudicated spec** (FUTURE 1.3, council-decided): full 4-tuple
   key, repo-layer placement, evict-on-commit (reschedule=2 dates, multi-slot=all chained dates),
   TTL 10s default-off, DB-409 stays the guard. Documented, not built (remote-EHR-only payoff).
+- `8373fb0` — **unknown specialty distinguished from "no slots" (robustness follow-up)**: the EHR's
+  empty result was ambiguous — "specialty we don't offer" (cardiology) vs "offered but fully booked"
+  looked identical, so the bot guessed. `list_availability_slots` now short-circuits a non-canonical
+  specialty with `specialty_offered=False` + the offered list (no EHR query, no 6-day probe), and
+  `_redact_for_llm` renders "we do not offer X; we offer …" so the bot says it plainly. Near-misses
+  still resolve via the fuzzy map; only true unknowns hit this path. +unit test. ARCHITECTURE §13.3.
+  770 tests, mock-eval 108/108.
 - `27bf511` — **specialty wording normalised to canonical EHR value (from live log)**: caller chose
   "Dermatology", bot looped "no slots … next six days" forever though Dermatologist was wide open.
   Root (data/contract, not the LLM): `providers.specialty` stores "Dermatologist"/"Therapist"/… and
