@@ -59,15 +59,24 @@ def _seed_ehr(session: Session) -> None:
 
     patients = [
         repo.create_patient(
-            session, first_name="Ada", last_name="Lovelace", dob=date(1990, 12, 10),
+            session,
+            first_name="Ada",
+            last_name="Lovelace",
+            dob=date(1990, 12, 10),
             phone="+12025550100",
         ),
         repo.create_patient(
-            session, first_name="John", last_name="Smith", dob=date(1985, 6, 1),
+            session,
+            first_name="John",
+            last_name="Smith",
+            dob=date(1985, 6, 1),
             phone="+12025550111",
         ),
         repo.create_patient(
-            session, first_name="Grace", last_name="Hopper", dob=date(1979, 3, 22),
+            session,
+            first_name="Grace",
+            last_name="Hopper",
+            dob=date(1979, 3, 22),
             phone="+12025550122",
         ),
     ]
