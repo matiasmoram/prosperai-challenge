@@ -177,6 +177,13 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `7a285e3` — **AvailabilityCache adjudicated spec** (FUTURE 1.3, council-decided): full 4-tuple
   key, repo-layer placement, evict-on-commit (reschedule=2 dates, multi-slot=all chained dates),
   TTL 10s default-off, DB-409 stays the guard. Documented, not built (remote-EHR-only payoff).
+- `e8f23de` — **CONFIRM_BOOK lists specialties, never refuses (prompt, from live log — Phase 1)**:
+  caller in CONFIRM_BOOK asked "what type of doctors are there?" and the bot refused (in-scope
+  question). Root (design smell, ARCHITECTURE §14): `BOOK_FLOW→CONFIRM_BOOK` fires on *slots listed*,
+  not *slot selected*, so the question landed in a confirm-a-slot prompt. Phase 1 (council A→B,
+  prompt-only, zero FSM/eval blast radius): CONFIRM_BOOK now names the five specialties + re-lists on
+  a "what do you offer / something different?" turn. Phase 2 (transition fires on real selection) is
+  committed in the same ticket, tracked in §14. test_prompts 10/10 (1009 B < 1 KB), mock-eval 108/108.
 - `db34ef3` — **consent gate (architecture, from live log)**: completes the offer-then-confirm
   invariant. `_READ_BEFORE_WRITE` only blocked list+book in the SAME turn; a CONFIRM_* state
   persists across turns, so the model could fire create/cancel/reschedule on a turn that was a
