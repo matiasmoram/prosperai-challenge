@@ -9,6 +9,7 @@ source of truth for which tools fire.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import sys
@@ -222,6 +223,18 @@ class DispatcherProcessor(FrameProcessor):
         # delta once the dispatcher hands back the bot's reply (the LLM
         # response is the first thing TTS will emit).
         self._stt_end_ts: float | None = None
+        # Transcript aggregation: ElevenLabs STT commits a SEPARATE final
+        # TranscriptionFrame each time the caller pauses, so a choppy utterance
+        # ("um… next week… please") used to fire one dispatcher turn PER
+        # fragment — the bot answered each piece separately. We instead buffer
+        # fragments and flush them as ONE turn after the caller has been quiet
+        # for `_agg_window_s` (no new fragment). Window is env-tunable; the
+        # _turn_lock serialises flushes so a late fragment can't run a second
+        # handle_user_turn while the previous one is still in flight.
+        self._agg_parts: list[str] = []
+        self._agg_task: asyncio.Task[None] | None = None
+        self._turn_lock = asyncio.Lock()
+        self._agg_window_s = float(os.environ.get("PROSPER_TURN_AGG_S", "1.2"))
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -238,7 +251,9 @@ class DispatcherProcessor(FrameProcessor):
             return
 
         if isinstance(frame, TranscriptionFrame) and frame.text:
-            await self._route_user_text(frame.text, frame=frame, direction=direction)
+            # Buffer the fragment; a quiet gap flushes the joined utterance as
+            # one turn (see __init__). Do not forward the transcript downstream.
+            self._buffer_user_text(frame.text)
             return
 
         # Chat textbox in the pipecat-react playground sends user input via
@@ -254,9 +269,39 @@ class DispatcherProcessor(FrameProcessor):
                 return
 
         if isinstance(frame, EndFrame):
+            # Drop any pending aggregation so a half-collected utterance does
+            # not fire after the call ended.
+            if self._agg_task is not None and not self._agg_task.done():
+                self._agg_task.cancel()
             logger.info("Call ended in state {}", self._dispatcher.state.value)
 
         await self.push_frame(frame, direction)
+
+    def _buffer_user_text(self, text: str) -> None:
+        """Add a transcript fragment and (re)arm the quiet-gap flush timer."""
+        stripped = text.strip()
+        if stripped:
+            self._agg_parts.append(stripped)
+        if self._agg_task is not None and not self._agg_task.done():
+            self._agg_task.cancel()
+        self._agg_task = asyncio.create_task(self._flush_after_quiet())
+
+    async def _flush_after_quiet(self) -> None:
+        """After `_agg_window_s` with no new fragment, route the joined turn once."""
+        try:
+            await asyncio.sleep(self._agg_window_s)
+        except asyncio.CancelledError:
+            return  # a newer fragment arrived (or the call ended) — superseded
+        parts = self._agg_parts
+        self._agg_parts = []
+        self._agg_task = None
+        joined = " ".join(parts).strip()
+        if not joined:
+            return
+        # Serialise: if a previous turn is still being handled (LLM in flight),
+        # wait rather than run two handle_user_turn calls concurrently.
+        async with self._turn_lock:
+            await self._route_user_text(joined, frame=None, direction=FrameDirection.DOWNSTREAM)
 
     async def _route_user_text(
         self,

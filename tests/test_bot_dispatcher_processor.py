@@ -29,7 +29,22 @@ def _make_processor(dispatcher: Any) -> DispatcherProcessor:
     # FrameProcessor.__init__ wires a lot of pipeline plumbing; for our unit
     # tests we just want to assert which frames it pushes. Stub push_frame.
     proc.push_frame = AsyncMock()  # type: ignore[method-assign]
+    # Transcript turns are now debounced (fragments aggregate, flush after a
+    # quiet gap). A tiny window keeps tests fast while still letting several
+    # fragments fed in a tight loop buffer together before the flush fires.
+    proc._agg_window_s = 0.05
     return proc
+
+
+async def _run_turn(proc: DispatcherProcessor, *texts: str) -> None:
+    """Feed one or more transcript fragments, then await the debounced flush."""
+    for t in texts:
+        await proc.process_frame(
+            TranscriptionFrame(text=t, user_id="u", timestamp="t"), FrameDirection.DOWNSTREAM
+        )
+    task = proc._agg_task
+    if task is not None:
+        await task
 
 
 async def test_dispatcher_processor_speaks_recovery_line_on_exception() -> None:
@@ -39,8 +54,7 @@ async def test_dispatcher_processor_speaks_recovery_line_on_exception() -> None:
     dispatcher.timing = MagicMock()
 
     proc = _make_processor(dispatcher)
-    frame = TranscriptionFrame(text="my phone is 2025550100", user_id="u", timestamp="t")
-    await proc.process_frame(frame, FrameDirection.DOWNSTREAM)
+    await _run_turn(proc, "my phone is 2025550100")
 
     pushed_texts = [
         call.args[0].text
@@ -66,8 +80,7 @@ async def test_dispatcher_processor_records_ttft_on_normal_turn() -> None:
     dispatcher.timing = MagicMock()
 
     proc = _make_processor(dispatcher)
-    frame = TranscriptionFrame(text="2025550100", user_id="u", timestamp="t")
-    await proc.process_frame(frame, FrameDirection.DOWNSTREAM)
+    await _run_turn(proc, "2025550100")
 
     # timing.record was called with phase="ttft" and a positive duration.
     record_calls = [c for c in dispatcher.timing.record.call_args_list]
@@ -85,8 +98,7 @@ async def test_dispatcher_processor_skips_filler_in_non_tool_firing_state() -> N
     dispatcher.timing = MagicMock()
 
     proc = _make_processor(dispatcher)
-    frame = TranscriptionFrame(text="hi", user_id="u", timestamp="t")
-    await proc.process_frame(frame, FrameDirection.DOWNSTREAM)
+    await _run_turn(proc, "hi")
 
     pushed_texts = [
         call.args[0].text
@@ -95,3 +107,21 @@ async def test_dispatcher_processor_skips_filler_in_non_tool_firing_state() -> N
     ]
     assert not any(t.startswith("One moment.") for t in pushed_texts)
     assert "book or cancel?" in pushed_texts
+
+
+async def test_dispatcher_processor_aggregates_choppy_fragments_into_one_turn() -> None:
+    """Several STT fragments in quick succession must become ONE dispatcher turn
+    (joined), not one turn per fragment — the choppy-speech bug fix."""
+    dispatcher = MagicMock()
+    dispatcher.state = State.BOOK_FLOW
+    dispatcher.handle_user_turn = AsyncMock(return_value="got it")
+    dispatcher.timing = MagicMock()
+
+    proc = _make_processor(dispatcher)
+    # Three fragments of one utterance arrive before the quiet gap.
+    await _run_turn(proc, "um", "next week", "in the morning please")
+
+    # handle_user_turn called exactly ONCE, with the joined text.
+    assert dispatcher.handle_user_turn.await_count == 1
+    (joined,), _ = dispatcher.handle_user_turn.await_args
+    assert joined == "um next week in the morning please"
