@@ -174,6 +174,13 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `3e8309a` — **SOLUTION.md accuracy pass**: fix stale counts (scenarios 107/63→108, handlers
   8→9, events 8→9, ADRs 001..004→001..006) + restore file-map omissions (`integrations/`,
   `observers.py`, `speculation.py`, `run_all.py`/`frontdesk_server.py`/`sim_call.py`, `tester/`).
+- `7a285e3` — **AvailabilityCache adjudicated spec** (FUTURE 1.3, council-decided): full 4-tuple
+  key, repo-layer placement, evict-on-commit (reschedule=2 dates, multi-slot=all chained dates),
+  TTL 10s default-off, DB-409 stays the guard. Documented, not built (remote-EHR-only payoff).
+- `c09d1ba` — **offline barge-in/cutoff pipeline test** (`test_barge_in_pipeline.py`): wires
+  `DispatcherProcessor` + `TTSAudibleObserver` with injected frames — barge-in truncates the real
+  history, spurious interrupt doesn't clobber, hang-up cancels pending aggregation, barge-in words
+  not dropped. Closes the staging-only gap; $0, in `make verify`. Acoustic loop stays deferred (2.4).
 - `478db64` — **doc split**: `SOLUTION.md` → non-technical executive overview;
   technical reference + ops manual `git mv`'d to **`ARCHITECTURE.md`** (history kept,
   §-numbers unchanged). Rule 11 ledger now = `ARCHITECTURE.md`; all active `SOLUTION.md §N`
