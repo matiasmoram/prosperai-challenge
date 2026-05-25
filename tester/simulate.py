@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import os
 import sys
 
@@ -136,6 +137,15 @@ def _select(args: argparse.Namespace) -> list[Persona]:
 def main() -> int:
     """Parse args, ensure credentials, run the simulator. Returns the exit code."""
     load_dotenv()
+    # The report prints "✗"/"—" glyphs; on a default Windows console (cp1252)
+    # that raises UnicodeEncodeError mid-report and the run dies while printing a
+    # violation (so a real finding never surfaces). Force UTF-8 with a safe
+    # fallback so the harness never crashes on the very output it exists to show.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(Exception):
+                reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Autonomous adversarial call simulator.")
     parser.add_argument("--only", action="append", help="Run only these curated persona names.")
     parser.add_argument("--n", type=int, help="Cap the number of personas run.")

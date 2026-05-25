@@ -76,45 +76,39 @@ class Turn:
     wrote: str | None = None
 
 
-@dataclass
-class _PendingGarble:
-    """A garbled caller turn not yet cleared by a clarification."""
-
-    text: str
-    original: str | None = None
-
-
 def check_recovers_gracefully(turns: list[Turn]) -> list[InvariantViolation]:
     """Audit a call for ``plowed_ahead_on_garble`` — return every breach.
 
-    Walk the turns in order. A garbled caller turn becomes *pending*. A
-    subsequent bot clarification/confirmation *clears* the pending garble (the
-    bot did the right thing). A write tool firing while a garble is still pending
-    is a violation: the bot committed on a value it should have re-checked.
+    Contract (per the design spec): for each garbled caller turn, the bot's
+    **immediate next turn** must EITHER ask a clarification/confirmation OR not
+    commit a write. A write tool firing on that very next turn *without* a
+    clarification is the violation — the bot acted on a value it just misheard
+    before re-checking it.
 
-    A confirm that clears one garble before a later garble is tracked correctly
-    because only the most recent uncleared garble is pending at any point.
+    Deliberately a one-turn window, not pending-until-cleared: a garble early in
+    a call followed much later by a *separately* confirmed, clean booking is NOT
+    a plow-ahead (the later write didn't consume the garbled value). The looser
+    model over-flagged those and eroded the signal — false positives are worse
+    than useless here. A garble whose next bot turn is normal conversation (no
+    immediate write) is treated as handled; if it mattered, the bot will surface
+    it on a later turn and that turn is judged on its own.
     """
     violations: list[InvariantViolation] = []
-    pending: _PendingGarble | None = None
-    for t in turns:
-        if t.role == "caller":
-            if t.garbled:
-                pending = _PendingGarble(text=t.text, original=t.original)
-        elif t.role == "bot":
-            if pending is not None and detect_clarification(t.text):
-                pending = None
-                continue
-            if t.wrote in _WRITE_TOOLS and pending is not None:
-                violations.append(
-                    InvariantViolation(
-                        "plowed_ahead_on_garble",
-                        f"{t.wrote} fired on garbled input "
-                        f"(heard {pending.text!r}, said {pending.original!r}) "
-                        f"with no clarification or confirmation first",
-                    )
+    for i, t in enumerate(turns):
+        if t.role != "caller" or not t.garbled:
+            continue
+        next_bot = next((u for u in turns[i + 1 :] if u.role == "bot"), None)
+        if next_bot is None:
+            continue
+        if next_bot.wrote in _WRITE_TOOLS and not detect_clarification(next_bot.text):
+            violations.append(
+                InvariantViolation(
+                    "plowed_ahead_on_garble",
+                    f"{next_bot.wrote} fired on the turn right after garbled input "
+                    f"(heard {t.text!r}, said {t.original!r}) "
+                    f"with no clarification or confirmation",
                 )
-                pending = None
+            )
     return violations
 
 

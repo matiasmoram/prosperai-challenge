@@ -86,6 +86,22 @@ def test_intent_reversal_silent_write_is_violation() -> None:
     assert violations[0].kind == "plowed_ahead_on_garble"
 
 
+def test_early_garble_then_later_separate_clean_write_is_not_flagged() -> None:
+    """Regression: a garble early in the call, followed by normal conversation
+    and then a SEPARATE cleanly-handled write several turns later, must NOT be
+    flagged. The write didn't consume the garbled value — only the bot turn
+    IMMEDIATELY after a garbled turn is judged (one-turn window)."""
+    turns = [
+        Turn(role="caller", text="hi, uh, book me in", garbled=True, original="hi, book me in"),
+        Turn(role="bot", text="Sure! What's your name?"),  # next bot turn: not a write → ok
+        Turn(role="caller", text="Test User", garbled=False),
+        Turn(role="bot", text="Thanks. What day works?"),
+        Turn(role="caller", text="Tuesday morning", garbled=False),
+        Turn(role="bot", text="Booked Tuesday 9am.", wrote="create_appointment"),
+    ]
+    assert check_recovers_gracefully(turns) == []
+
+
 def test_garble_log_records_by_index() -> None:
     log = GarbleLog()
     log.mark(2, "december fifteenth", "december fifty")
