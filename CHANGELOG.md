@@ -177,6 +177,10 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `7a285e3` — **AvailabilityCache adjudicated spec** (FUTURE 1.3, council-decided): full 4-tuple
   key, repo-layer placement, evict-on-commit (reschedule=2 dates, multi-slot=all chained dates),
   TTL 10s default-off, DB-409 stays the guard. Documented, not built (remote-EHR-only payoff).
+- `fed4919` — **acoustic audio smoke** (`evals/audio_smoke/test_audio_smoke.py`): real ElevenLabs
+  TTS→STT round-trip (bot's voice + `eleven_flash_v2_5` → `scribe_v1`) — intent survives, time-of-day
+  not flipped, bot reply intelligible. Live-verified green. Double-gated (`ELEVENLABS_API_KEY` +
+  `PROSPER_AUDIO_LIVE=1`), `make audio-smoke`, never in `verify`. Closes the last partial deliverable.
 - `c09d1ba` — **offline barge-in/cutoff pipeline test** (`test_barge_in_pipeline.py`): wires
   `DispatcherProcessor` + `TTSAudibleObserver` with injected frames — barge-in truncates the real
   history, spurious interrupt doesn't clobber, hang-up cancels pending aggregation, barge-in words
