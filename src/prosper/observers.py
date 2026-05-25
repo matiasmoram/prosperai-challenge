@@ -71,7 +71,13 @@ class TTSAudibleObserver(FrameProcessor):
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._buffer.clear()
             self._speaking = False
-        elif isinstance(frame, InterruptionFrame):
+        elif isinstance(frame, InterruptionFrame) and self._speaking:
+            # Only act on an interruption that lands WHILE the bot is speaking —
+            # there is a live assistant turn to truncate. A spurious
+            # InterruptionFrame between turns (not speaking) must be ignored: the
+            # buffer is already empty, so _on_interrupt("") would overwrite the
+            # previous, fully-spoken assistant turn with "[NOT HEARD]"
+            # (rev-spec2 LOW). The frame is still forwarded below.
             spoken = self.buffer
             self._buffer.clear()
             self._speaking = False

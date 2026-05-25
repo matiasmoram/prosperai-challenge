@@ -18,6 +18,12 @@ from typing import Any, Self, cast
 import httpx
 from fastapi import FastAPI
 
+# Per-request timeout. Tuned for a co-located (loopback / same-host) EHR where
+# any call should complete in well under a second; 5 s is a generous ceiling
+# that still fails fast enough to degrade the call gracefully. Bump it (or make
+# it a constructor arg) if the EHR ever moves to a higher-latency remote host.
+_TIMEOUT_SECONDS: float = 5.0
+
 
 class EHRHTTPError(Exception):
     def __init__(self, status_code: int, detail: Any) -> None:
@@ -80,7 +86,7 @@ class EHRClient:
 
     async def __aenter__(self) -> Self:
         self._client = httpx.AsyncClient(
-            transport=self._transport, base_url=self._base_url, timeout=5.0
+            transport=self._transport, base_url=self._base_url, timeout=_TIMEOUT_SECONDS
         )
         return self
 
@@ -101,7 +107,7 @@ class EHRClient:
             kwargs["headers"] = headers
         try:
             r = await self._c().request(method, path, **kwargs)
-        except httpx.HTTPError as e:
+        except httpx.TransportError as e:
             # Transport-level failure (EHR process down → ConnectError, slow →
             # ReadTimeout, DNS, etc). These are NOT EHRHTTPError, so without
             # this they'd propagate uncaught out of the tool handlers (which
@@ -109,13 +115,21 @@ class EHRClient:
             # F-008). Re-raise as a 503 EHRHTTPError so each handler converts
             # it to Err(ehr_error, retryable=True) and the bot degrades
             # gracefully instead of dropping the call.
+            #
+            # Caught as TransportError (not the base httpx.HTTPError) on purpose:
+            # status handling lives below, so an HTTPStatusError must fall
+            # through to the >= 400 branch and keep its real code rather than be
+            # masked as a 503 "unreachable" (rev-spec2 HIGH-latent).
             raise EHRHTTPError(
                 503, {"code": "ehr_unreachable", "message": f"{type(e).__name__}: {e}"}
             ) from e
         if r.status_code >= 400:
             try:
                 detail = r.json().get("detail")
-            except Exception:
+            except ValueError:
+                # Non-JSON error body (json.JSONDecodeError / UnicodeDecodeError
+                # are both ValueError). Fall back to raw text; anything else
+                # (e.g. MemoryError) must propagate, not be swallowed silently.
                 detail = r.text
             raise EHRHTTPError(r.status_code, detail)
         if r.status_code == 204:

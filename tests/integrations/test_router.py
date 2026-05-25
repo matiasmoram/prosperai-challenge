@@ -65,6 +65,22 @@ def test_calendar_endpoint_proxies(tmp_path) -> None:
     assert resp.json()["entries"][0]["patient_name"] == "Jane Doe"
 
 
+def test_calendar_endpoint_degrades_to_503_when_ehr_unreachable(tmp_path) -> None:
+    """A calendar-fetch failure must surface as a 503 with a reason, not an
+    opaque 500 (the EHR being down shouldn't crash the staff calendar view)."""
+
+    async def _failing_calendar(from_date: date, to_date: date) -> list[dict[str, Any]]:
+        raise RuntimeError("EHR unreachable")
+
+    app = FastAPI()
+    app.include_router(build_frontdesk_router(MailStore(root=tmp_path), _failing_calendar))
+    resp = TestClient(app, raise_server_exceptions=False).get(
+        "/frontdesk/appointments", params={"from": "2026-05-25", "to": "2026-05-27"}
+    )
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "calendar_unavailable"
+
+
 def test_root_serves_spa(tmp_path) -> None:
     resp = TestClient(_app(MailStore(root=tmp_path))).get("/frontdesk")
     assert resp.status_code == 200

@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from loguru import logger
 
 from prosper.integrations.mail import MailStore
 
@@ -43,7 +44,18 @@ def build_frontdesk_router(store: MailStore, calendar_fetch: CalendarFetch) -> A
         to: date = Query(...),
     ) -> JSONResponse:
         """Calendar entries for [from, to], proxied from the EHR."""
-        return JSONResponse({"entries": await calendar_fetch(from_, to)})
+        try:
+            entries = await calendar_fetch(from_, to)
+        except Exception as exc:
+            # Read-only staff convenience view: if the EHR is unreachable,
+            # degrade to a 503 with the reason rather than letting the exception
+            # bubble into an opaque 500 in the front-desk browser (rev-spec2 MED).
+            logger.warning("frontdesk calendar fetch failed: {}", exc)
+            return JSONResponse(
+                {"error": "calendar_unavailable", "detail": str(exc)},
+                status_code=503,
+            )
+        return JSONResponse({"entries": entries})
 
     @router.get("", include_in_schema=False)
     async def root() -> FileResponse:

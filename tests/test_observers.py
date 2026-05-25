@@ -71,14 +71,20 @@ async def test_interrupt_before_any_text_callback_with_empty_string() -> None:
     assert captured == [""]
 
 
-async def test_tts_text_ignored_when_not_speaking() -> None:
-    """TTSTextFrame outside of a BotStarted/BotStopped window is ignored —
-    avoids capturing text from a prior turn whose interrupt frame got lost."""
+async def test_interrupt_ignored_when_not_speaking() -> None:
+    """An InterruptionFrame that lands while NOT speaking must be ignored.
+
+    Stray TTSTextFrames outside a BotStarted/BotStopped window are not captured,
+    and a spurious/late InterruptionFrame between turns must NOT fire the
+    callback: doing so calls mark_last_assistant_interrupted("") which overwrites
+    the PREVIOUS, fully-spoken assistant turn with "[NOT HEARD]"
+    (dispatcher.py:579). The callback fires only when the bot is actively
+    speaking (BotStarted seen) — see test_interrupt_before_any_text_… for that.
+    """
     obs, captured = _make_observer()
     await obs.process_frame(_tts("stray text"), FrameDirection.DOWNSTREAM)
     await obs.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
-    # No buffered text → callback fires with empty string.
-    assert captured == [""]
+    assert captured == []
 
 
 async def test_observer_forwards_every_frame_downstream() -> None:

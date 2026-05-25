@@ -23,6 +23,14 @@ from typing import Any
 # confident hit — no read-back-to-confirm gymnastics. Below it (but above
 # the EHR's 0.85 fuzzy floor) the caller's spoken name and the stored name
 # diverge enough that we surface the candidate for confirmation.
+#
+# Derivation (author heuristic, not a fitted value): the EHR scores names with
+# rapidfuzz token_sort_ratio/100. A realistic STT slip like "Jon" vs "John" or a
+# dropped middle name scores ~0.90, which must land in the *confirm* band — so
+# the auto-accept bar sits above that at 0.97, leaving only near-identical
+# strings (a trailing space, case) to pass silently. The 0.85 floor (EHR query
+# side) and this 0.97 ceiling must stay ordered 0.85 < 0.97; if the EHR's fuzzy
+# library or normalisation changes, re-check both against real name data.
 EXACT_THRESHOLD: float = 0.97
 
 
@@ -41,6 +49,11 @@ def classify_find_result(patients: list[dict[str, Any]], *, fuzzy: bool) -> str:
         return "found_fuzzy_multiple"
     if not fuzzy:
         return "found_exact"
+    # Absent similarity defaults to 1.0 (auto-accept) for backwards-compat with
+    # results that predate similarity scoring. This is only safe because the EHR
+    # always scores fuzzy name+DOB lookups today — if a fuzzy path ever returns
+    # an unscored single match, it would auto-identify without read-back. Kept
+    # pure (no logging) by design; the invariant is enforced by the EHR contract.
     similarity = float(patients[0].get("similarity", 1.0))
     return "found_exact" if similarity >= EXACT_THRESHOLD else "found_fuzzy_single"
 
