@@ -507,6 +507,21 @@ an LLM council; see `tester/README.md`):
   pytest smoke test is gated on `PROSPER_EVAL_LIVE=1` so `make verify` stays
   free. Validated: the injection persona books normally (override ignored) and
   the bait persona is refused a fake "it's cancelled" — both PASS.
+- **Messy-human / ASR-noise layer** (`tester/noise.py`, `tester/clarification.py`).
+  Real callers are disfluent and STT mishears them; the bot must re-prompt or
+  confirm, never silently act on a garbled value. `noise.py` is a pure, *seeded*
+  injector — disfluencies (fillers, repetitions, false starts; Shriberg model)
+  and ASR errors (homophones, number-word swaps like fifteen↔fifty, the dangerous
+  intent flip cancel↔schedule, dropped day-numbers, phone format drift; hamming.ai
+  taxonomy) composed by `garble(text, seed, profile)`. A `Persona.noise_profile`
+  garbles every caller turn before the bot hears it. `clarification.py` is the
+  **contract**: `check_recovers_gracefully()` flags `plowed_ahead_on_garble` when a
+  write tool consumes a garbled turn with no intervening clarification/confirm —
+  decidable offline from the event stream (no LLM needed for the assert; there is
+  deliberately no fake dispatcher confidence gate since we are text-in/text-out).
+  The clarification *behaviour* already lives in `prompts.py` (the clarification
+  rule + `FALLBACK_LINES`); this suite supplies the messy input + the assertion.
+  Deterministic core runs in `make verify`; 4 MESSY personas run live.
 
 ## 12. Reliability
 

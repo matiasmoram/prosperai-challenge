@@ -155,9 +155,21 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `740880c` — LLM-total-failure path (req 4): canned line + reception mail, never dead air.
 - `18cfde1` — barge-in: unit-cover interruption truncation; infra was already wired (§14 was stale).
 - `ad802d4` — doctor choice when a specialty has 2+ providers (prompt-only).
+- `01d2d0b` — route_intent reschedule-vs-cancel disambiguation at the schema root + pinpoint scenarios.
+
+### Phase 12 — review mode (reviewer teams + anti-hardcoding, root-cause)
+
+- `8d6e1c0` — **floor-guard string bypass** (review): `isinstance(int)` failed open on an
+  LLM string/float `duration_minutes`; coerce like pydantic so sub-floor bookings are rejected.
+  +observability (silent floor-clamp + prefetch error now logged) + two-tier-routing doc.
+- `4093cbf` — mail file-path session-id sanitisation (path-traversal defense-in-depth, PII store).
+- `f764a21` — **messy-human sim, deterministic core**: `tester/noise.py` (seeded disfluency +
+  ASR-error injectors) + `tester/clarification.py` (the `plowed_ahead_on_garble` contract).
+- `f8eae67` — messy-human sim, live arm: `Persona.noise_profile` garbles caller turns, simulator
+  audits the bot re-prompted; 4 MESSY personas; folded into the violation tally + exit code.
 
 Open items for the human: `OPEN_QUESTIONS.md` (barge-in live verification, FUTURE 4.1
-cross-call provider memory, route_intent reschedule-vs-cancel ambiguity).
+cross-call provider memory, two-tier CHOOSE_INTENT routing authority).
 
 ---
 

@@ -46,6 +46,13 @@ The controls actually in the codebase today:
   clinic SSO or a shared secret header) before exposing it beyond localhost.
   The `MailStore` root defaults to `data/mail/` and must not be served as a
   static file directory.
+- **Mail filename sanitisation (path-traversal guard).** `MailStore.write`
+  derives the per-session file as `<root>/<session_id>.jsonl`. Real session ids
+  are server-generated UUIDs, but a malformed id containing `/` or `..` would let
+  an append escape the mail root. `_safe_session_stem` reduces the id to
+  `[A-Za-z0-9_-]` for the filename only (the canonical id is preserved inside each
+  record), so a write can never address a path outside `data/mail/`. Defense in
+  depth at the filesystem boundary for a PII store.
 
 Controls explicitly **not** shipped (interview scope): mTLS to the EHR,
 HIPAA-grade audit logging, per-tenant rate limiting, signed deploys.
