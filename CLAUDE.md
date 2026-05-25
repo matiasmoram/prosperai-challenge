@@ -97,4 +97,7 @@ leaves its doc stale is incomplete.
 | `docs/bench-results.md` | comparing perf across waves | after `make bench` on a perf-relevant change — append a dated snapshot |
 | `docs/testing/ADVERSARIAL_FINDINGS.md` | reviewing the adversarial threat surface | a new adversarial finding (F-NNN) is found or fixed |
 | `docs/interview-notes.md` | prepping talking points | a design answer changes — **private prep, not load-bearing** |
+| `docs/FEATURES.md` | want the exhaustive capability list (SOLUTION §0.1 is the overview) | a user-visible capability ships or is removed |
+| `docs/cases.md` | what test cases are covered, by category | a notable new case/coverage area is added |
+| `docs/tester.md` | how the test layers work (AI sim + non-AI) + counts | a test layer/harness changes or counts shift materially |
 | `docs/research/`, `docs/superpowers/specs/` | mining the reasoning behind a feature | **read-only history** — don't edit; may hold other agents' WIP. A finished spec's *outcome* belongs in `SOLUTION.md`, not here |

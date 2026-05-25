@@ -1,9 +1,83 @@
 # Prosper Health voice agent — solution
 
-> Reviewer-facing tour of the codebase as it stands today. Pair this with
-> `docs/architecture.md` (process + FSM diagrams) and `docs/adr/001..004`
-> (load-bearing decisions). Anything not covered here lives in `CLAUDE.md`
-> (rules) or `CONTRIBUTING.md` (recipes).
+> Reviewer-facing tour of the codebase as it stands today. **Start with §0
+> (summary).** Pair this with `docs/architecture.md` (process + FSM diagrams)
+> and `docs/adr/001..006` (load-bearing decisions). Companion docs:
+> `docs/FEATURES.md` (exhaustive capability list), `docs/cases.md` (test-case
+> catalogue), `docs/tester.md` (test machinery). Rules live in `CLAUDE.md`,
+> recipes in `CONTRIBUTING.md`.
+
+## 0. Summary
+
+A **two-process voice agent** that answers a fictional US clinic's phone and
+**identifies the caller → registers them if new → books / cancels / reschedules**
+30-minute appointments across five specialties (Mon–Fri 9–17 America/New_York,
+English). Built for the Prosper Technologies challenge.
+
+**Architecture in four lines:**
+- **`bot.py`** — a Pipecat pipeline (ElevenLabs Flash STT/TTS + OpenAI LLM) on
+  `:7860`, driven by a **custom FSM dispatcher** (not `pipecat-flows`).
+- **`ehr/api.py`** — a FastAPI + SQLite EHR on `:8000`, the **source of truth**;
+  the bot reaches it over HTTP via `EHRClient`.
+- **operator console** (`:7861/console`) — live SSE telemetry of every call.
+- **front desk** (`:7861/frontdesk`) — staff Mail + Calendar surface over a
+  durable SQLite mail store.
+
+**The load-bearing idea:** a hand-written FSM where the **dispatcher is the only
+path to tools** and enforces a per-state tool whitelist, so the LLM physically
+cannot call a tool the current state forbids, never sees a raw UUID, and cannot
+confirm a write that did not happen. Everything else (triage, hybrid intent
+routing, mail/calendar, barge-in) hangs off that spine.
+
+**Status:** 12 FSM states, 11 tools, 107 offline eval scenarios + ~720 tests
+green; `mypy --strict`. What is *not* built and why → §16.1.
+
+Read order: this summary → §0.1 (what it does) → §0.2 (how the hard concerns are
+handled) → §4–§7 (topology, FSM, tools, dispatcher) → the rest as needed.
+
+## 0.1 What it does (functionalities)
+
+The exhaustive list lives in `docs/FEATURES.md`; the headline capabilities:
+
+- **Voice conversation** — real WebRTC call (ElevenLabs STT/TTS + OpenAI),
+  warm non-robotic persona, **barge-in** handling (history truncated to what the
+  caller actually heard), latency-conscious single-round-trip flows + fillers.
+- **Identity gate** — find by phone, then by name+DOB; **fuzzy name
+  disambiguation** (numbered read-back, caller picks); new caller → register;
+  unmatched-but-insists-existing → front-desk handoff. Booking tools are
+  physically unmounted until identity is set.
+- **Booking** — symptom→specialty **triage** (mini-LLM) with a recommended
+  duration + clinical floor; **duration negotiation** (caller may go ≥ floor,
+  sub-floor is refused); adaptive slot UX (offer 2–3, never dump); **provider
+  choice** when a specialty has several doctors.
+- **Cancel / reschedule** — read-back + confirm; pick the right appointment from
+  a numbered list; **reschedule is atomic** (single transaction, rollback on
+  conflict — never cancel-then-rebook).
+- **Safety & honesty** — EHR is the source of truth (confirm only from a read);
+  no hallucinated IDs (handles validated against `SessionMemory`); clarify rather
+  than guess; medical-emergency red flag is an FSM-enforced hard stop; graceful
+  LLM-total-failure path (canned line + reception mail); front-desk handoff.
+- **Staff surfaces** — operator console (live call telemetry, masked PII) +
+  front-desk Mail + Calendar (full-PII staff tier, durable SQLite store): a
+  booking-confirmation mail to the doctor, callback/handoff + failure mail to
+  reception, and a 7-day clinic calendar.
+
+## 0.2 How the concerns FUTURE.md flags as important are handled
+
+`FUTURE.md` ranks the things a reviewer cares about. Where each is handled today
+(and what was deliberately deferred → §16.1):
+
+| Concern (FUTURE.md theme) | How it is handled today | Where |
+|---|---|---|
+| **Latency** is a feature | Single round-trip flows; regex intent fast-path avoids an LLM hop; `STATE_FILLERS` cover silence; one-shot CHOOSE_INTENT prefetch; the speculative-race *answer* documented (deferred on local SQLite) | §15, §15.1 |
+| **Reliability** under provider failure | Tenacity retry + single fallback model; transport errors → typed `Err`, never a crashed turn; graceful total-failure canned line + reception mail; bot entrypoint env fail-fast | §12 |
+| **No hallucinated success** | EHR is source of truth; write-tools validate handles against `SessionMemory` (hallucinated id → `Err`, no HTTP); paired state-assertion + judge eval; offline tool-receipt gate | §6, §7, §11 |
+| **Identity / PII safety** | Identity gate; LLM never sees a UUID (handle redaction); console PII masking + audit redaction; SSRF-guarded EHR URL; mail filename class eliminated | §7, §8, §13 |
+| **Eval quality** | Paired state+judge (ADR 003); 107 offline scenarios; adversarial + messy-human (ASR-noise) suites; golden-trace replay | §11, `docs/tester.md` |
+| **Voice UX naturalness** | Barge-in truncation; clause-aware persona; clarify-don't-guess rule | §7, §10 |
+
+The **caller call UI** (F4) and the **mail + calendar** staff surface are
+described in §8.2 and §8.1.
 
 ## 1. Overview
 
@@ -345,6 +419,24 @@ fire again. `tester/receipt_gate.py` classifies `handed_off` in `NO_CLAIM` — i
 asserts a mail write, not an EHR tool receipt.
 
 ADR: `docs/adr/006-handoff-state.md`.
+
+## 8.2. Caller call UI (F4 — the phone-call page)
+
+`src/prosper/console/static/call/` (`index.html`, `call.js`, `call.css`) is the
+**caller-facing WebRTC phone UI** — the page a patient "calls" from. It is served
+as static assets on the console uvicorn at `:7861/call` (mounted by
+`sse.py::mount_static_on_app`), but it runs **no backend of its own**: `call.js`
+dials the Pipecat runner directly at `BOT_ORIGIN` (`window.PROSPER_BOT_ORIGIN`,
+default `http://127.0.0.1:7860`) via `POST /api/offer` and negotiates an
+`RTCPeerConnection` (mic in, bot audio out).
+
+Properties worth noting: a state-aware dial button (idle / connecting / live /
+ended / error) with accessible labels (`aria-pressed`, `aria-label`); a
+user-actionable mic-permission error ("Allow mic access in your browser
+settings"); and `BOT_ORIGIN` overridable for deployment so it is not hard-pinned
+to localhost. Ownership boundary: F4 edits **static assets only** — a new mount
+path or route is an F5 change to `server.py`/`sse.py` (seam S2 in `FRONTS.md`),
+and the `:7860` signaling pipeline is F2 (`bot.py`, seam S3).
 
 ## 9. EHR
 
