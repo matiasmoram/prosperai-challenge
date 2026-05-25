@@ -882,7 +882,7 @@ shipped); the async prefetch itself is held. **Scope (light warm-path vs full
 | No multi-provider STT/TTS fallback | Pipecat has no first-class `ServiceSwitcher` (issue #4139). We ship LLM retry+fallback as the higher-value win. |
 | No streaming TTS flush-after-each-clause | Biggest remaining perceived-latency win, but needs a custom Pipecat processor — out of scope for the submission window. |
 | No OpenRouter / generic LLM gateway | Simplifies fallback to one env-var swap and unlocks 100+ models. Kept provider-direct so OpenAI's prompt-cache discount still applies. |
-| No real audio smoke test (TTS → STT loop) | Current `evals/audio_smoke/` just asserts the dispatcher module imports; a real round-trip needs recorded WAVs + ElevenLabs credits in CI. |
+| ~~No real audio smoke test (TTS → STT loop)~~ — **shipped** | `evals/audio_smoke/test_audio_smoke.py` now does a real ElevenLabs TTS→STT round-trip (`make audio-smoke`, double-gated on `PROSPER_AUDIO_LIVE=1` so it never burns credits in `make verify`). Only the *full live-pipeline* variant (synth audio through the bot's Silero-VAD + WebSocket STT + an LLM judge) remains deferred. See `FUTURE.md` §2.4. |
 | No proactive prefetch on STT partials | Brittle on partial-text changes; `ttft` phase is instrumented so we'll see the real pain before adding. |
 | No `AvailabilityCache` | A 30-line dict TTL cache would shave the ~10 ms `list_availability_slots` cost — far below the LLM-dominated budget, so deferred. |
 | No pre-recorded "everything is on fire" TTS fallback | Needs a checked-in WAV + regex phone capture; deferred behind the LLM retry layer that handles 99% of provider blips. |
@@ -914,12 +914,14 @@ recorded in `CHANGELOG.md` and the relevant sections of this document.
 2. **STT/TTS multi-provider fallback** — blocked on pipecat #4139.
 3. **Streaming TTS** via ElevenLabs flush-after-each-clause.
 4. **OpenRouter as LLM gateway** — one env-var swap, 100+ models.
-5. **Audio smoke tests** with a real TTS → STT loop.
+5. **Full live-pipeline audio loop** — synth caller audio through the bot's
+   Silero-VAD + WebSocket STT + an LLM judge. (The acoustic TTS→STT *fidelity*
+   smoke already shipped — `make audio-smoke`; §16.)
 6. **Continuous production eval** — 5–10 % sampling of live transcripts
    to the LLM judge for drift detection.
 7. **Pre-recorded "everything is on fire" TTS fallback** for the
    double-failure case.
-8. **`AvailabilityCache`** with 60 s TTL in `repository.py`.
+8. **`AvailabilityCache`** (server-side, opt-in) — `FUTURE.md` §1.3.
 9. **Property-based FSM fuzzer** (Hypothesis `RuleBasedStateMachine`) — §14.
 
 Already landed (was on this list): mock-eval offline mode, parallel

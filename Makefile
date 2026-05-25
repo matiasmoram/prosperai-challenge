@@ -25,6 +25,12 @@ test:
 eval:
 	uv run pytest evals/test_scripted.py -v
 
+# Real acoustic TTS->STT round-trip via ElevenLabs (spends credits). Double-gated
+# so it never runs in verify/test/pre-commit. Needs ELEVENLABS_API_KEY (.env) and
+# the explicit PROSPER_AUDIO_LIVE=1 opt-in (set here).
+audio-smoke:
+	PROSPER_AUDIO_LIVE=1 uv run pytest evals/audio_smoke -v
+
 # Run the full 16-scenario suite WITHOUT an OpenAI API key.
 # Uses the deterministic mock LLM in evals/mock_llm.py. Finishes in
 # ~5 s, great for routine verification.

@@ -136,36 +136,41 @@ gen-eval` targets.
 Landed (commit `bfb3a70`). `evals/trace_replay.py` + `make replay` /
 `make replay-record`.
 
-### 2.4 Audio-path regression coverage (barge-in / cutoff) — ✅ SHIPPED (offline tier)
+### 2.4 Audio-path coverage — ✅ SHIPPED (both the offline and the acoustic tier)
 
 The challenge deliverable lists *"automated eval suite (LLM-as-judge over
-scripted scenarios + **smoke audio tests**)"*. The audio path splits into two
-tiers; the high-value one — the interruption / call-cutoff behaviour that is
-**most noticeable to a caller** (bot won't stop when interrupted; a half-said
-utterance fires after the line drops) — is now covered **offline, $0, in
-`make verify`**.
+scripted scenarios + **smoke audio tests**)"*. The audio path is now covered at
+two levels:
 
-**Shipped (`tests/test_barge_in_pipeline.py`, commit pending):** a deterministic
-frame-injection integration test that drives `DispatcherProcessor` +
-`TTSAudibleObserver` with Pipecat frames in pipeline order — no live audio, no
-API keys. It closes the gap that `test_barge_in.py` (dispatcher method in
-isolation) and `test_observers.py` (observer with a stub callback) left open:
-the *propagation* observer→real-dispatcher, and the aggregation timer under
-interruption / hang-up. Covers: (a) barge-in mid-turn truncates + marks the real
-`history[-1]`; (b) a spurious between-turns interrupt does NOT clobber a
-fully-spoken turn; (c) `EndFrame` (hang-up) cancels the pending aggregation so no
-stale turn fires; (d) an interrupt mid-utterance does NOT drop the caller's
-buffered barge-in words (guards against the tempting-but-wrong "cancel agg on
-interrupt"). This last one confirmed the current behaviour is correct — no code
-fix needed.
+**Offline tier — `tests/test_barge_in_pipeline.py` (commit `c09d1ba`, $0, in
+`make verify`):** a deterministic frame-injection integration test driving
+`DispatcherProcessor` + `TTSAudibleObserver` with Pipecat frames in pipeline
+order — the interruption / call-cutoff behaviour **most noticeable to a caller**.
+Closes the gap `test_barge_in.py` (dispatcher method alone) + `test_observers.py`
+(observer with a stub) left open: the *propagation* observer→real-dispatcher and
+aggregation under interruption / hang-up. Covers (a) barge-in mid-turn truncates +
+marks the real `history[-1]`; (b) a spurious between-turns interrupt does NOT
+clobber a fully-spoken turn; (c) `EndFrame` (hang-up) cancels the pending
+aggregation; (d) an interrupt mid-utterance does NOT drop the caller's buffered
+words (confirmed the current behaviour is correct — no code fix needed).
 
-**Still deferred — the acoustic round-trip (Tier 3):** synth caller utterance
-(ElevenLabs TTS) → bot pipeline → STT → dispatcher → TTS → caller-side STT → LLM
-judge. Only this tier catches STT mis-transcription (TTS says "nine PM", STT
-hears "nine AM"). Needs ElevenLabs credits + a live STT WebSocket replay (or
-recorded WAV fixtures), so it stays `-m audio`, nightly/pre-deploy, out of
-`make verify`. See `ARCHITECTURE.md` §16 / §17 #5. The VAD-tuning tier (real
-`InputAudioRawFrame` through Silero) sits between the two and is also deferred.
+**Acoustic tier — `evals/audio_smoke/test_audio_smoke.py` (commit pending, live):**
+a real TTS→STT round-trip via ElevenLabs (same voice + `eleven_flash_v2_5` the bot
+uses; `scribe_v1` STT), hitting the REST endpoints. Catches the bug class no text
+test can — a turn correct as text but broken acoustically. Three checks: caller
+intent survives the round-trip; a time-of-day word is not flipped
+(morning→evening); the bot's own spoken reply (incl. a patient name) stays
+intelligible. Double-gated (`ELEVENLABS_API_KEY` + `PROSPER_AUDIO_LIVE=1`) so a
+bare `pytest` never spends credits; `make verify` / `make test` / pre-commit scope
+to `tests/` and never collect it. Run: **`make audio-smoke`** (or
+`$env:PROSPER_AUDIO_LIVE=1; uv run pytest evals/audio_smoke -v`). Validated green
+against live ElevenLabs 2026-05-25.
+
+**Remaining (genuinely deferred):** wiring the synthesised caller audio through
+the bot's *live* Silero-VAD + realtime-WebSocket-STT pipeline (not the REST STT)
+with an LLM judge on the full round-trip. That needs a Pipecat audio transport
+stub + judge pass; the current acoustic tier already proves vendor fidelity. See
+`ARCHITECTURE.md` §16 / §17.
 
 ---
 

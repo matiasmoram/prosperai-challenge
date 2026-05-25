@@ -66,6 +66,7 @@ Or with Docker: `docker-compose up`.
 | `test`           | `uv run pytest tests/ -v`                                                        | 149 unit tests + 17 skipped (no external services); 91% line coverage on `src/prosper` (97% excluding `bot.py`) |
 | `mock-eval`      | `uv run python -m evals --mock-llm`                                              | Run all 16 scenarios offline with the deterministic mock LLM (~5 s, no API key) |
 | `eval`           | `uv run pytest evals/test_scripted.py -v`                                        | Live scripted scenarios (needs `PROSPER_EVAL_LIVE=1` **and** `OPENAI_API_KEY`) |
+| `audio-smoke`    | `PROSPER_AUDIO_LIVE=1 uv run pytest evals/audio_smoke -v`                         | Real acoustic TTS→STT round-trip via ElevenLabs (needs `ELEVENLABS_API_KEY` + `PROSPER_AUDIO_LIVE=1`; spends credits, never runs in `verify`) |
 | `eval-baseline`  | `uv run python -m evals --json evals/results/current.json --baseline evals/results/baseline.json` | CLI eval with regression diff against a snapshot. Supports `--concurrency N` (default 4) for parallel runs |
 | `verify`         | `uv run ruff check ...` → `ruff format --check` → `mypy --strict` → `pytest -q`  | One-shot pre-submit gate: lint + format + type + tests, stops on first failure |
 | `lint`           | `uv run ruff check src/ tests/ evals/` then `uv run ruff format --check ...`     | Ruff lint + format check (`I,E,F,W,B,UP,ARG,SIM,RET,RUF,S`)      |
@@ -102,6 +103,7 @@ every push.
 | `PROSPER_BOT_MODEL`          | `gpt-4o-mini`                 | Primary LLM for the dispatcher.                                                          |
 | `PROSPER_BOT_FALLBACK_MODEL` | _unset_ (e.g. `gpt-4o`)       | Optional secondary model — tried once if the primary exhausts its retry budget.          |
 | `PROSPER_EVAL_MODEL`         | `gpt-4o-mini`                 | Model used by the eval judge (`evals/judge.py`) and persona simulator (`evals/sim.py`). Live evals reuse `PROSPER_BOT_MODEL` for the dispatcher, mirroring `bot.py`. |
+| `PROSPER_AUDIO_LIVE`         | _unset_ (set to `1` to run)   | Opt-in gate for the acoustic audio-smoke suite (`make audio-smoke`). Must be `1` **and** `ELEVENLABS_API_KEY` set, or the suite skips — so a bare `pytest` never spends ElevenLabs credits. |
 | `PROSPER_BOT_ENTRYPOINT`     | _unset_ (set to `1` in prod)  | When `1`, missing required env vars `SystemExit(2)` *before* the 17 s pipecat import wall instead of crashing mid-call. Tests deliberately leave it unset so imports don't blow up. |
 | `PROSPER_CONSOLE_ENABLED`    | `1`                           | Operator Console on/off. Set to `0` to skip the second uvicorn (useful for tests or headless CI). |
 | `PROSPER_CONSOLE_PORT`       | `7861`                        | TCP port for the Operator Console. One above the Pipecat browser client (`7860`) — adjacent and easy to remember. |
