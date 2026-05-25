@@ -286,12 +286,18 @@ Three things to know about the tool layer:
    NOTHING and made the bot loop "no slots" on a wide-open specialty (live bug
    `f8bc099d`: Dermatology). `tools._normalize_specialty` is the belt-and-braces
    fix: a `difflib` fuzzy map (against the canonical keys, cutoff 0.6) at the tool
-   boundary resolves "Dermatology" → "Dermatologist" etc. before the EHR call,
-   passing genuinely-unknown values through untouched so the empty/unknown path
-   still works. The complaint → specialty mini-LLM router shipped (ADR 005, §14).
-   Scenarios `specialty_filter_therapist`, `specialty_unknown_falls_back`, and
+   boundary resolves "Dermatology" → "Dermatologist" etc. before the EHR call.
+   A value that survives normalisation but is still not a canonical key is a
+   genuinely-unknown specialty (e.g. "cardiology") — the handler short-circuits
+   with `specialty_offered=False` + the offered list (no EHR query, no 6-day
+   probe), and `_redact_for_llm` renders "we do not offer X; we offer …" so the
+   bot states it plainly instead of guessing "no slots" from a silent empty (the
+   ambiguity that made the empty result indistinguishable from "fully booked").
+   The complaint → specialty mini-LLM router shipped (ADR 005, §14). Scenarios
+   `specialty_filter_therapist`, `specialty_unknown_falls_back`, and
    `specialty_no_filter_any_doctor` cover the filter branches;
-   `test_normalize_specialty_maps_caller_wording_to_canonical` pins the map.
+   `test_normalize_specialty_maps_caller_wording_to_canonical` and
+   `test_unknown_specialty_flagged_not_silently_empty` pin the map + the signal.
 
 ## 7. Dispatcher mechanics
 

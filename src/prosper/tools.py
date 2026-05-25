@@ -309,6 +309,22 @@ async def list_availability_slots_handler(
     # ("Dermatologist") before any query — both the primary call and the
     # forward-scan probes below reuse this `specialty`. See `_normalize_specialty`.
     specialty = _normalize_specialty(specialty)
+    # A specialty that survives normalisation but still isn't one we offer is
+    # genuinely unknown (e.g. "cardiology"). The EHR would just return empty —
+    # indistinguishable from "offered but fully booked" — so the bot would guess
+    # and might say "no slots" for something we simply don't do, or probe 6 days
+    # for nothing. Surface it explicitly so the bot can say "we don't offer X".
+    if specialty is not None and specialty not in _CANONICAL_SPECIALTIES:
+        return Ok(
+            value={
+                "asked_date": asked.isoformat(),
+                "total_returned": 0,
+                "slots": [],
+                "specialty_offered": False,
+                "requested_specialty": specialty,
+                "offered_specialties": list(_CANONICAL_SPECIALTIES),
+            }
+        )
     try:
         slots = await client.list_availability(
             date_=asked,

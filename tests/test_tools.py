@@ -37,6 +37,20 @@ def test_normalize_specialty_maps_caller_wording_to_canonical() -> None:
     assert _normalize_specialty(None) is None
 
 
+async def test_unknown_specialty_flagged_not_silently_empty(client: EHRClient) -> None:
+    """A specialty we don't offer ("cardiology") returns an explicit
+    specialty_offered=False + the offered list, not a silent empty result that
+    is indistinguishable from "offered but fully booked" — so the bot can say
+    "we don't offer that" instead of "no slots". Short-circuits before the EHR."""
+    async with client:
+        r = await list_availability_slots_handler(client, date="2026-05-26", specialty="cardiology")
+    assert is_ok(r)
+    assert r.value["specialty_offered"] is False
+    assert r.value["requested_specialty"] == "cardiology"
+    assert r.value["slots"] == []
+    assert "Dermatologist" in r.value["offered_specialties"]
+
+
 async def test_find_by_phone_no_match(client: EHRClient) -> None:
     async with client:
         r = await find_patient_by_phone_handler(client, phone="+19999999999")

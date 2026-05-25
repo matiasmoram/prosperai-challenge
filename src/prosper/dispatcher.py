@@ -367,6 +367,16 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
         slots = value.get("slots", [])
         next_day = value.get("next_day_with_slots")
         asked_date = value.get("asked_date", "that date")
+        # Specialty the caller asked for isn't one we offer (e.g. "cardiology").
+        # Distinct from "offered but no free slots" — tell the model plainly so
+        # it says "we don't offer X" instead of guessing "no availability".
+        if value.get("specialty_offered") is False:
+            offered = ", ".join(value.get("offered_specialties", []))
+            return (
+                f"we do not offer '{value.get('requested_specialty', 'that')}'. "
+                f"Specialties we DO offer: {offered}. Tell the caller and ask "
+                "which they'd like — do not claim there are no slots."
+            )
         if not slots and next_day:
             nd_total = next_day.get("total_returned", len(next_day["slots"]))
             return (
