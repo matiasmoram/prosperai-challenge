@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from prosper.ehr_client import EHRClient
 from prosper.result import is_err, is_ok
 from prosper.tools import (
+    _normalize_specialty,
     cancel_appointment_handler,
     create_appointment_handler,
     create_patient_handler,
@@ -15,6 +16,25 @@ from prosper.tools import (
     find_patient_by_phone_handler,
     list_availability_slots_handler,
 )
+
+
+def test_normalize_specialty_maps_caller_wording_to_canonical() -> None:
+    """Caller/menu wording ("Dermatology") must resolve to the EHR's canonical
+    provider-type value ("Dermatologist") — the EHR filters specialty with a
+    case-insensitive EXACT match, so a near-miss returns NOTHING and the bot
+    loops "no slots" on a specialty that is wide open (live bug f8bc099d)."""
+    assert _normalize_specialty("Dermatology") == "Dermatologist"
+    assert _normalize_specialty("dermatology") == "Dermatologist"
+    assert _normalize_specialty("Therapy") == "Therapist"
+    assert _normalize_specialty("Psychiatry") == "Psychiatrist"
+    assert _normalize_specialty("Physiotherapy") == "Physiotherapist"
+    # Canonical / exact values pass through unchanged.
+    assert _normalize_specialty("Dermatologist") == "Dermatologist"
+    assert _normalize_specialty("General Practice") == "General Practice"
+    # A genuinely unknown specialty is NOT coerced — the EHR's empty/unknown
+    # path must stay reachable, not be force-mapped to a wrong provider type.
+    assert _normalize_specialty("cardiology") == "cardiology"
+    assert _normalize_specialty(None) is None
 
 
 async def test_find_by_phone_no_match(client: EHRClient) -> None:

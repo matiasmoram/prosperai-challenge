@@ -13,6 +13,7 @@ whitelist in ``flows.py`` references them by name.
 
 from __future__ import annotations
 
+import difflib
 import re
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime
@@ -108,6 +109,37 @@ def _phone_words_to_digits(raw: str) -> str:
     if len(digits) < 7:
         return raw
     return digits
+
+
+# Canonical specialty values the EHR filters on — the provider-type nouns stored
+# in `providers.specialty` (== the SPECIALTY_DURATION_TABLE keys). Single source
+# of truth so adding a specialty in one place is enough.
+_CANONICAL_SPECIALTIES: tuple[str, ...] = tuple(SPECIALTY_DURATION_TABLE.keys())
+
+
+def _normalize_specialty(value: str | None) -> str | None:
+    """Resolve caller/LLM specialty wording onto a canonical EHR specialty.
+
+    The menu the bot reads aloud uses the friendly *service* noun ("Dermatology",
+    "Therapy") while the EHR stores the *provider-type* noun ("Dermatologist",
+    "Therapist") and filters it with a case-insensitive EXACT match. The LLM
+    routinely passes the word it just offered, so the filter matches nothing and
+    the bot loops "no slots" on a specialty that is actually wide open (live bug
+    session f8bc099d: Dermatology). This belt-and-braces normaliser (mirrors
+    ``_phone_words_to_digits``) fuzzy-maps the wording onto the nearest canonical
+    value — "Dermatology"/"dermatology"/"derm" → "Dermatologist". It returns the
+    raw value unchanged when nothing is close enough, so a genuinely unknown
+    specialty still flows through to the EHR's empty/unknown path.
+    """
+    if not value or not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    lowered = stripped.lower()
+    canon_by_lower = {c.lower(): c for c in _CANONICAL_SPECIALTIES}
+    if lowered in canon_by_lower:  # exact (case-insensitive) hit
+        return canon_by_lower[lowered]
+    match = difflib.get_close_matches(lowered, list(canon_by_lower), n=1, cutoff=0.6)
+    return canon_by_lower[match[0]] if match else stripped
 
 
 def _parse_dob(raw: str) -> Result[date]:
@@ -273,6 +305,10 @@ async def list_availability_slots_handler(
             message=f"duration_minutes={duration_minutes} not in (30, 60, 90)",
             retryable=True,
         )
+    # Map caller wording ("Dermatology") onto the canonical EHR value
+    # ("Dermatologist") before any query — both the primary call and the
+    # forward-scan probes below reuse this `specialty`. See `_normalize_specialty`.
+    specialty = _normalize_specialty(specialty)
     try:
         slots = await client.list_availability(
             date_=asked,

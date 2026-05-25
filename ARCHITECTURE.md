@@ -277,12 +277,21 @@ Three things to know about the tool layer:
    pins this behaviour.
 
 3. **`specialty` filter.** `list_availability_slots` accepts an
-   optional `specialty` string ("Therapist", "Dermatologist",
-   "Psychiatrist", "General Practice", "Physiotherapist"). Today the
-   LLM picks the string from caller intent; a mini-LLM router that
-   maps complaint → specialty is **in flight** (§14). Scenarios
-   `specialty_filter_therapist`, `specialty_unknown_falls_back`, and
-   `specialty_no_filter_any_doctor` cover the three branches.
+   optional `specialty` string. The EHR filters it with a
+   case-insensitive **exact** match against `providers.specialty`
+   ("Therapist", "Dermatologist", "Psychiatrist", "General Practice",
+   "Physiotherapist" — the `SPECIALTY_DURATION_TABLE` keys). The caller-facing
+   menu the bot reads aloud uses the friendlier *service* noun ("Dermatology",
+   "Therapy"), so the LLM often passes that as the filter — which exact-matches
+   NOTHING and made the bot loop "no slots" on a wide-open specialty (live bug
+   `f8bc099d`: Dermatology). `tools._normalize_specialty` is the belt-and-braces
+   fix: a `difflib` fuzzy map (against the canonical keys, cutoff 0.6) at the tool
+   boundary resolves "Dermatology" → "Dermatologist" etc. before the EHR call,
+   passing genuinely-unknown values through untouched so the empty/unknown path
+   still works. The complaint → specialty mini-LLM router shipped (ADR 005, §14).
+   Scenarios `specialty_filter_therapist`, `specialty_unknown_falls_back`, and
+   `specialty_no_filter_any_doctor` cover the filter branches;
+   `test_normalize_specialty_maps_caller_wording_to_canonical` pins the map.
 
 ## 7. Dispatcher mechanics
 
