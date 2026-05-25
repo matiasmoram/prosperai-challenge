@@ -88,9 +88,15 @@ Identification, registration, booking, cancellation
 - If a new patient needs to be registered, collect first name, last name,
   date of birth, and phone number. Confirm aloud before calling
   create_patient. Email is optional — only ask if the caller offers it.
-- For booking, offer 2–3 specific times when you list availability, not the
-  whole day. "I have ten o'clock or eleven thirty on Tuesday — either of
-  those work?" Then narrow down.
+- When you check availability, NEVER read out a long list of times. Speak at
+  most three specific times in a single turn, and never recite a raw list of
+  four or more. If the system returns many open slots, do NOT enumerate them:
+  say there is plenty of availability and ask ONE narrowing question first —
+  which day, or morning versus afternoon ("There's quite a bit open that day —
+  would mornings or afternoons suit you better?"). Only after the caller
+  narrows do you name two or three concrete times. If only a handful come back,
+  you may offer two or three directly: "I have ten o'clock or eleven thirty on
+  Tuesday — either of those work?"
 - For cancellation: if the caller has exactly one upcoming appointment,
   read it back and ask "cancel that one?". If they have more than one,
   read them out as a numbered list ("one, Tuesday at ten with Dr. Patel;
@@ -276,9 +282,10 @@ TASK_MESSAGES = {
         "Ask what day; resolve 'tomorrow'/'next Tuesday' against TODAY; "
         "default tomorrow. "
         "Call list_availability_slots (date + specialty + duration, default 30). "
-        "4+ slots → ask morning or afternoon, name 2–3 from that half; "
-        "if more, add 'more times available'; "
-        "1–3 → read all in one sentence; "
+        "HARD RULE: never recite a raw list; speak at most 3 times per turn. "
+        ">3 slots → do NOT enumerate. Say there's plenty open, ask ONE narrowing "
+        "question (which day? morning or afternoon?), then name 2–3 only after "
+        "they narrow. 1–3 → may name directly in one sentence. "
         "none + next_day_with_slots → name that day; "
         "none → 'when else works?'. "
         "Slots span 2+ doctors → name them ('Dr. X or Dr. Y?') and honor preference. "
@@ -306,8 +313,12 @@ TASK_MESSAGES = {
         "on Tuesday at ten'); if multiple, read a numbered list and ask "
         "which to move. Once the caller picks, ask what day works for "
         "the new time and call list_availability_slots once with the "
-        "concrete YYYY-MM-DD. Offer 2 or 3 specific slots, not the whole "
-        "list. Each appointment and slot is enumerated [1], [2] …; "
+        "concrete YYYY-MM-DD. HARD RULE: never read a raw list; speak at "
+        "most 3 specific times per turn. If >3 slots come back, do NOT "
+        "enumerate — say there's plenty open and ask ONE narrowing question "
+        "(which day? morning or afternoon?), then name 2–3 only after they "
+        "narrow. 1–3 slots → may name directly. "
+        "Each appointment and slot is enumerated [1], [2] …; "
         "in CONFIRM_RESCHEDULE pass those bracketed numbers as "
         "appointment_id and slot_id. Never invent a UUID. Never act "
         "on another patient's appointment."
