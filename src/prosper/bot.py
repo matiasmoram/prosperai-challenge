@@ -178,7 +178,7 @@ def _should_emit_filler(dispatcher: Dispatcher, state: State) -> bool:
 
 # NOTE on pipecat version: 0.0.100 is intentional. v1.0.0 (released
 # 2026-04-14) carries breaking changes and migrating mid-submission would
-# risk shipping a half-working bot. Upgrade is listed in SOLUTION.md "Future
+# risk shipping a half-working bot. Upgrade is listed in ARCHITECTURE.md "Future
 # work".
 _PIPECAT_VERSION = getattr(_pipecat, "__version__", "unknown")
 if not _PIPECAT_VERSION.startswith("0."):

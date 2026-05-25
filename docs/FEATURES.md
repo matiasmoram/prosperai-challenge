@@ -1,7 +1,7 @@
 # FEATURES.md — what the bot does
 
 A high-level map of everything the Prosper voice agent does today. For *how* any
-of it is wired, see `SOLUTION.md` (the section-by-section reference); for *why* a
+of it is wired, see `ARCHITECTURE.md` (the section-by-section reference); for *why* a
 load-bearing decision was made, see `docs/adr/`. This file is the "grosso modo"
 inventory — capabilities, not internals.
 
@@ -114,6 +114,6 @@ America/New_York, in English.
 
 ---
 
-For the full feature list incl. in-flight work see `SOLUTION.md` §14 and `FUTURE.md`.
+For the full feature list incl. in-flight work see `ARCHITECTURE.md` §14 and `FUTURE.md`.
 Test coverage of these features is catalogued in `cases.md`; the test machinery
 (AI + non-AI) is described in `tester.md`.

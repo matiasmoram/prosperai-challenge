@@ -25,7 +25,7 @@ def test_smoke_dispatcher_module_imports() -> None:
     """v1: assert the bot module imports and the dispatcher initialises.
 
     A real audio loop (synth caller → bot STT → bot logic → bot TTS →
-    caller STT → judge) is a future-work item documented in SOLUTION.md.
+    caller STT → judge) is a future-work item documented in ARCHITECTURE.md.
     """
     from prosper.bot import _build_dispatcher
 

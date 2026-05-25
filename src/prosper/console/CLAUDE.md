@@ -56,4 +56,4 @@ make verify                        # full gate before ANY commit
 - `../../../docs/testing/ADVERSARIAL_FINDINGS.md` — **F-007 (audit PII)** and
   **F-010 (cross-session bus eviction)** are CLOSED (per-session subscribe + audit-write
   redaction shipped). Confirm via their tests before re-opening; don't re-fix.
-- `../../../SOLUTION.md` §8 — current console wiring; update it in the same change if you alter event shapes (root rule 11).
+- `../../../ARCHITECTURE.md` §8 — current console wiring; update it in the same change if you alter event shapes (root rule 11).

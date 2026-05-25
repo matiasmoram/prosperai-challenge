@@ -8,7 +8,7 @@ Ownership map + parallel-safety matrix: `../../../FRONTS.md`.
 Parallel-safe with F2 F3 F4 F5 — zero shared files. Not on any seam.
 
 ## What lives here
-- `api.py`        — FastAPI routes (full endpoint↔challenge map in `SOLUTION.md` §9)
+- `api.py`        — FastAPI routes (full endpoint↔challenge map in `ARCHITECTURE.md` §9)
 - `db.py`         — engine/session; auto-migrates `Provider.specialty` on startup
 - `models.py`     — SQLAlchemy `Patient` `Provider` `Slot` `Appointment` + partial idx
 - `repository.py` — persistence; single LEFT-OUTER-JOIN availability (was N+1, 115ms→~10ms)
@@ -56,4 +56,4 @@ Live ledgers, read these each cycle:
 - `../../../docs/testing/ADVERSARIAL_FINDINGS.md` — **F-001…F-013 are CLOSED.** F-005
   (self-collision mislabel, `repository.py`) was fixed; re-confirm via its test before
   re-opening. Do not author fixes for already-fixed findings.
-- `../../../SOLUTION.md` §9 — current EHR shape; update it in the same change if you alter it (root rule 11).
+- `../../../ARCHITECTURE.md` §9 — current EHR shape; update it in the same change if you alter it (root rule 11).

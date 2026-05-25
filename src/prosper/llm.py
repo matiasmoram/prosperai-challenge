@@ -7,7 +7,7 @@ Reliability features (README bonus #2):
   brownout still completes the call against gpt-4o.
 
 Bot remains usable when OpenAI returns 5xx briefly. Documented in
-SOLUTION.md under "Reliability".
+ARCHITECTURE.md under "Reliability".
 """
 
 from __future__ import annotations

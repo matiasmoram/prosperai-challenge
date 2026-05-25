@@ -35,7 +35,8 @@ use it before pushing.
   process, paired state+judge eval)
 - `docs/glossary.md` — repo-specific vocabulary (TTFT, dispatcher, etc.)
 - `CLAUDE.md` — hard rules for both human and LLM contributors. Read first.
-- `SOLUTION.md` — what was built and why, for reviewers
+- `ARCHITECTURE.md` — what was built and why, section-by-section (technical reference + manual)
+- `SOLUTION.md` — non-technical executive overview (for leadership / interviewers)
 - `docs/research/` — point-in-time research notes that informed each wave
 
 ## Adding a new tool

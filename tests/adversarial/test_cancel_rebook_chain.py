@@ -1,6 +1,6 @@
 """Adversarial: the mid-cancel intent-flip (cancel→rebook) chain.
 
-CLAUDE.md / SOLUTION.md §6: a plain cancel ends the call; only when the caller
+CLAUDE.md / ARCHITECTURE.md §6: a plain cancel ends the call; only when the caller
 flips intent mid-cancel ("actually move it") does a successful
 `cancel_appointment` route into BOOK_FLOW (the legacy cancel-then-rebook
 chain). This pins both branches so the chain can't silently regress into

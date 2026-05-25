@@ -3,7 +3,7 @@
 You are in the **agent-core** tree. This charter covers Front **F2**: the FSM
 runtime, tool registry, LLM adapter, EHR client, reliability layers. Ownership
 map + parallel-safety matrix: `../../FRONTS.md`. Stable architecture invariants:
-root `../../CLAUDE.md`. How any feature is wired: `../../SOLUTION.md`.
+root `../../CLAUDE.md`. How any feature is wired: `../../ARCHITECTURE.md`.
 
 > **Router — which front am I in?** This dir has two sub-fronts with their own
 > CLAUDE.md. Read theirs instead if you're editing under them:
@@ -64,9 +64,9 @@ teaching `tester/receipt_gate.py` whether it needs a receipt.
 Live ledgers + a reconciliation warning:
 - `../../FUTURE.md` §1.2 STT/TTS fallback, §3.1 streaming TTS, §3.2 slot prefetch,
   §3.3 speculative race (half-landed), §4.1 provider preference (hits S1), §4.2 notes (with F3).
-- `../../SOLUTION.md` §14 in-flight + §17 priority order. **⚠ §14 is stale**: the
-  mini-LLM specialty router appears shipped (ADR-005 + `tests/test_triage*.py`) — confirm
-  in code, then move it out of §14 (root rule 11) before building "new" router work.
+- `../../ARCHITECTURE.md` §14 in-flight + §17 priority order. (§14 reconciled
+  2026-05-25: the mini-LLM specialty router + `route_intent` are SHIPPED — ADR-005,
+  `tests/test_triage*.py`. Genuinely-open items there: speculative race, property-fuzzer.)
 - `../../docs/testing/ADVERSARIAL_FINDINGS.md` — **F-001…F-013 are CLOSED** (root-fixed,
   79 tests assert the fixes). The "needs sign-off" lines are original proposals, not open TODOs.
 - This branch (`feat/hybrid-llm-navigation`) has active uncommitted work — read the

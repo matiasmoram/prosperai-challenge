@@ -4,7 +4,9 @@ Voice agent that books and cancels appointments at a fictional clinic.
 Built on Pipecat + ElevenLabs STT/TTS + OpenAI LLM, backed by a
 self-built FastAPI EHR (SQLite + SQLAlchemy).
 
-Full design + decision trail in [`SOLUTION.md`](./SOLUTION.md).
+Non-technical overview in [`SOLUTION.md`](./SOLUTION.md); the full engineering
+reference + operations manual (section-by-section design + decision trail) in
+[`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## Prerequisites
 - Python 3.10+

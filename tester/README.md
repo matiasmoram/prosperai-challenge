@@ -6,7 +6,7 @@ Prototype layer that grew out of the challenge's evaluation ask:
 > mistakes can be caught without having to dial in by hand every time.*
 
 The full brainstorm (tiered eval pyramid, the synthetic-caller / hallucination /
-methodology survey, and the build order) lives in **`SOLUTION.md` §11**. It
+methodology survey, and the build order) lives in **`ARCHITECTURE.md` §11**. It
 complements `evals/` — it does not replace it.
 
 Two pieces, both auditing the same invariant from different ends:

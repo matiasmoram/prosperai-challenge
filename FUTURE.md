@@ -110,7 +110,7 @@ Landed (commit `bfb3a70`). `evals/trace_replay.py` + `make replay` /
 ### 3.3 Speculative execution on call start — *the latency answer (deferred, by design)*
 
 > **This is the canonical answer to "what do we do about latency?"** (see
-> `SOLUTION.md` §15.1). On call start, overlap backend I/O with the caller's
+> `ARCHITECTURE.md` §15.1). On call start, overlap backend I/O with the caller's
 > speech instead of doing it sequentially on demand: warm the identity lookup +
 > the caller's upcoming appointments the moment a name is heard, and pre-stage
 > the three intent branches (book/cancel/reschedule) in parallel. For a new
