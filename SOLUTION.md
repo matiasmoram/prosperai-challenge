@@ -58,9 +58,9 @@ The exhaustive list lives in `docs/FEATURES.md`; the headline capabilities:
   than guess; medical-emergency red flag is an FSM-enforced hard stop; graceful
   LLM-total-failure path (canned line + reception mail); front-desk handoff.
 - **Staff surfaces** — operator console (live call telemetry, masked PII) +
-  front-desk Mail + Calendar (full-PII staff tier, durable SQLite store): a
-  booking-confirmation mail to the doctor, callback/handoff + failure mail to
-  reception, and a 7-day clinic calendar.
+  front-desk Mail + Calendar (full-PII staff tier, durable SQLite store):
+  booking / cancellation / reschedule mail to the doctor, callback/handoff +
+  failure mail to reception, and a 7-day clinic calendar.
 
 ## 0.2 How the concerns FUTURE.md flags as important are handled
 
@@ -402,17 +402,26 @@ unified SQLite store at `data/mail/mail.db` (one `mail` table) — one coherent
 inbox across every call, durable across restarts, **not** per-session files. It
 is deliberately a separate database from the EHR (distinct full-PII trust tier).
 `write` offloads the blocking insert via `asyncio.to_thread` so it never stalls
-the bot's event loop. Three mail kinds:
+the bot's event loop. Five mail kinds — the three appointment-lifecycle events
+plus handoff + failure:
 
 | Kind | Trigger | Source of identity | Addressed to (`to_label`) |
 |---|---|---|---|
 | `handoff` | LLM calls `leave_message_for_front_desk` → `needs_human` transition | `SessionMemory` exclusively (never LLM args) | `Reception` |
 | `booking_confirmation` | `create_appointment` returns `Ok` → `_emit_booking_confirmation` | `SessionMemory.identified_patient` | the booked provider (`Dr. X`) |
+| `cancellation` | `cancel_appointment` returns `Ok` → `_emit_cancellation_notice` | `SessionMemory.identified_patient`; provider/start recovered from `last_upcoming_appointments` (cancel returns only `{ok, appointment_id}`) | the freed provider (`Dr. X`) |
+| `reschedule` | `reschedule_appointment` returns `Ok` → `_emit_reschedule_notice` | `SessionMemory.identified_patient`; new start/provider from the result | the new provider (`Dr. X`) |
 | `bot_failed` | inner LLM loop exhausts (`_emit_safety_net_handoff`) or total LLM failure (`_emit_system_failure_mail`) | `SessionMemory.identified_patient` | `Reception` |
 
+The three lifecycle emitters share `_caller_identity()` + `_fire_mail()`; the
+atomic reschedule fires exactly one `reschedule` mail, while a *mid-cancel
+intent-flip* (cancel-then-rebook chain) correctly fires a `cancellation` then a
+`booking_confirmation` — two mails for two real DB writes.
+
 The inbox is a **staff surface**, so every message reads as a short note to a
-person — `Reception` for callbacks/failures, the booked `Dr. X` for a new-booking
-notification — with a one-line subject + body. All writes are **fire-and-forget**
+person — `Reception` for callbacks/failures, the booked/freed `Dr. X` for a
+booking / cancellation / reschedule notification — with a one-line subject +
+body. All writes are **fire-and-forget**
 via `_inflight_publishes` (same strong-ref pattern as console-bus publishes); a
 write failure is logged but never propagates to the call path.
 

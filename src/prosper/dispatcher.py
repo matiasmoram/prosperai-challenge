@@ -31,7 +31,7 @@ from prosper.console.bus import ConsoleBus
 from prosper.console.events import EventType, make_event
 from prosper.ehr_client import EHRClient
 from prosper.flows import ALLOWED_TOOLS, TRANSITIONS, State
-from prosper.integrations.mail import MailStore, make_message
+from prosper.integrations.mail import MailMessage, MailStore, make_message
 from prosper.observability.redact import mask_name, mask_phone
 from prosper.observability.timing import TimingCollector
 from prosper.prompts import CLINIC_PERSONA, FALLBACK_LINES, build_task_message
@@ -1053,6 +1053,36 @@ class Dispatcher:
         self._inflight_publishes.add(task)
         task.add_done_callback(self._inflight_publishes.discard)
 
+    def _caller_identity(self) -> tuple[str, str]:
+        """(display name, phone) of the identified caller for mail records.
+
+        Shared by every post-identity mail emitter (booking / cancellation /
+        reschedule). Falls back to ``(unknown)`` so a half-identified session
+        still produces a legible record rather than blank fields.
+        """
+        patient = self.memory.identified_patient or {}
+        first = str(patient.get("first_name") or "")
+        last = str(patient.get("last_name") or "")
+        name = f"{first} {last}".strip() or "(unknown)"
+        phone = str(patient.get("phone") or "(unknown)")
+        return name, phone
+
+    def _fire_mail(self, msg: MailMessage) -> None:
+        """Detach a fire-and-forget MailStore write — never blocks/raises on the
+        call path. No-op when no store is injected (tests/evals) or no event
+        loop is running. The store swallows its own write errors; the EHR write
+        is the source of truth, the mail is advisory.
+        """
+        if self._mail is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._mail.write(msg))
+        self._inflight_publishes.add(task)
+        task.add_done_callback(self._inflight_publishes.discard)
+
     def _emit_booking_confirmation(self, appt: dict[str, Any]) -> None:
         """Fire-and-forget caller booking-confirmation 'email' after Ok.
 
@@ -1062,36 +1092,95 @@ class Dispatcher:
         """
         if self._mail is None:
             return
-        patient = self.memory.identified_patient or {}
-        first = str(patient.get("first_name") or "")
-        last = str(patient.get("last_name") or "")
-        name = f"{first} {last}".strip() or "(unknown)"
-        phone = str(patient.get("phone") or "(unknown)")
+        name, phone = self._caller_identity()
         provider = str(appt.get("provider_name") or "your provider")
         start = str(appt.get("start_at") or "")
         # Addressed to the booked provider — the front-desk inbox is a staff
         # surface, so a confirmed booking reads as a notification to the doctor
         # ("Dr. Patel — new appointment"), not an email to the patient.
-        msg = make_message(
-            session_id=self.session_id,
-            kind="booking_confirmation",
-            to_label=provider,
-            subject=f"New appointment — {name}" + (f" at {start}" if start else ""),
-            body=(
-                f"{name} ({phone}) booked a visit with {provider}"
-                + (f" for {start}" if start else "")
-                + "."
-            ),
-            patient_name=name,
-            patient_phone=phone,
+        self._fire_mail(
+            make_message(
+                session_id=self.session_id,
+                kind="booking_confirmation",
+                to_label=provider,
+                subject=f"New appointment — {name}" + (f" at {start}" if start else ""),
+                body=(
+                    f"{name} ({phone}) booked a visit with {provider}"
+                    + (f" for {start}" if start else "")
+                    + "."
+                ),
+                patient_name=name,
+                patient_phone=phone,
+            )
         )
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+
+    def _emit_cancellation_notice(self, result_value: dict[str, Any]) -> None:
+        """Fire-and-forget cancellation notice to the front desk after an Ok
+        cancel — staff see the freed slot. Off-spine, best-effort; same
+        guarantees as ``_emit_booking_confirmation``.
+
+        ``cancel_appointment`` returns only ``{ok, appointment_id}``, so the
+        provider + start time are recovered from
+        ``SessionMemory.last_upcoming_appointments`` — the list the caller just
+        picked from. If the id isn't found there (defensive), the record still
+        goes out with generic provider/start fields rather than being dropped.
+        """
+        if self._mail is None:
             return
-        task = loop.create_task(self._mail.write(msg))
-        self._inflight_publishes.add(task)
-        task.add_done_callback(self._inflight_publishes.discard)
+        appt_id = str(result_value.get("appointment_id") or "")
+        cancelled = next(
+            (
+                a
+                for a in self.memory.last_upcoming_appointments
+                if isinstance(a, dict) and str(a.get("id")) == appt_id
+            ),
+            {},
+        )
+        provider = str(cancelled.get("provider_name") or "your provider")
+        start = str(cancelled.get("start_at") or "")
+        name, phone = self._caller_identity()
+        self._fire_mail(
+            make_message(
+                session_id=self.session_id,
+                kind="cancellation",
+                to_label=provider,
+                subject=f"Cancelled appointment — {name}" + (f" on {start}" if start else ""),
+                body=(
+                    f"{name} ({phone}) cancelled their visit with {provider}"
+                    + (f" on {start}" if start else "")
+                    + "."
+                ),
+                patient_name=name,
+                patient_phone=phone,
+            )
+        )
+
+    def _emit_reschedule_notice(self, appt: dict[str, Any]) -> None:
+        """Fire-and-forget reschedule notice after an Ok reschedule. The result
+        carries the NEW ``start_at`` + ``provider_name`` (same shape as a
+        booking), so the front desk sees where the visit moved to. Off-spine,
+        best-effort; same guarantees as ``_emit_booking_confirmation``.
+        """
+        if self._mail is None:
+            return
+        name, phone = self._caller_identity()
+        provider = str(appt.get("provider_name") or "your provider")
+        start = str(appt.get("start_at") or "")
+        self._fire_mail(
+            make_message(
+                session_id=self.session_id,
+                kind="reschedule",
+                to_label=provider,
+                subject=f"Rescheduled appointment — {name}" + (f" to {start}" if start else ""),
+                body=(
+                    f"{name} ({phone}) moved their visit with {provider}"
+                    + (f" to {start}" if start else "")
+                    + "."
+                ),
+                patient_name=name,
+                patient_phone=phone,
+            )
+        )
 
     @staticmethod
     def _filter_handler_kwargs(handler: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -1602,6 +1691,10 @@ class Dispatcher:
             # cancel stays single-action. (When the caller said "reschedule"
             # from CHOOSE_INTENT we now take the atomic RESCHEDULE_FLOW
             # path; this chain only fires for mid-call intent flips.)
+            # Notify the front desk the slot was freed BEFORE branching: the
+            # cancel happened either way (the mid-cancel reschedule flip just
+            # also rebooks). The rebook leg then fires its own booking mail.
+            self._emit_cancellation_notice(result.value)
             if self.memory.wants_reschedule:
                 self.memory.wants_reschedule = False
                 self._transition("cancelled_then_rebook")
@@ -1613,6 +1706,7 @@ class Dispatcher:
             and is_ok(result)
         ):
             self._transition("rescheduled")
+            self._emit_reschedule_notice(result.value)
 
     def _transition(self, label: str) -> None:
         """Apply a labelled transition if `label` is valid for the current state.

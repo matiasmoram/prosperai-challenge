@@ -17,7 +17,7 @@ let mail = [];
 // Mail has no stable id; (session_id, ts, subject) is unique enough in practice.
 let selectedKey = null;
 
-const KINDS = ["booking_confirmation", "handoff", "bot_failed"];
+const KINDS = ["booking_confirmation", "cancellation", "reschedule", "handoff", "bot_failed"];
 const kindClass = (k) => (KINDS.includes(k) ? k : "default");
 
 // ---- time helpers -----------------------------------------------------------
