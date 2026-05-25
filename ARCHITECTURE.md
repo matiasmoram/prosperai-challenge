@@ -35,7 +35,7 @@ confirm a write that did not happen. Everything else (triage, hybrid intent
 routing, mail/calendar, barge-in) hangs off that spine.
 
 **Status:** 12 FSM states, 11 tools (9 EHR-backed handlers + 2 intercepted),
-108 offline eval scenarios + ~715 tests green (`tests/` 544 + `tester/` 171);
+108 offline eval scenarios + ~770 tests green (`tests/` 582 + `tester/` 172 + evals 16);
 `mypy --strict`. What is *not* built and why → §16.1.
 
 Read order: this summary → §0.1 (what it does) → §0.2 (how the hard concerns are

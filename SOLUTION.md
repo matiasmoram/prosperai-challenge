@@ -139,7 +139,7 @@ trust. Where each stands today:
 - **108 conversation scenarios** pass end to end — happy paths plus the hard
   cases: prompt-injection attempts, callers demanding someone else's
   appointment, mid-call changes of mind, garbled speech, hang-ups at every point.
-- **~715 automated tests** green, including a standing check that the agent can
+- **~770 automated tests** green, including a standing check that the agent can
   never confirm something it didn't actually do.
 - **Strict type-checking** across the codebase; one command (`make verify`) gates
   every change.
@@ -217,5 +217,5 @@ The complete, honest "what's deferred and why" list lives in `ARCHITECTURE.md`
 | What's deliberately deferred, and why | `ARCHITECTURE.md` §16 / §16.1 |
 
 **Status:** 12 conversation stages, 11 actions the agent can take, 108 scenarios
-+ ~715 tests green, strict types. What is *not* built and why →
++ ~770 tests green, strict types. What is *not* built and why →
 `ARCHITECTURE.md` §16.1.
