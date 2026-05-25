@@ -2678,6 +2678,48 @@ def _script_identity_unfound_existing_handoff() -> list[LLMReply]:
     ]
 
 
+def _script_identity_unfound_new_patient_registers() -> list[LLMReply]:
+    # Jordan Banks is not in the DB and is genuinely new. Phone lookup →
+    # no match → bot asks "booked before, or new?" BEFORE asking for a DOB.
+    # Caller says they're new → bot asks DOB, runs find_patient_by_name_dob
+    # once (returns nothing → no_match → REGISTER_PATIENT) → create_patient →
+    # CHOOSE_INTENT → BOOK_FLOW → CONFIRM_BOOK → END.
+    return [
+        # GREETING
+        _t("Hi, you've reached Prosper Health — what's your name, and how can I help you today?"),
+        # IDENTIFY_PATIENT: caller gave name in greeting; bot tries phone first
+        _t("Sure — what's the best phone number to find you under?"),
+        # phone lookup → no match
+        _tool("find_patient_by_phone", phone="555-888-1234"),
+        # no match → ask "booked before, or new?" (NOT a DOB request yet)
+        _t("I don't see you under that number — have you booked with us before, or are you new?"),
+        # caller says they're new → reassure + ask DOB (still IDENTIFY_PATIENT)
+        _t("No problem, I'll get you registered — what's your date of birth?"),
+        # name+DOB lookup → 0 hits → no_match → REGISTER_PATIENT
+        _tool("find_patient_by_name_dob", name="Jordan Banks", dob="March 4 1992"),
+        # REGISTER_PATIENT: read details back for confirmation
+        _t("I'll register Jordan Banks, born March 4th 1992, phone 555-888-1234 — sound right?"),
+        # create_patient → CHOOSE_INTENT
+        _tool(
+            "create_patient",
+            first_name="Jordan",
+            last_name="Banks",
+            dob="1992-03-04",
+            phone="5558881234",
+        ),
+        # CHOOSE_INTENT
+        _t("Great — book a new visit or cancel an existing one?"),
+        # BOOK_FLOW: list → CONFIRM_BOOK
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        # CONFIRM_BOOK: read back
+        _t("I have ten o'clock tomorrow morning with Dr. Patel — shall I go ahead and book that?"),
+        # create_appointment → END
+        _tool("create_appointment", __use_first_slot__=True),
+        # END
+        _t("You're all set for tomorrow at ten with Dr. Patel — have a great day."),
+    ]
+
+
 def _script_caller_requests_human() -> list[LLMReply]:
     # Ada is identified via phone. She immediately asks for a human.
     # Dispatcher intercepts leave_message_for_front_desk → HANDOFF.
@@ -2966,6 +3008,7 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "phone_retracted_fallback_to_name_dob": _script_phone_retracted_fallback_to_name_dob,
     # Wave 5: identity-not-found → handoff
     "identity_unfound_existing_handoff": _script_identity_unfound_existing_handoff,
+    "identity_unfound_new_patient_registers": _script_identity_unfound_new_patient_registers,
     # F6 handoff scenarios
     "caller_requests_human": _script_caller_requests_human,
     "bot_stuck_triggers_handoff": _script_bot_stuck_triggers_handoff,
@@ -3869,6 +3912,22 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "April 5th 1975.",
         # HANDOFF: bot confirms front-desk message
         "okay thank you, goodbye.",
+    ],
+    "identity_unfound_new_patient_registers": [
+        # GREETING → IDENTIFY
+        "Hi, I'd like to book an appointment.",
+        # IDENTIFY_PATIENT: phone lookup → no match
+        "555-888-1234.",
+        # bot asks "booked before, or new?" → caller is new
+        "No, I'm new — this is my first time calling.",
+        # bot asks for details → name + DOB → no_match → REGISTER_PATIENT
+        "Jordan Banks, March 4th 1992.",
+        # REGISTER_PATIENT read-back → confirm
+        "yes that's right.",
+        # CHOOSE_INTENT → BOOK_FLOW
+        "Book please — any morning slot tomorrow.",
+        # CONFIRM_BOOK read-back → confirm
+        "yes please.",
     ],
     # F6 handoff scenarios
     "caller_requests_human": [

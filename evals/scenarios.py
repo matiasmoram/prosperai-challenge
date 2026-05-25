@@ -3808,6 +3808,49 @@ SCENARIOS: list[Scenario] = [
         ],
         max_turns=12,
     ),
+    # Identity not-found → "booked before?" gate → NEW patient registers.
+    # Mirror of identity_unfound_existing_handoff but the caller is genuinely
+    # new: after the phone miss the bot must ask whether they've been here
+    # before BEFORE asking for a DOB, then register when they say they're new.
+    Scenario(
+        name="identity_unfound_new_patient_registers",
+        tags=frozenset({"identity", "happy", "registration"}),
+        persona=(
+            "You are Jordan Banks, a brand-new caller. Your phone is "
+            "555-888-1234 (not in the system) and your DOB is March 4th 1992. "
+            "Open VERBATIM: 'Hi, I'd like to book an appointment.' Give your "
+            "phone when asked: '555-888-1234'. When the bot says it can't find "
+            "you and asks whether you've booked with the clinic before, reply "
+            "VERBATIM: 'No, I'm new — this is my first time calling.' When the "
+            "bot then asks for your details, give VERBATIM: 'Jordan Banks, "
+            "March 4th 1992.' When the bot reads your details back for "
+            "registration, confirm VERBATIM: 'yes that\\'s right'. Then book "
+            "any morning slot tomorrow, confirming VERBATIM 'yes please' when "
+            "the bot reads the slot back. Once the bot confirms the booking, "
+            "end the call VERBATIM with: 'thanks, goodbye.'"
+        ),
+        setup=_setup_new_patient_books,  # provider + slots, no matching patient
+        expected_state=StateExpectation(
+            patient_count_delta=1,
+            active_appointment_count_delta=1,
+            cancelled_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "find_patient_by_name_dob",
+                "create_patient",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+        ),
+        judge_criteria=[
+            "the bot tried the phone lookup first and found no match",
+            "the bot asked whether the caller had booked before BEFORE asking for a date of birth",
+            "the bot registered the caller as a new patient once they said they were new",
+            "exactly one new patient was registered and one appointment booked",
+        ],
+        max_turns=18,
+    ),
     # F6 handoff scenarios
     Scenario(
         name="caller_requests_human",
