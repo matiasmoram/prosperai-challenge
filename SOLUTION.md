@@ -29,8 +29,9 @@ cannot call a tool the current state forbids, never sees a raw UUID, and cannot
 confirm a write that did not happen. Everything else (triage, hybrid intent
 routing, mail/calendar, barge-in) hangs off that spine.
 
-**Status:** 12 FSM states, 11 tools, 107 offline eval scenarios + ~720 tests
-green; `mypy --strict`. What is *not* built and why → §16.1.
+**Status:** 12 FSM states, 11 tools (9 EHR-backed handlers + 2 intercepted),
+108 offline eval scenarios + ~715 tests green (`tests/` 544 + `tester/` 171);
+`mypy --strict`. What is *not* built and why → §16.1.
 
 Read order: this summary → §0.1 (what it does) → §0.2 (how the hard concerns are
 handled) → §4–§7 (topology, FSM, tools, dispatcher) → the rest as needed.
@@ -73,7 +74,7 @@ The exhaustive list lives in `docs/FEATURES.md`; the headline capabilities:
 | **Reliability** under provider failure | Tenacity retry + single fallback model; transport errors → typed `Err`, never a crashed turn; graceful total-failure canned line + reception mail; bot entrypoint env fail-fast | §12 |
 | **No hallucinated success** | EHR is source of truth; write-tools validate handles against `SessionMemory` (hallucinated id → `Err`, no HTTP); paired state-assertion + judge eval; offline tool-receipt gate | §6, §7, §11 |
 | **Identity / PII safety** | Identity gate; LLM never sees a UUID (handle redaction); console PII masking + audit redaction; SSRF-guarded EHR URL; mail filename class eliminated | §7, §8, §13 |
-| **Eval quality** | Paired state+judge (ADR 003); 107 offline scenarios; adversarial + messy-human (ASR-noise) suites; golden-trace replay | §11, `docs/tester.md` |
+| **Eval quality** | Paired state+judge (ADR 003); 108 offline scenarios; adversarial + messy-human (ASR-noise) suites; golden-trace replay | §11, `docs/tester.md` |
 | **Voice UX naturalness** | Barge-in truncation; clause-aware persona; clarify-don't-guess rule | §7, §10 |
 
 The **caller call UI** (F4) and the **mail + calendar** staff surface are
@@ -562,7 +563,9 @@ any `tool_ok`. See `docs/adr/003-paired-state-and-judge-eval.md`.
 
 ### Scenarios
 
-`evals/scenarios.py` defines 63 scenarios across these tag buckets:
+`evals/scenarios.py` defines 108 scenarios. The tag buckets below are
+**representative, not exhaustive** (a scenario can carry several tags); the
+canonical list is the file itself, run via `make mock-eval`:
 
 | Tag | Scenarios | What's tested |
 |---|---|---|
@@ -752,8 +755,9 @@ Active work the main branch does not yet reflect:
 - **F6 Mail + Calendar (handoff + booking-confirmation + safety-net) — SHIPPED
   (ADR 006, 2026-05-25).** No longer in-flight. Landed as: `State.HANDOFF`
   terminal holding state; `leave_message_for_front_desk` dispatcher-intercepted
-  tool; `MailStore` (three mail kinds: handoff / booking_confirmation /
-  bot_failed); `/frontdesk` router + SPA on the console uvicorn; `handed_off`
+  tool; `MailStore` (five mail kinds: handoff / booking_confirmation /
+  cancellation / reschedule / bot_failed — lifecycle parity added 2026-05-25,
+  commit `5185dfd`); `/frontdesk` router + SPA on the console uvicorn; `handed_off`
   outcome on the bus; stuck-detector safety-net (`_emit_safety_net_handoff`);
   booking-confirmation fire-and-forget (`_emit_booking_confirmation`); two new
   eval scenarios (`caller_requests_human`, `bot_stuck_triggers_handoff`). See
@@ -898,15 +902,16 @@ recorded in `CHANGELOG.md` and the relevant SOLUTION sections.
 ## 17. Future work (priority order)
 
 1. **Speculative race** (§14) — STT partials → speculative LLM kickoff.
-3. **STT/TTS multi-provider fallback** — blocked on pipecat #4139.
-4. **Streaming TTS** via ElevenLabs flush-after-each-clause.
-5. **OpenRouter as LLM gateway** — one env-var swap, 100+ models.
-6. **Audio smoke tests** with a real TTS → STT loop.
-7. **Continuous production eval** — 5–10 % sampling of live transcripts
+2. **STT/TTS multi-provider fallback** — blocked on pipecat #4139.
+3. **Streaming TTS** via ElevenLabs flush-after-each-clause.
+4. **OpenRouter as LLM gateway** — one env-var swap, 100+ models.
+5. **Audio smoke tests** with a real TTS → STT loop.
+6. **Continuous production eval** — 5–10 % sampling of live transcripts
    to the LLM judge for drift detection.
-8. **Pre-recorded "everything is on fire" TTS fallback** for the
+7. **Pre-recorded "everything is on fire" TTS fallback** for the
    double-failure case.
-9. **`AvailabilityCache`** with 60 s TTL in `repository.py`.
+8. **`AvailabilityCache`** with 60 s TTL in `repository.py`.
+9. **Property-based FSM fuzzer** (Hypothesis `RuleBasedStateMachine`) — §14.
 
 Already landed (was on this list): mock-eval offline mode, parallel
 eval runner, atomic reschedule, specialty filter, next-day forward
@@ -923,33 +928,56 @@ handling (TTSAudibleObserver + mark_last_assistant_interrupted, Wave 7)**.
   console bus wiring.
 - `src/prosper/flows.py` — state graph topology + per-state tool
   whitelist (plain data).
-- `src/prosper/tools.py` — 8 tool handlers + `TOOL_SCHEMAS` (OpenAI
+- `src/prosper/tools.py` — 9 tool handlers + `TOOL_SCHEMAS` (OpenAI
   function-calling shapes) + `HANDLERS` map.
 - `src/prosper/prompts.py` — `CLINIC_PERSONA`, per-state
   `TASK_MESSAGES`, `STATE_FILLERS`, `FALLBACK_LINES`. All caller-
   audible strings.
 - `src/prosper/llm.py` — `OpenAILLMAdapter` (implements
-  `LLMClientProtocol`); retry, fallback model, usage surfacing.
+  `LLMClientProtocol`); retry, fallback model, usage surfacing,
+  `classify_symptoms` triage call, per-request timeout.
 - `src/prosper/ehr_client.py` — `EHRClient` (httpx) with X-Request-Id
   threading + SSRF-validated base URL.
 - `src/prosper/result.py` — `Result[Ok, Err]` discriminated union.
+- `src/prosper/speculation.py` — fuzzy identity disambiguation
+  (`classify_find_result`) + `next_n_business_days` (speculative-race groundwork).
+- `src/prosper/observers.py` — `TTSAudibleObserver`: barge-in capture of the
+  audible TTS prefix, feeds `mark_last_assistant_interrupted`.
 - `src/prosper/observability/timing.py` — `TimingCollector` + JSON
   span logs.
 - `src/prosper/observability/redact.py` — `redact_pii`, `mask_name`,
   `mask_phone`.
-- `src/prosper/console/` — `events.py` (8 event types), `bus.py`
+- `src/prosper/console/` — `events.py` (9 event types), `bus.py`
   (bounded async queues + overflow drop), `sse.py`, `server.py`,
-  `audit.py`, `_utils.py`.
-- `src/prosper/bot.py` — Pipecat pipeline wiring, `DispatcherProcessor`,
-  SSRF guard, env fail-fast, lazy VAD import.
+  `audit.py` (JSONL writer + `tail_events` for follow/replay), `_utils.py`,
+  `static/` (operator console + `call/` caller UI).
+- `src/prosper/integrations/` — F6 staff tier: `mail.py` (`MailStore`,
+  unified `mail.db`, 5 kinds), `router.py` (`/frontdesk` router), `static/`
+  (Mail + Calendar SPA).
+- `src/prosper/bot.py` — Pipecat pipeline wiring, `DispatcherProcessor`
+  (transcript aggregation/debounce), SSRF guard, env fail-fast, lazy VAD
+  import, barge-in (`allow_interruptions`), telemetry/mail wiring.
 - `evals/` — `Scenario` / `StateExpectation` types, `PersonaSimulator`,
   judge, runner (parallel, baseline), CLI.
 - `evals/mock_llm.py` — deterministic mock LLM + persona scripts.
+- `tester/` — third test surface (F7): `receipt_gate.py` (tool-receipt
+  hallucination gate), `recorder.py`, `simulate.py`/`personas.py`/`live_sim.py`
+  (autonomous adversarial caller), `noise.py`/`clarification.py` (messy-human /
+  ASR-noise). See §11 + `docs/tester.md`.
+- `scripts/run_all.py` — one-command orchestrator: launches EHR + bot +
+  standing console/frontdesk together (the "deploy everything" entry).
+- `scripts/frontdesk_server.py` — always-on front-desk site (real `data/mail/`
+  + live EHR calendar; `--demo` for an isolated seeded copy).
+- `scripts/sim_call.py` — drive book/cancel/reschedule through the real
+  dispatcher + EHR + MailStore, printing the calendar + mail delta.
+- `scripts/scaffold_scenario.py` — scenario-from-transcript scaffolder.
+- `scripts/console_harness.py` — console smoke harness.
 - `scripts/bench.py` — EHR endpoint micro-bench.
 - `scripts/status.py` — one-shot repo health snapshot (`make status`).
-- `scripts/seed.py` — seed `data/ehr.db` (auto-runs on empty DB).
-- `docs/adr/001..004` — ADRs: hybrid FSM, separate EHR process, paired
-  eval, operator console.
+- `scripts/seed.py` — seed `data/ehr.db` (5-week slot grid + bulk appointments;
+  auto-runs on empty DB).
+- `docs/adr/001..006` — ADRs: hybrid FSM, separate EHR process, paired
+  eval, operator console, symptom triage, handoff state.
 - `docs/architecture.md` — ASCII process + FSM diagrams.
 - `docs/bench-results.md` — pinned bench snapshots.
 - `docs/glossary.md` — terminology cheat-sheet.
