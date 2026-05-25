@@ -167,6 +167,10 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
   ASR-error injectors) + `tester/clarification.py` (the `plowed_ahead_on_garble` contract).
 - `f8eae67` — messy-human sim, live arm: `Persona.noise_profile` garbles caller turns, simulator
   audits the bot re-prompted; 4 MESSY personas; folded into the violation tally + exit code.
+- `5185dfd` — **cancel + reschedule front-desk mail**: lifecycle parity with `booking_confirmation`.
+  `_emit_cancellation_notice` (provider/start recovered from `last_upcoming_appointments`) +
+  `_emit_reschedule_notice`; shared `_caller_identity()`/`_fire_mail()`; SPA rose/blue kinds;
+  +4 tests (`test_mail_lifecycle.py`). 5 mail kinds total.
 
 Open items for the human: `OPEN_QUESTIONS.md` (barge-in live verification, FUTURE 4.1
 cross-call provider memory, two-tier CHOOSE_INTENT routing authority).
