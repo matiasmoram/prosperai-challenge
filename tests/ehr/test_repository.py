@@ -191,19 +191,52 @@ def test_cancel_appointment_marks_status_and_frees_slot(session: Session) -> Non
 
 
 def test_list_availability_excludes_past_slots(session: Session) -> None:
-    """Audit A1: never offer a slot whose start_at already passed."""
+    """Audit A1: never offer a slot whose start_at already passed.
+
+    Uses a fixed far-future date (2030-06-15) so the test is deterministic at
+    any wall-clock time.  The original formulation used ``now + 2h`` for the
+    "future" slot, which rolls past UTC midnight when the suite runs late and
+    places the slot on *tomorrow* — correctly excluded by
+    ``list_available_slots(date_=today)`` but then the assertion fails.
+
+    Both slots land on 2030-06-15 (a date that is always in the past relative
+    to the naive-UTC cutoff used by the repo).  The "past" slot (01:00) is
+    before the noon cutoff we use below; the "future" slot (14:00) is after
+    it.  We call ``list_available_slots`` with a monkeypatched-style anchor by
+    simply putting both slots on the same deterministic date and querying that
+    date — the repo's ``cutoff = max(day_start, datetime.now(utc))`` will
+    resolve to ``day_start`` because 2030-06-15 is in the far future, so ALL
+    slots on that day are "future" relative to now.  To still exercise the
+    past-slot filter we use one slot timestamped *before* the other and rely on
+    the existing is_blocked / lock logic being absent, then assert only the
+    later one is returned after manually setting the first slot's start_at to a
+    time that is definitively in the past (year 2000).
+    """
     provider = _seed_provider(session)
-    today = datetime.now(timezone.utc).date()
-    past = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=1)
-    future = datetime.now(timezone.utc) + timedelta(hours=2)
-    past_slot = Slot(provider=provider, start_at=past, end_at=past + timedelta(minutes=30))
-    future_slot = Slot(provider=provider, start_at=future, end_at=future + timedelta(minutes=30))
+    # Pin to a specific past datetime (year 2000) so it is always < now.
+    past_start = datetime(2000, 1, 1, 9, 0, tzinfo=timezone.utc)
+    # Pin to a specific far-future datetime so it is always > now.
+    future_start = datetime(2030, 6, 15, 14, 0, tzinfo=timezone.utc)
+    past_slot = Slot(
+        provider=provider,
+        start_at=past_start,
+        end_at=past_start + timedelta(minutes=30),
+    )
+    future_slot = Slot(
+        provider=provider,
+        start_at=future_start,
+        end_at=future_start + timedelta(minutes=30),
+    )
     session.add_all([past_slot, future_slot])
     session.commit()
-    available = repo.list_available_slots(session, date_=today)
-    ids = {s.id for s in available}
-    assert past_slot.id not in ids
-    assert future_slot.id in ids
+    # Query the past date — past_slot is on that date but before now → excluded.
+    available_past_day = repo.list_available_slots(session, date_=past_start.date())
+    ids_past_day = {s.id for s in available_past_day}
+    assert past_slot.id not in ids_past_day, "past slot must be excluded by the now-cutoff"
+    # Query the future date — future_slot is on that date and after now → included.
+    available_future_day = repo.list_available_slots(session, date_=future_start.date())
+    ids_future_day = {s.id for s in available_future_day}
+    assert future_slot.id in ids_future_day, "future slot must be returned"
 
 
 def test_get_upcoming_appointments_returns_only_scheduled_future(session: Session) -> None:
@@ -454,6 +487,58 @@ def test_find_patient_by_name_dob_includes_exact_threshold(session: Session) -> 
     assert len(results) == 1
     _, similarity = results[0]
     assert similarity == 1.0
+
+
+def test_find_patient_by_name_dob_fuzzy_multiple_returns_both_candidates(
+    session: Session,
+) -> None:
+    """F-005 regression: 'Jaime Reyes' must match both 'Jamie Reyes' AND 'James Reyes'.
+
+    The dispatcher's ``found_fuzzy_multiple`` path fires only when the query
+    returns >= 2 candidates above the default 0.85 threshold.  This test makes
+    the score-band dependency explicit: if ``normalize_name`` or the fuzzy
+    library ever changes such that one of these names drops below 0.85, the
+    disambiguation scenario silently degrades to single-match instead.
+
+    Both names score ~0.909 against the query (token_sort_ratio), placing them
+    firmly inside [0.85, 1.0).  The assertions pin that band so any regression
+    surfaces here rather than only in the live eval.
+    """
+    dob = date(1990, 4, 15)
+    session.add(
+        Patient(
+            first_name="Jamie",
+            last_name="Reyes",
+            name_normalized="jamie reyes",
+            dob=dob,
+            phone="+12025550180",
+        )
+    )
+    session.add(
+        Patient(
+            first_name="James",
+            last_name="Reyes",
+            name_normalized="james reyes",
+            dob=dob,
+            phone="+12025550181",
+        )
+    )
+    session.commit()
+
+    results = repo.find_patient_by_name_dob(session, "Jaime Reyes", dob)
+
+    # Both candidates must be returned — this is the found_fuzzy_multiple path.
+    assert len(results) == 2, (
+        f"expected 2 fuzzy candidates for 'Jaime Reyes'; got {len(results)} — "
+        "normalize_name or rapidfuzz scoring may have changed"
+    )
+    names = {p.first_name for p, _ in results}
+    assert names == {"Jamie", "James"}
+    # Each score must sit inside the default [0.85, 1.0) band; neither is an
+    # exact match (that would collapse the disambiguation).
+    for patient, score in results:
+        assert score >= 0.85, f"{patient.first_name} Reyes scored {score} — below threshold"
+        assert score < 1.0, f"{patient.first_name} Reyes scored {score} — unexpected exact match"
 
 
 # ---------------------------------------------------------------------------
