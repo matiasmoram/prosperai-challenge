@@ -468,11 +468,34 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "Tell the system which thing the caller wants to do next so "
                 "the conversation moves to the right step. Call this as soon "
                 "as the caller's intent is clear in CHOOSE_INTENT — you cannot "
-                "navigate yourself. Pass intent='book' to schedule a new "
-                "appointment, 'cancel' to cancel one, 'reschedule' to move "
-                "one, or 'done' if the caller wants to end the call. If the "
-                "caller is ambiguous, ask ONE short clarifying question "
-                "instead of guessing — do not call this with a wrong intent."
+                "navigate yourself.\n\n"
+                "Classification rules (apply in order; first match wins):\n"
+                "- intent='reschedule': caller wants to MOVE or CHANGE an "
+                "existing appointment to a different time — key words: "
+                "'reschedule', 'move', 'change', 'switch', 'push back', "
+                "'different time', 'different day', 'shift', 'adjust'. "
+                "Reschedule keeps the visit but moves the slot; the old "
+                "appointment stays until confirmed.\n"
+                "- intent='cancel': caller wants to REMOVE an existing "
+                "appointment entirely and NOT replace it — key words: "
+                "'cancel', 'remove', 'delete', 'drop', 'take off', "
+                "'won't make it', 'can't make it', 'don't want it'. "
+                "Cancel means the appointment is gone with no new one.\n"
+                "- intent='book': caller wants to schedule a NEW appointment "
+                "they do not already have — key words: 'book', 'schedule', "
+                "'new appointment', 'see a doctor', 'get in', 'sign up'.\n"
+                "- intent='done': caller wants to end the call — "
+                "'goodbye', 'done', 'that's all', 'hang up'.\n\n"
+                "IMPORTANT: 'change my appointment', 'move my appointment', "
+                "'switch to a different time', 'push it back' → "
+                "ALWAYS use intent='reschedule', NEVER intent='cancel'. "
+                "Only use intent='cancel' when the caller explicitly says "
+                "they want to remove the appointment without rebooking.\n\n"
+                "If the caller's wording is genuinely ambiguous (e.g. 'do "
+                "something about my appointment', 'I need to deal with my "
+                "visit') ask ONE short clarifying question — 'Would you like "
+                "to reschedule that to a different time, or cancel it "
+                "entirely?' — and do NOT call this tool until they answer."
             ),
             "parameters": {
                 "type": "object",
@@ -480,7 +503,12 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                     "intent": {
                         "type": "string",
                         "enum": ["book", "cancel", "reschedule", "done"],
-                        "description": "The caller's current intent.",
+                        "description": (
+                            "The caller's intent. Use 'reschedule' for any "
+                            "move/change/switch/push-back phrasing. Use 'cancel' "
+                            "only when the caller explicitly wants to remove the "
+                            "appointment without a replacement."
+                        ),
                     },
                 },
                 "required": ["intent"],
@@ -716,8 +744,15 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                         "description": (
                             "The appointment to cancel. Pass the bracketed "
                             "number from the `get_upcoming_appointments` "
-                            "result — e.g. '1' for the first appointment "
-                            "in the list. Never invent UUIDs."
+                            "result — e.g. '1' for the first appointment, "
+                            "'2' for the second. Never invent UUIDs.\n"
+                            "If the caller identifies the appointment by "
+                            "day ('the Tuesday one'), time ('the 2pm one'), "
+                            "or provider ('the one with Dr. Chen'), match "
+                            "it to the start_at / provider_name in the "
+                            "numbered list and pass THAT number. If two or "
+                            "more appointments match the description, read "
+                            "them back and ask which one before calling."
                         ),
                     },
                     "reason": {"type": "string"},
@@ -744,9 +779,16 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                         "type": "string",
                         "description": (
                             "Bracketed handle of the existing appointment "
-                            "from the `get_upcoming_appointments` result — "
-                            "e.g. '1' for the first item. Never invent a "
-                            "UUID."
+                            "to move, from the `get_upcoming_appointments` "
+                            "result — e.g. '1' for the first item, '2' for "
+                            "the second. Never invent a UUID.\n"
+                            "If the caller identifies the appointment by "
+                            "day ('the Tuesday one'), time ('the 2pm one'), "
+                            "or provider ('the one with Dr. Chen'), match "
+                            "it to the start_at / provider_name in the "
+                            "numbered list and pass THAT number. If two or "
+                            "more appointments match the description, read "
+                            "them back and ask which one before calling."
                         ),
                     },
                     "slot_id": {

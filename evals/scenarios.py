@@ -3896,4 +3896,81 @@ SCENARIOS: list[Scenario] = [
         ],
         max_turns=14,
     ),
+    # Wave 9: reschedule-vs-cancel disambiguation
+    Scenario(
+        name="change_appointment_routes_to_reschedule",
+        tags=frozenset({"routing", "reschedule", "happy"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have one upcoming appointment. You want to MOVE it to a "
+            "different time — NOT cancel it. Open VERBATIM: 'Hi, I want to "
+            "change my appointment to a different time.' When asked for your "
+            "phone number, give 202-555-0100. When asked what you need, say "
+            "VERBATIM: 'I want to change my appointment.' When the bot asks "
+            "what new time works, say 'Can you move it to a bit later "
+            "tomorrow?'. When the bot reads back the new time, confirm "
+            "VERBATIM: 'yes, go ahead.' After the bot confirms the move, "
+            'end the call VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_existing_patient_with_appt_for_reschedule,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # Atomic reschedule: the appointment moves to a new slot but
+            # stays scheduled (status=active). Net active count is unchanged.
+            active_appointment_count_delta=0,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+                "list_availability_slots",
+                "reschedule_appointment",
+            ],
+            # The key assertion: vague "change" language must NEVER route to cancel.
+            forbidden_tool_calls=["cancel_appointment", "create_patient"],
+        ),
+        judge_criteria=[
+            "the bot routed the caller to RESCHEDULE, not CANCEL, on 'change my appointment'",
+            "the bot called reschedule_appointment (not cancel_appointment) to action the move",
+            "the bot confirmed the new time aloud before making the change",
+        ],
+        max_turns=14,
+    ),
+    # Wave 9: appointment pinpointing by provider description
+    Scenario(
+        name="pinpoint_appointment_by_provider",
+        tags=frozenset({"routing", "cancel", "pinpoint", "happy"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "You have TWO upcoming appointments: one with a therapist and one "
+            "with a dermatologist. You want to cancel ONLY the dermatologist "
+            "one. Open VERBATIM: 'Hi, I want to cancel one of my appointments.' "
+            "When asked for your phone, give 202-555-0100. When the bot asks "
+            "what you need, say VERBATIM: 'Cancel please.' When the bot reads "
+            "back a numbered list of your appointments, say VERBATIM: 'The one "
+            "with Dr. Skin please.' When the bot reads back the dermatology "
+            "appointment for confirmation, reply VERBATIM: 'yes, cancel that "
+            "one'. After the bot confirms the cancellation, end the call "
+            'VERBATIM: "thanks, goodbye."'
+        ),
+        setup=_setup_multi_specialty_existing_patient,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # One of Ada's two appointments is cancelled; the other remains.
+            active_appointment_count_delta=-1,
+            cancelled_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "get_upcoming_appointments",
+                "cancel_appointment",
+            ],
+            forbidden_tool_calls=["create_patient", "create_appointment"],
+        ),
+        judge_criteria=[
+            "the bot listed Ada's appointments with a numbered list before acting",
+            "the bot cancelled only the dermatology appointment, not the therapy one",
+            "the bot confirmed the specific appointment aloud before cancelling",
+        ],
+        max_turns=14,
+    ),
 ]

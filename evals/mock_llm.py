@@ -2774,6 +2774,63 @@ def _script_provider_choice_offered() -> list[LLMReply]:
     ]
 
 
+def _script_change_appointment_routes_to_reschedule() -> list[LLMReply]:
+    # Ada has 1 appointment + 3 free slots. Her CHOOSE_INTENT utterance uses
+    # vague change/move language ("I want to change my appointment") — the
+    # sort of phrase the human said must route to RESCHEDULE, never to CANCEL.
+    # The LLM uses route_intent(intent="reschedule") — exercising the
+    # tightened schema description (Wave 9 fix). Atomic reschedule fires → END.
+    # Asserts: route_intent fires with "reschedule", cancel_appointment NEVER
+    # fires, reschedule_appointment succeeds.
+    return [
+        _t("Hi, thanks for calling Prosper Health — how can I help?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        # found → CHOOSE_INTENT; ask what they need
+        _t("Got it, Ada — what can I do for you today?"),
+        # Caller says "I want to change my appointment" / "move it" — LLM
+        # must classify as reschedule, not cancel, per the tightened schema.
+        _tool("route_intent", intent="reschedule"),
+        # → RESCHEDULE_FLOW; get_upcoming returns 1 appt — stays in flow
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _t("Your visit is tomorrow at ten with Dr. Patel — what new time works for you?"),
+        # list new slots → CONFIRM_RESCHEDULE
+        _tool("list_availability_slots", date=_tomorrow_iso()),
+        _t("I can move you to ten-thirty with Dr. Patel — shall I go ahead?"),
+        # atomic reschedule → END; appointment_id "1" resolves via memory handles
+        _tool("reschedule_appointment", appointment_id="1", __use_first_slot__=True),
+        _t("All set — you're now at ten-thirty tomorrow with Dr. Patel. Have a great day."),
+    ]
+
+
+def _script_pinpoint_appointment_by_provider() -> list[LLMReply]:
+    # Ada has 2 appointments (a Therapist slot and a Dermatologist slot).
+    # The caller identifies which one to cancel by describing the provider:
+    # "the one with Dr. Skin" (the Dermatologist).
+    # The LLM must match "Dr. Skin" to appointment [2] in the numbered list
+    # from get_upcoming_appointments (per the tightened schema description)
+    # and pass "2" as appointment_id. cancel_appointment fires with index 1
+    # (_USE_UPCOMING_N=1). Asserts: exactly one cancellation, for the correct
+    # appointment (the derm one, not the therapy one).
+    return [
+        _t("Hi, thanks for calling Prosper Health — how can I help?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        # found → CHOOSE_INTENT; ask what they need
+        _t("Got it, Ada — what can I do for you today?"),
+        # CANCEL_FLOW: fetch both appointments → CONFIRM_CANCEL
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        # Bot reads back both: [1] Therapist with Dr. Therapy, [2] Derm with Dr. Skin
+        _t(
+            "You have two upcoming visits — [1] tomorrow at ten with Dr. Therapy "
+            "and [2] tomorrow at ten with Dr. Skin. Which one shall I cancel?"
+        ),
+        # Caller says "the one with Dr. Skin" → LLM maps to [2] → index 1.
+        _tool("cancel_appointment", appointment_id="__use_upcoming__", **{_USE_UPCOMING_N: 1}),
+        _t("Done — your dermatology visit with Dr. Skin has been cancelled. Have a great day."),
+    ]
+
+
 _BOT_SCRIPTS: dict[str, callable] = {
     "new_patient_books": _script_new_patient_books,
     "existing_patient_cancels": _script_existing_patient_cancels,
@@ -2914,6 +2971,9 @@ _BOT_SCRIPTS: dict[str, callable] = {
     "bot_stuck_triggers_handoff": _script_bot_stuck_triggers_handoff,
     # Wave 8: provider / doctor choice
     "provider_choice_offered": _script_provider_choice_offered,
+    # Wave 9: reschedule-vs-cancel disambiguation + appointment pinpointing
+    "change_appointment_routes_to_reschedule": _script_change_appointment_routes_to_reschedule,
+    "pinpoint_appointment_by_provider": _script_pinpoint_appointment_by_provider,
 }
 
 
@@ -3837,6 +3897,25 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         "Dr. Sharma please.",
         # CONFIRM_BOOK: bot reads back Sharma slot; caller confirms
         "yes that's right.",
+    ],
+    # Wave 9: reschedule-vs-cancel disambiguation
+    "change_appointment_routes_to_reschedule": [
+        "Hi, I want to change my appointment to a different time.",
+        "202-555-0100.",
+        # CHOOSE_INTENT: vague "change" language — must route to reschedule, not cancel.
+        "I want to change my appointment.",
+        # RESCHEDULE_FLOW: bot asks for new time
+        "Can you move it to a bit later tomorrow?",
+        # CONFIRM_RESCHEDULE: bot reads back the new slot; caller confirms
+        "yes, go ahead.",
+    ],
+    # Wave 9: appointment pinpointing by provider description
+    "pinpoint_appointment_by_provider": [
+        "Hi, I want to cancel one of my appointments.",
+        "202-555-0100.",
+        "Cancel please.",
+        # Bot reads back numbered list; caller identifies by provider name
+        "The one with Dr. Skin please.",
     ],
 }
 
