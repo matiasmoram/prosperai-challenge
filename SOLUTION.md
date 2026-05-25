@@ -590,9 +590,19 @@ Active work the main branch does not yet reflect:
   booking-confirmation fire-and-forget (`_emit_booking_confirmation`); two new
   eval scenarios (`caller_requests_human`, `bot_stuck_triggers_handoff`). See
   §5, §6, §8.1, ADR 006.
-- **Interruption design.** `docs/research/interruption_design.md` —
-  research notes on how to handle the caller talking over the bot's
-  TTS. Not yet wired.
+- **Barge-in / interruption handling — SHIPPED (Wave 7, 2026-05-25).**
+  `TTSAudibleObserver` (`src/prosper/observers.py`) sits between the TTS
+  service and `transport.output` in the Pipecat pipeline. On
+  `InterruptionFrame` it flushes the accumulated `TTSTextFrame` buffer and
+  calls `dispatcher.mark_last_assistant_interrupted(spoken_text)`, which
+  truncates `history[-1]` to the audible portion and appends
+  `" [INTERRUPTED by user]"` so the next LLM call sees an honest timeline.
+  `CLINIC_PERSONA` already contains the annotation explanation. VAD is tuned
+  for barge-in (`confidence=0.35`, `min_volume=0.15`, `start_secs=0.1`).
+  Unit tests in `tests/test_barge_in.py` cover partial-text truncation,
+  empty-buffer `[NOT HEARD]` prefix, idempotency, empty-history no-op, and
+  non-assistant-last-turn no-op (N-002). Real-time pipeline behaviour
+  (live audio InterruptionFrame) requires staging verification.
 - **Speculative race.** `docs/research/speculative_race.md` — research
   notes on overlapping STT partials with speculative LLM kickoff to
   reduce TTFT. Not yet wired.
@@ -698,8 +708,7 @@ shipped); the async prefetch itself is held. **Scope (light warm-path vs full
 
 ## 17. Future work (priority order)
 
-1. **Interruption handling** (§14) — caller talking over TTS.
-2. **Speculative race** (§14) — STT partials → speculative LLM kickoff.
+1. **Speculative race** (§14) — STT partials → speculative LLM kickoff.
 3. **STT/TTS multi-provider fallback** — blocked on pipecat #4139.
 4. **Streaming TTS** via ElevenLabs flush-after-each-clause.
 5. **OpenRouter as LLM gateway** — one env-var swap, 100+ models.
@@ -713,7 +722,8 @@ shipped); the async prefetch itself is held. **Scope (light warm-path vs full
 Already landed (was on this list): mock-eval offline mode, parallel
 eval runner, atomic reschedule, specialty filter, next-day forward
 scan, operator console event stream, **mini-LLM specialty router +
-hybrid `route_intent` navigation (ADR 005)**.
+hybrid `route_intent` navigation (ADR 005)**, **barge-in / interruption
+handling (TTSAudibleObserver + mark_last_assistant_interrupted, Wave 7)**.
 
 ## 18. File map
 

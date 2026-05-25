@@ -24,6 +24,19 @@ Format: `Q — context · INTERIM CHOICE made · how to change it`.
 
 ---
 
+## Needs LIVE verification (can't reproduce offline)
+
+- **Barge-in / voice overlap (req 7).** You reported it "mal handleado". The
+  investigation found the infrastructure already fully wired + correct
+  (TTSAudibleObserver → `mark_last_assistant_interrupted` truncates the assistant
+  history to what was actually spoken → `turn_interrupted` event; VAD tuned;
+  persona annotated). Added 6 unit tests for the truncation logic. BUT the
+  real-time barge-in path (VAD → InterruptionFrame → observer) cannot run in CI
+  (no audio). INTERIM: shipped as-is + unit-tested. ACTION FOR YOU: call the bot,
+  interrupt mid-sentence, and report what specifically feels wrong (bot keeps
+  talking? repeats the cut-off line? ignores you?) — that symptom is needed to fix
+  any real runtime issue, since it can't be reproduced offline.
+
 ## Deferred / flagged (not done — your call)
 
 - **route_intent ambiguity (F7 sim finding).** An ambiguous "I want to change my
