@@ -325,6 +325,20 @@ does beyond the FSM:
    iterations — exhaustion drops a `FALLBACK_LINES["llm_loop_exhausted"]`
    line so the caller never hears dead air.
 
+6. **Offer-then-confirm gate (`_READ_BEFORE_WRITE`).** A write tool
+   (`create_appointment` / `cancel_appointment` / `reschedule_appointment`)
+   is **blocked if the read that produced its options
+   (`list_availability_slots` / `get_upcoming_appointments`) ran in the same
+   caller turn** — tracked via a per-turn `reads_this_turn` set. The caller
+   must hear the options and pick on a *later* turn before the irreversible
+   write commits. This is enforced in the dispatcher, not the prompt: a model
+   that tried to list-and-book in one shot once booked a slot the caller never
+   chose (live). The slot-id guard (item 3) only stops *hallucinated* ids; this
+   stops *unconfirmed* ones. The redacted slot summary also shows a spread
+   across the day (first 3 + last 3 with real handle indices + the time span),
+   not just the earliest 6 — otherwise the afternoon was invisible and the bot
+   wrongly reported "only morning slots".
+
 `bot.py` wires the dispatcher into Pipecat via `DispatcherProcessor`,
 which consumes `TranscriptionFrame` directly (the default
 `LLMUserAggregator` adds a 1 s aggregation tax we don't want; see the

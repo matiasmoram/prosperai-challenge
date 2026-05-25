@@ -177,6 +177,13 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `7a285e3` — **AvailabilityCache adjudicated spec** (FUTURE 1.3, council-decided): full 4-tuple
   key, repo-layer placement, evict-on-commit (reschedule=2 dates, multi-slot=all chained dates),
   TTL 10s default-off, DB-409 stays the guard. Documented, not built (remote-EHR-only payoff).
+- `9a07885` — **date + filler fixes (prompt half, from live log)**: dated 10-day weekday table in
+  the `[CONTEXT]` anchor (LLM was resolving 'next Monday' to a Sunday date); neutral fillers (CONFIRM_*/
+  REGISTER no longer say 'Booking that now' while the caller is declining).
+- `11ec5bc` — **offer-then-confirm gate + afternoon slots (architecture half, from live log)**:
+  `_READ_BEFORE_WRITE` blocks a write in the same turn its read ran (model had booked an unconfirmed
+  morning slot on 'afternoon any day' — a real 201); slot summary now shows a day-spanning spread, not
+  just the earliest 6 (afternoon was invisible). +`tests/test_offer_before_commit.py`. ARCHITECTURE §7.
 - `f769584` — **barge-in stress suite** (`tests/test_barge_in_stress.py`, 26 cases): interrupt at
   every point of a reply, 10 consecutive interrupted turns, rapid repeats, spurious bursts, interrupt
   +choppy barge-in (words not lost), interrupt+silence. + `47c78fc` docs: SOLUTION (plain) +
