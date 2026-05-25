@@ -35,6 +35,8 @@ from fastapi import FastAPI
 from prosper.console.audit import AuditJSONLWriter
 from prosper.console.bus import ConsoleBus
 from prosper.console.sse import build_router, mount_static_on_app
+from prosper.integrations.mail import MailStore
+from prosper.integrations.router import CalendarFetch, build_frontdesk_router
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +66,19 @@ def _resolve_host() -> str:
     return os.environ.get("PROSPER_CONSOLE_HOST", _DEFAULT_HOST)
 
 
-def build_app(bus: ConsoleBus, audit: AuditJSONLWriter) -> FastAPI:
+def build_app(
+    bus: ConsoleBus,
+    audit: AuditJSONLWriter,
+    *,
+    store: MailStore | None = None,
+    calendar_fetch: CalendarFetch | None = None,
+) -> FastAPI:
     """Build the FastAPI app that backs the operator console.
 
     The bus + audit instances are injected so tests can construct an
-    isolated app without touching module-level state.
+    isolated app without touching module-level state. When ``store`` and
+    ``calendar_fetch`` are both supplied, the ``/frontdesk`` router is
+    included in the same app (staff-only, full-PII tier).
     """
     app = FastAPI(title="Prosper · Operator Console", docs_url=None, redoc_url=None)
 
@@ -92,6 +102,10 @@ def build_app(bus: ConsoleBus, audit: AuditJSONLWriter) -> FastAPI:
     # Mount static AFTER include_router so the `/console/static` path
     # resolves correctly (the router itself sits under `/console`).
     mount_static_on_app(app)
+    # Optional front-desk surface: include only when both store and calendar
+    # fetcher are supplied (bot.py gates this on the console being enabled).
+    if store is not None and calendar_fetch is not None:
+        app.include_router(build_frontdesk_router(store, calendar_fetch))
     return app
 
 
@@ -102,6 +116,8 @@ async def run(
     *,
     host: str | None = None,
     port: int | None = None,
+    store: MailStore | None = None,
+    calendar_fetch: CalendarFetch | None = None,
 ) -> AsyncIterator[None]:
     """Run the console uvicorn server in the background for the context.
 
@@ -114,8 +130,11 @@ async def run(
     audit writer is also attached to the bus inside the same context, so
     a single ``async with run(bus, audit):`` covers both the live SSE
     stream AND the durable JSONL write side.
+
+    When ``store`` and ``calendar_fetch`` are supplied, the ``/frontdesk``
+    staff surface is included in the same app. See ``build_app``.
     """
-    app = build_app(bus, audit)
+    app = build_app(bus, audit, store=store, calendar_fetch=calendar_fetch)
     resolved_host = host or _resolve_host()
     resolved_port = port if port is not None else _resolve_port()
     config = uvicorn.Config(

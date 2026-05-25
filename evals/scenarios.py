@@ -3749,4 +3749,57 @@ SCENARIOS: list[Scenario] = [
         ],
         max_turns=20,
     ),
+    # F6 handoff scenarios
+    Scenario(
+        name="caller_requests_human",
+        tags=frozenset({"handoff", "f6"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Once identified, tell the bot VERBATIM: 'I just need to speak to a "
+            "real person please.' When the bot confirms it has passed the message "
+            "to the front desk, say VERBATIM: 'thanks, goodbye.'"
+        ),
+        setup=_setup_existing_no_appts,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=0,
+            expected_terminal_state="HANDOFF",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "leave_message_for_front_desk",
+            ],
+            forbidden_tool_calls=["create_appointment", "cancel_appointment"],
+        ),
+        judge_criteria=[
+            "the bot confirmed it passed a message to the front desk and someone will follow up",
+            "the bot did not attempt to book or cancel anything",
+            "the bot did not claim it completed an action it cannot do",
+        ],
+        max_turns=10,
+    ),
+    Scenario(
+        name="bot_stuck_triggers_handoff",
+        tags=frozenset({"handoff", "safety_net", "f6", "adversarial"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Ask to cancel your appointment. If the bot appears stuck or confused, "
+            "politely keep asking to cancel. After the bot says it could not help, "
+            "say VERBATIM: 'okay, goodbye.'"
+        ),
+        setup=_setup_existing_one_appt,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            # Stuck loop never completes a cancel — appointment stays active.
+            active_appointment_count_delta=0,
+            expected_terminal_state="END",
+            # The loop-exhaustion safety net fires (bot_failed mail) but no
+            # successful tool call completes.
+            forbidden_tool_calls=["cancel_appointment", "create_appointment"],
+        ),
+        judge_criteria=[
+            "the bot acknowledged it could not complete the request",
+            "the bot did not falsely confirm that the appointment was cancelled",
+        ],
+        max_turns=12,
+    ),
 ]

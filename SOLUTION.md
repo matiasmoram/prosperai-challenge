@@ -71,7 +71,7 @@ bot. See `docs/adr/002-separate-ehr-process.md`.
 `src/prosper/flows.py` is plain data: a `State` enum, an `ALLOWED_TOOLS`
 dict, a `TRANSITIONS` map. No framework. The dispatcher owns the runtime.
 
-States today (11):
+States today (12):
 
 ```
 GREETING
@@ -81,15 +81,21 @@ IDENTIFY_PATIENT  ──no_match──►  REGISTER_PATIENT
 CHOOSE_INTENT  ◄──────────────────────────┘
   │
   ├─ wants_book ─────► BOOK_FLOW ─slot_chosen──► CONFIRM_BOOK ─booked──► END
-  │                                                  ↑ abort
+  │   │                                              ↑ abort
   ├─ wants_cancel ────► CANCEL_FLOW ─appt_chosen──► CONFIRM_CANCEL ─cancelled──► END
-  │                       │                              │ cancelled_then_rebook
-  │                       └─ nothing_to_cancel ──► END   └──► BOOK_FLOW
-  │                                                  ↑ abort
+  │   │                  │                              │ cancelled_then_rebook
+  │   │                  └─ nothing_to_cancel ──► END   └──► BOOK_FLOW
+  │   │                                              ↑ abort
   ├─ wants_reschedule ─► RESCHEDULE_FLOW ─slot_chosen─► CONFIRM_RESCHEDULE ─rescheduled──► END
-  │                       │                              ↑ abort
-  │                       └─ nothing_to_reschedule ──► END
-  └─ goodbye ─► END                                 (every non-END state has a goodbye edge)
+  │   │                  │                              ↑ abort
+  │   │                  └─ nothing_to_reschedule ──► END
+  │   │
+  │   └─ needs_human (from any of the four flow states above)
+  │              ↓
+  │           HANDOFF ─handed_off──► END   (one final LLM confirmation turn; no tools)
+  │              └─ goodbye ──────► END
+  │
+  └─ goodbye ─► END                       (every non-END state has a goodbye edge)
 ```
 
 Per-state tool whitelist enforced by the dispatcher (not by prompt
@@ -100,13 +106,14 @@ instructions — the LLM literally cannot see tools outside the whitelist):
 | GREETING | (none) |
 | IDENTIFY_PATIENT | `find_patient_by_phone`, `find_patient_by_name_dob` |
 | REGISTER_PATIENT | `create_patient` |
-| CHOOSE_INTENT | `route_intent` (internal — dispatcher-intercepted, no EHR call) |
-| BOOK_FLOW | `list_availability_slots`, `suggest_specialty` |
-| CANCEL_FLOW | `get_upcoming_appointments` |
-| RESCHEDULE_FLOW | `get_upcoming_appointments`, `list_availability_slots` |
+| CHOOSE_INTENT | `route_intent` *(internal)*, `leave_message_for_front_desk` *(internal)* |
+| BOOK_FLOW | `list_availability_slots`, `suggest_specialty`, `leave_message_for_front_desk` *(internal)* |
+| CANCEL_FLOW | `get_upcoming_appointments`, `leave_message_for_front_desk` *(internal)* |
+| RESCHEDULE_FLOW | `get_upcoming_appointments`, `list_availability_slots`, `leave_message_for_front_desk` *(internal)* |
 | CONFIRM_BOOK | `create_appointment` |
 | CONFIRM_CANCEL | `cancel_appointment` |
 | CONFIRM_RESCHEDULE | `reschedule_appointment` |
+| HANDOFF | (none) |
 | END | (none) |
 
 `route_intent` is whitelisted in CHOOSE_INTENT but **dispatcher-intercepted**
@@ -117,6 +124,19 @@ the edge. It has no `HANDLERS` entry and fires no EHR call. `suggest_specialty`
 (BOOK_FLOW) is a real handler backed by the triage mini-LLM (ADR 005, §6); its
 `medical_emergency` Err drives the hard `BOOK_FLOW → END` edge so the booking
 tools are physically unmounted on a red flag (audit F-011).
+
+`leave_message_for_front_desk` is whitelisted in all four post-identity flow
+states but is **also dispatcher-intercepted** (absent from `HANDLERS`; same
+pattern as `route_intent`). When the LLM calls it, the dispatcher builds a
+`MailMessage` from `SessionMemory` identity (never from LLM-supplied arguments,
+preventing spoofing), writes it to `MailStore`, and fires the `needs_human →
+HANDOFF` transition. HANDOFF is a terminal holding state: the dispatcher
+suppresses further tool loops (same as END) but generates one final LLM turn so
+the bot can speak a warm handoff confirmation before the call ends. The
+`_outcome_published` flag on the dispatcher prevents a double `outcome` event
+when the subsequent `goodbye → END` edge fires. Stuck-detector safety-net: when
+the inner LLM loop exhausts all 4 iterations, `_emit_safety_net_handoff` fires a
+`bot_failed` mail so staff are alerted even when no `needs_human` edge triggered.
 
 If the LLM tries a tool outside the whitelist, the dispatcher records a
 `tool_rejected` transcript entry and feeds a synthetic error
@@ -129,15 +149,16 @@ choice; `docs/architecture.md` for the diagram.
 ## 6. Tools
 
 Nine EHR-backed handlers in `src/prosper/tools.py` (the `HANDLERS` map), plus
-`route_intent` — whitelisted but dispatcher-intercepted, no handler, no EHR call
-(see §5). All handlers return `Result[Ok[dict], Err]` (`src/prosper/result.py`).
-The `Err.code` strings are **public eval contract** — scenarios assert on them,
-so renaming a code is a breaking change and must update `evals/scenarios.py` in
-the same commit.
+`route_intent` and `leave_message_for_front_desk` — both whitelisted but
+dispatcher-intercepted, no handler, no EHR call (see §5). All handlers return
+`Result[Ok[dict], Err]` (`src/prosper/result.py`). The `Err.code` strings are
+**public eval contract** — scenarios assert on them, so renaming a code is a
+breaking change and must update `evals/scenarios.py` in the same commit.
 
 | Tool | Whitelisted in | Err codes |
 |---|---|---|
 | `route_intent` *(internal — no handler)* | CHOOSE_INTENT | — (dispatcher validates the FSM edge) |
+| `leave_message_for_front_desk` *(internal — no handler)* | CHOOSE_INTENT, BOOK_FLOW, CANCEL_FLOW, RESCHEDULE_FLOW | — (dispatcher writes MailMessage from SessionMemory, fires `needs_human → HANDOFF`) |
 | `find_patient_by_phone` | IDENTIFY | `ehr_error` |
 | `find_patient_by_name_dob` | IDENTIFY | `dob_unparseable`, `ehr_error` |
 | `create_patient` | REGISTER | `dob_unparseable`, `patient_exists`, `ehr_error` |
@@ -258,6 +279,55 @@ Wiring:
 
 Design spec: `docs/superpowers/specs/2026-05-20-operator-console-design.md`
 + `docs/adr/004-operator-console-event-stream.md`.
+
+## 8.1. Front-desk mail + calendar surface (F6 — shipped Wave 4)
+
+`src/prosper/integrations/` is a separate trust tier from the masked
+operator-console bus — it holds full patient PII for staff, not redacted
+telemetry for an operator screen.
+
+### MailStore
+
+`integrations/mail.py` (`MailStore`) appends `MailMessage` JSON records to
+`data/mail/<session>.jsonl` (one file per session). Three mail kinds:
+
+| Kind | Trigger | Source of identity |
+|---|---|---|
+| `handoff` | LLM calls `leave_message_for_front_desk` → `needs_human` transition | `SessionMemory` exclusively (never LLM args) |
+| `booking_confirmation` | `create_appointment` returns `Ok` → `_emit_booking_confirmation` | `SessionMemory.identified_patient` |
+| `bot_failed` | dispatcher inner LLM loop exhausts 4 iterations → `_emit_safety_net_handoff` | `SessionMemory.identified_patient` |
+
+All writes are **fire-and-forget** via `_inflight_publishes` (same strong-ref
+pattern as console-bus publishes). A write failure is logged but never
+propagates to the call path.
+
+### /frontdesk router + SPA
+
+`integrations/router.py` exposes a `/frontdesk` FastAPI router served on the
+console uvicorn (`:7861`). It reads the full-PII `MailStore` — patient name,
+phone, call summary, callback flag — for clinic receptionists returning calls.
+This is a deliberate higher-trust tier than the masked operator-console bus.
+
+In the demo the console uvicorn binds to `127.0.0.1` (loopback-only) so no
+inbound internet path exists. In production this endpoint must sit behind
+authentication (clinic SSO or shared-secret header) before being exposed beyond
+localhost. See `SECURITY.md` for the threat note.
+
+The router is wired in `console/server.py::build_app`; it is included only when
+both `store` and `calendar_fetch` are supplied (guarded in `bot.py` under the
+console-enabled gate). `bot.py` constructs a `MailStore()` and an async
+`calendar_fetch` closure (thin wrapper over `EHRClient`) and passes both to
+`Dispatcher` and `build_frontdesk_router`.
+
+### handed_off outcome on the bus
+
+When `needs_human` fires the `HANDOFF` transition, `_publish_outcome` emits
+`outcome = "handed_off"` on the console bus. The `_outcome_published` flag
+prevents a second emission when the subsequent `goodbye → END` would otherwise
+fire again. `tester/receipt_gate.py` classifies `handed_off` in `NO_CLAIM` — it
+asserts a mail write, not an EHR tool receipt.
+
+ADR: `docs/adr/006-handoff-state.md`.
 
 ## 9. EHR
 
@@ -511,6 +581,15 @@ Active work the main branch does not yet reflect:
   (CHOOSE_INTENT, dispatcher-intercepted) landed alongside it. See §5, §6, ADR
   005. Scenarios `symptom_routes_to_gp`, `symptom_ambiguous_followup`,
   `direct_specialty_skips_triage` pin it; mocked offline by `MockTriageClient`.
+- **F6 Mail + Calendar (handoff + booking-confirmation + safety-net) — SHIPPED
+  (ADR 006, 2026-05-25).** No longer in-flight. Landed as: `State.HANDOFF`
+  terminal holding state; `leave_message_for_front_desk` dispatcher-intercepted
+  tool; `MailStore` (three mail kinds: handoff / booking_confirmation /
+  bot_failed); `/frontdesk` router + SPA on the console uvicorn; `handed_off`
+  outcome on the bus; stuck-detector safety-net (`_emit_safety_net_handoff`);
+  booking-confirmation fire-and-forget (`_emit_booking_confirmation`); two new
+  eval scenarios (`caller_requests_human`, `bot_stuck_triggers_handoff`). See
+  §5, §6, §8.1, ADR 006.
 - **Interruption design.** `docs/research/interruption_design.md` —
   research notes on how to handle the caller talking over the bot's
   TTS. Not yet wired.

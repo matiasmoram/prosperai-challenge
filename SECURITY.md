@@ -36,5 +36,16 @@ The controls actually in the codebase today:
   misconfigured deploy cannot half-start in an exploitable state. See
   `src/prosper/bot.py`.
 
+- **`/frontdesk` full-PII surface (F6).** The `/frontdesk` router
+  (`src/prosper/integrations/router.py`) reads the full-PII `MailStore` (patient
+  name, phone, and call summary). This is a deliberate higher-trust tier than the
+  masked operator-console bus — a clinic receptionist legitimately needs real
+  contact details to return a callback. **In the demo it is loopback-only
+  (console uvicorn binds to `127.0.0.1` by default)**; no inbound internet path
+  exists. In production, this endpoint must be behind authentication (e.g.,
+  clinic SSO or a shared secret header) before exposing it beyond localhost.
+  The `MailStore` root defaults to `data/mail/` and must not be served as a
+  static file directory.
+
 Controls explicitly **not** shipped (interview scope): mTLS to the EHR,
 HIPAA-grade audit logging, per-tenant rate limiting, signed deploys.

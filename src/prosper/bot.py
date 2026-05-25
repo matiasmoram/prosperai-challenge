@@ -303,6 +303,7 @@ def _build_dispatcher(
     openai_client: AsyncOpenAI | None = None,
     *,
     bus: ConsoleBus | None = None,
+    mail_store: Any = None,
 ) -> Dispatcher:
     """Construct the dispatcher used for one call.
 
@@ -311,6 +312,10 @@ def _build_dispatcher(
     console. When tests or the eval runner build the dispatcher with no
     bus, every publish site is a no-op — backwards compatible by
     construction.
+
+    ``mail_store`` is an optional ``MailStore`` instance for F6 front-desk
+    handoffs and booking confirmations. When ``None`` (the default when the
+    console is disabled), all mail writes are no-ops.
     """
     client: Any = openai_client or AsyncOpenAI()
     ehr_base = _validated_ehr_url()
@@ -320,7 +325,7 @@ def _build_dispatcher(
         model=os.environ.get("PROSPER_BOT_MODEL", "gpt-4o-mini"),
         fallback_model=os.environ.get("PROSPER_BOT_FALLBACK_MODEL"),
     )
-    return Dispatcher(llm=llm, ehr_client=ehr, bus=bus)
+    return Dispatcher(llm=llm, ehr_client=ehr, bus=bus, mail_store=mail_store)
 
 
 async def _startup_health_check() -> None:
@@ -354,17 +359,28 @@ async def _startup_health_check() -> None:
 async def _maybe_console_ctx(
     bus: ConsoleBus | None,
     audit: AuditJSONLWriter | None,
+    *,
+    mail_store: Any = None,
+    calendar_fetch: Any = None,
 ) -> AsyncIterator[None]:
     """Run the embedded console server iff a bus + audit were built.
 
     Keeps `run_bot` linear — without this helper the `async with` stack
     would need a conditional that is awkward to express in Python's
     `async with`.
+
+    When ``mail_store`` and ``calendar_fetch`` are both supplied, the
+    ``/frontdesk`` router is included in the same uvicorn app.
     """
     if bus is None or audit is None:
         yield
         return
-    async with run_console_server(bus, audit):
+    async with run_console_server(
+        bus,
+        audit,
+        store=mail_store,
+        calendar_fetch=calendar_fetch,
+    ):
         yield
 
 
@@ -385,11 +401,31 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
     console_enabled = os.environ.get("PROSPER_CONSOLE_ENABLED", "1") == "1"
     bus: ConsoleBus | None = None
     audit: AuditJSONLWriter | None = None
+    # F6: MailStore + calendar fetcher — constructed only when the console is
+    # enabled so evals/tests never touch the filesystem.
+    mail_store_inst: Any = None
+    calendar_fetch_fn: Any = None
     if console_enabled:
+        from prosper.integrations.mail import MailStore
+
         bus = ConsoleBus()
         audit = AuditJSONLWriter()
+        mail_store_inst = MailStore()
+        # Bind the EHR client (not yet opened at this point) via a closure.
+        # The async context manager for ehr is entered below; using a closure
+        # here ensures we capture the same ehr instance used by the dispatcher.
+        ehr_base_for_cal = _validated_ehr_url()
+        _ehr_for_cal = EHRClient.for_http(ehr_base_for_cal)
 
-    dispatcher = _build_dispatcher(bus=bus)
+        async def _calendar_fetch(from_date: Any, to_date: Any) -> Any:
+            async with _ehr_for_cal:
+                return await _ehr_for_cal.list_appointments_in_range(
+                    from_date=from_date, to_date=to_date
+                )
+
+        calendar_fetch_fn = _calendar_fetch
+
+    dispatcher = _build_dispatcher(bus=bus, mail_store=mail_store_inst)
     # Own the EHR httpx client via async-with so it's released even if the
     # browser drops mid-call and on_client_disconnected never fires (e.g.
     # process killed by SIGTERM, transport crash, exception during pipeline
@@ -402,7 +438,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
     # console is disabled (tests), `_maybe_console_ctx` yields a no-op.
     async with (
         dispatcher._ehr,  # bot owns this httpx client's lifecycle for the call
-        _maybe_console_ctx(bus, audit),
+        _maybe_console_ctx(
+            bus,
+            audit,
+            mail_store=mail_store_inst,
+            calendar_fetch=calendar_fetch_fn,
+        ),
     ):
         dispatcher_processor = DispatcherProcessor(dispatcher)
 

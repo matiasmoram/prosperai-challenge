@@ -35,6 +35,7 @@ def test_every_state_has_a_task_message() -> None:
         "CONFIRM_CANCEL",
         "CONFIRM_RESCHEDULE",
         "END",
+        "HANDOFF",
     }
     assert set(TASK_MESSAGES) == expected
 

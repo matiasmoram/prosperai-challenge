@@ -327,7 +327,13 @@ async def run_scenario(
             try:
                 bot_text = await dispatcher.start()
                 turns = 0
-                while dispatcher.state is not State.END and turns < scenario.max_turns:
+                # HANDOFF is a terminal holding state — the bot speaks its
+                # callback confirmation then the FSM will reach END on the
+                # next goodbye. Stop driving turns once we reach either
+                # terminal so mock scenarios don't run off the end of their
+                # scripted replies.
+                _terminal_states = (State.END, State.HANDOFF)
+                while dispatcher.state not in _terminal_states and turns < scenario.max_turns:
                     user_text = await sim.reply_to(bot_text)
                     if _is_persona_stop(user_text):
                         # The persona just hung up. Reflect that in the

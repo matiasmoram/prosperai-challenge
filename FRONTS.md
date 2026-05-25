@@ -23,7 +23,7 @@ paste its **owned files** list as the `files:` scope.
 | **F3** | **Conversation design** | How the bot *talks* / what it *asks* — persona, copy, triage prompts | `src/prosper/prompts.py` |
 | **F4** | **Call frontend** | WebRTC caller UI (the phone-call page) | `src/prosper/console/static/call/**` (`index.html`, `call.js`, `call.css`) |
 | **F5** | **Operator console** | Live-monitoring dashboard + event bus | `src/prosper/console/{server,bus,sse,events,audit,_utils}.py`, `console/static/{console.js,index.html}`, `tests/console/**` |
-| **F6** | **Mail + Calendar** *(PLANNED — not built)* | Outbound email + calendar sync after a booking | `src/prosper/integrations/**` *(new package, see §F6 spec)* |
+| **F6** | **Mail + Calendar** *(BUILT — Wave 4, 2026-05-25)* | Staff handoff inbox + booking-confirmation mail + EHR calendar | `src/prosper/integrations/mail.py`, `integrations/router.py`, `integrations/static/**`; dispatcher mail wiring (`dispatcher.py`); console wiring (`console/server.py`, `bot.py`); `docs/adr/006-handoff-state.md` |
 | **F7** | **Evals / QA** | Scenario + test suite + hallucination harness — cross-cutting | `evals/**`, `tests/**` (except `tests/ehr`, `tests/console`), `tester/**`, `docs/testing/**` |
 
 ### Serving topology (so F4/F5 don't confuse ports)
@@ -90,52 +90,49 @@ files). Add F3 only if it stays in `prompts.py`.
 
 ---
 
-## §F6 spec — Mail + Calendar (planned, not yet built)
+## §F6 — Mail + Calendar (SHIPPED Wave 4, 2026-05-25)
 
-Motivating feature: after a confirmed booking, email the caller a confirmation
-and push a calendar event. **There is no email/calendar code in the repo today**
-(verified: never existed in git history, not deleted, not in `FUTURE.md`).
-
-### Files (new)
+### What was built
 
 ```
 src/prosper/integrations/
   __init__.py
-  mail.py       # NotificationSender Protocol + NoopMailer + (later) SMTP/SendGrid
-  calendar.py   # CalendarSync Protocol + NoopCalendar + (later) Google Calendar
-tests/integrations/
-  test_mail.py
-  test_calendar.py
+  mail.py       # MailStore (JSONL append), MailMessage dataclass, make_message()
+  router.py     # /frontdesk FastAPI router + SPA (full-PII staff tier)
+  static/       # front-desk SPA assets (served at /frontdesk/static)
 ```
 
-### Seam — dispatcher post-booking hook (NOT a new LLM tool)
+Spine additions (F2 seam — one-time, additive):
+- `flows.py`: `State.HANDOFF`, `INTERNAL_TOOLS` updated, `leave_message_for_front_desk`
+  whitelisted in CHOOSE_INTENT / BOOK_FLOW / CANCEL_FLOW / RESCHEDULE_FLOW, `needs_human`
+  transition edges, `handed_off → END` + `goodbye → END` from HANDOFF.
+- `tools.py`: `LEAVE_MESSAGE_TOOL` constant + `leave_message_for_front_desk` entry in
+  `TOOL_SCHEMAS`; absent from `HANDLERS` (dispatcher-intercepted).
+- `dispatcher.py`: `mail_store: MailStore | None` param; `_handle_leave_message`;
+  `_emit_booking_confirmation`; `_emit_safety_net_handoff`; `_outcome_published` dedup;
+  `handed_off` outcome; HANDOFF treated same as END for tool-loop termination.
+- `console/server.py`: `build_app` + `run` gain `store` + `calendar_fetch` params;
+  `/frontdesk` router conditionally included.
+- `bot.py`: constructs `MailStore` + async `calendar_fetch`; passes both to `Dispatcher`
+  and `build_frontdesk_router` under the console-enabled gate.
 
-Recommended design: make mail/calendar an **automatic side-effect**, not an LLM
-tool. After `create_appointment` returns `Ok` **and** the confirmation read
-succeeds, the dispatcher fires the integrations. This keeps it **off the spine**
-(no `tools.py`/`flows.py`/`ALLOWED_TOOLS` edit) — so F6 only touches its own
-package + one call site in `dispatcher.py` (F2 seam S3).
+### Design properties (as shipped)
 
-Mandatory properties (mirror the console bus, `CLAUDE.md` telemetry rule):
+- **Fire-and-forget, never breaks the call path.** `_inflight_publishes` strong-ref set
+  keeps tasks alive; every write wrapped in try/except; failure logged, not surfaced.
+- **No added latency.** `asyncio.create_task` schedules the write off the turn; the LLM
+  never waits for SMTP/JSONL.
+- **Identity never from LLM args.** `_handle_leave_message` reads `SessionMemory`
+  exclusively — the LLM supplies only `category`, `summary`, `callback_wanted`.
+- **`/frontdesk` is loopback-only in demo.** Must be behind auth in production. See
+  `SECURITY.md` + `docs/adr/006-handoff-state.md`.
 
-- **Fire-and-forget, never breaks the call path.** Wrap every send in
-  `try/except`; a mail/calendar failure must never surface to the caller or
-  abort the booking. The EHR write is the source of truth; notification is best-effort.
-- **Async, no added latency.** Schedule on the loop; do not `await` a slow SMTP
-  round-trip inside the turn (hard rule 7).
-- **PII-safe.** Reuse `observability/redact.py` for any logging; secrets via env
-  (`PROSPER_SMTP_*`, `PROSPER_GCAL_*`), never committed; respect the SSRF posture
-  in `SECURITY.md`.
+### Eval coverage
 
-Alternative (only if product wants the bot to *offer* "want me to email you?"):
-expose it as an LLM tool → then it **does** hit S1 (registry + `ALLOWED_TOOLS`
-+ eval scenario). Decide before building; default to the side-effect design.
-
-### Tests
-
-- Unit: a `FakeMailer`/`FakeCalendar` that records calls; assert the hook fires
-  on `Ok` booking and **swallows** a raised exception without propagating.
-- If it becomes an LLM tool: add an `evals/scenarios.py` scenario (hard rule 4).
+- `caller_requests_human` (tag: handoff, f6) — happy-path `leave_message_for_front_desk`
+  → HANDOFF → confirmation turn.
+- `bot_stuck_triggers_handoff` (tag: handoff, safety_net, f6, adversarial) — loop
+  exhaustion → `bot_failed` mail → END.
 
 ---
 

@@ -49,7 +49,10 @@ RECEIPT_REQUIRED: dict[str, str] = {
 }
 
 # Outcomes that assert nothing happened -> no receipt required.
-NO_CLAIM: frozenset[str] = frozenset({"refused", "abandoned"})
+# ``handed_off`` asserts a mail write (not an EHR write), so it has no
+# tool_call_end receipt in the FSM sense — the mail write is fire-and-forget
+# and not surfaced as a ``tool_call_end`` event on the console bus.
+NO_CLAIM: frozenset[str] = frozenset({"refused", "abandoned", "handed_off"})
 
 
 @dataclass(frozen=True, slots=True)

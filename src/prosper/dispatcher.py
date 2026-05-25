@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import re
 import time
 import uuid
@@ -30,12 +31,15 @@ from prosper.console.bus import ConsoleBus
 from prosper.console.events import EventType, make_event
 from prosper.ehr_client import EHRClient
 from prosper.flows import ALLOWED_TOOLS, TRANSITIONS, State
+from prosper.integrations.mail import MailStore, make_message
 from prosper.observability.redact import mask_name, mask_phone
 from prosper.observability.timing import TimingCollector
 from prosper.prompts import CLINIC_PERSONA, FALLBACK_LINES, build_task_message
 from prosper.result import Err, Ok, Result, is_err, is_ok
 from prosper.speculation import build_disambiguation_message, classify_find_result
-from prosper.tools import HANDLERS, ROUTE_INTENT_TOOL, TOOL_SCHEMAS
+from prosper.tools import HANDLERS, LEAVE_MESSAGE_TOOL, ROUTE_INTENT_TOOL, TOOL_SCHEMAS
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -383,6 +387,7 @@ class Dispatcher:
         ehr_client: EHRClient,
         session_id: str | None = None,
         bus: ConsoleBus | None = None,
+        mail_store: MailStore | None = None,
     ) -> None:
         """Build a dispatcher.
 
@@ -398,6 +403,12 @@ class Dispatcher:
                 ``docs/superpowers/specs/2026-05-20-operator-console-design.md``
                 §3.3. When ``None`` (tests, eval runner), every publish
                 site is a no-op — the dispatcher behaves exactly as before.
+            mail_store: Optional full-PII mail store for the front-desk surface.
+                When supplied, handoff events and booking confirmations write a
+                ``MailMessage`` via fire-and-forget tasks on
+                ``self._inflight_publishes``. When ``None`` (tests, eval runner
+                without F6 wiring), every mail write is a no-op — the
+                dispatcher behaves exactly as before.
         """
         self._llm = llm
         self._ehr = ehr_client
@@ -435,6 +446,11 @@ class Dispatcher:
         # asyncio implementation detail can GC the task before completion
         # and emit "Task was destroyed but it is pending" warnings.
         self._inflight_publishes: set[asyncio.Task[None]] = set()
+        # Full-PII mail store for front-desk handoffs + booking confirmations.
+        self._mail: MailStore | None = mail_store
+        # First terminal outcome wins — guards against emitting two `outcome`
+        # events (e.g. a `handed_off` followed by a `goodbye`-triggered END).
+        self._outcome_published: bool = False
 
     def _publish(self, type_: EventType, payload: dict[str, Any]) -> None:
         """Fire-and-forget publish of a `ConsoleEvent` to the operator bus.
@@ -675,6 +691,11 @@ class Dispatcher:
                 # disposes). Intercept here so it never reaches HANDLERS.
                 if call.name == ROUTE_INTENT_TOOL:
                     result = self._handle_route_intent(call)
+                elif call.name == LEAVE_MESSAGE_TOOL:
+                    # Handoff tool: intercepted because it needs SessionMemory +
+                    # MailStore, not the EHR client. Identity comes from the
+                    # verified caller, not the LLM args (audit A3).
+                    result = await self._handle_leave_message(call)
                 else:
                     result = await self._execute_tool(call)
                 self._record_tool_result(call.name, result, tool_call_id=call.id)
@@ -682,14 +703,14 @@ class Dispatcher:
 
             msgs = self._messages_for_llm()
             tools = [TOOL_SCHEMAS[name] for name in sorted(ALLOWED_TOOLS[self.state])]
-            if self.state is State.END:
+            if self.state in (State.END, State.HANDOFF):
                 # The reply that called the just-executed tool was generated
-                # BEFORE its result existed — at END its text can wrongly
+                # BEFORE its result existed — at END/HANDOFF its text can wrongly
                 # claim a write failed on a success (seen live: "there was an
                 # issue with the booking" after a 201). Generate ONE final
-                # confirmation turn (END exposes no tools) so the model speaks
-                # from the recorded Ok result. Fall back to the prior text if
-                # the model returns nothing (e.g. a mock script with no
+                # confirmation turn (END/HANDOFF expose no tools) so the model
+                # speaks from the recorded Ok result. Fall back to the prior text
+                # if the model returns nothing (e.g. a mock script with no
                 # trailing line).
                 async with self.timing.measure(
                     phase="llm",
@@ -717,6 +738,9 @@ class Dispatcher:
             # would stall. Inject a graceful recovery line so the next user
             # turn can drive the conversation forward, and record the event
             # in the transcript so eval reviewers can spot it.
+            # Also fire a best-effort `bot_failed` mail to alert staff that
+            # this caller needs a human follow-up.
+            self._emit_safety_net_handoff()
             if not reply.text:
                 self.transcript.append({"kind": "llm_loop_exhausted", "state": self.state.value})
                 reply = LLMReply(text=FALLBACK_LINES["llm_loop_exhausted"])
@@ -858,6 +882,126 @@ class Dispatcher:
         )
         self._transition(label)
         return Ok(value={"routed_to": intent})
+
+    async def _handle_leave_message(self, call: ToolCall) -> Result[dict[str, Any]]:
+        """Record a front-desk handoff; identity from memory, not the LLM.
+
+        Whitelisted but intercepted (no HANDLERS entry) — it needs
+        SessionMemory + MailStore, not the EHR client. Returns Ok so the FSM
+        advances to HANDOFF even when no mail store is injected (tests/evals);
+        a store write failure is logged and downgraded to Ok so the call path
+        never breaks — the caller still gets the verbal hand-off.
+        """
+        args = dict(call.arguments)
+        patient = self.memory.identified_patient or {}
+        first = str(patient.get("first_name") or "")
+        last = str(patient.get("last_name") or "")
+        name = f"{first} {last}".strip() or "(unknown)"
+        phone = str(patient.get("phone") or "(unknown)")
+        category = str(args.get("category") or "other")
+        summary = str(args.get("summary") or "")
+        callback = bool(args.get("callback_wanted", False))
+        self.transcript.append(
+            {
+                "kind": "handoff",
+                "category": category,
+                "summary": summary,
+                "callback_wanted": callback,
+            }
+        )
+        if self._mail is not None:
+            msg = make_message(
+                session_id=self.session_id,
+                kind="handoff",
+                to_label="reception@prosper.health",
+                subject=f"Callback — {name}",
+                body=(
+                    f"Category: {category}\n"
+                    f"Callback wanted: {'yes' if callback else 'no'}\n\n"
+                    f"{summary}"
+                ),
+                patient_name=name,
+                patient_phone=phone,
+                category=category,
+            )
+            try:
+                await self._mail.write(msg)
+            except OSError:
+                logger.exception("mail write failed (session=%s)", self.session_id)
+        return Ok(value={"status": "message_left", "category": category})
+
+    def _emit_safety_net_handoff(self) -> None:
+        """Last-resort handoff when the inner LLM loop exhausts (bot is stuck).
+
+        Dispatcher-driven, so it fires even when the LLM is the failing
+        component. Fire-and-forget via ``_inflight_publishes``: a write failure
+        is swallowed. Identity is best-effort from SessionMemory.
+        """
+        if self._mail is None:
+            return
+        patient = self.memory.identified_patient or {}
+        name = (
+            f"{patient.get('first_name', '')} {patient.get('last_name', '')}".strip()
+            or "(unknown — see transcript)"
+        )
+        phone = str(patient.get("phone") or "(unknown)")
+        msg = make_message(
+            session_id=self.session_id,
+            kind="bot_failed",
+            to_label="reception@prosper.health",
+            subject=f"Assistant could not complete — {name}",
+            body=(
+                f"The assistant got stuck in state {self.state.value} and could not "
+                f"finish the caller's request. Please follow up."
+            ),
+            patient_name=name,
+            patient_phone=phone,
+            category="bot_failed",
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._mail.write(msg))
+        self._inflight_publishes.add(task)
+        task.add_done_callback(self._inflight_publishes.discard)
+
+    def _emit_booking_confirmation(self, appt: dict[str, Any]) -> None:
+        """Fire-and-forget caller booking-confirmation 'email' after Ok.
+
+        Off-spine side-effect (no tool, no FSM edit): mirrors FRONTS.md §F6.
+        A write failure is swallowed — the EHR booking is the source of truth,
+        the confirmation is best-effort and must never break the call path.
+        """
+        if self._mail is None:
+            return
+        patient = self.memory.identified_patient or {}
+        first = str(patient.get("first_name") or "")
+        last = str(patient.get("last_name") or "")
+        name = f"{first} {last}".strip() or "(unknown)"
+        phone = str(patient.get("phone") or "(unknown)")
+        provider = str(appt.get("provider_name") or "your provider")
+        start = str(appt.get("start_at") or "")
+        msg = make_message(
+            session_id=self.session_id,
+            kind="booking_confirmation",
+            to_label=name,
+            subject="Your appointment is confirmed",
+            body=(
+                f"Hi {name}, your appointment with {provider} is confirmed"
+                + (f" for {start}" if start else "")
+                + ". Reply to reschedule."
+            ),
+            patient_name=name,
+            patient_phone=phone,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._mail.write(msg))
+        self._inflight_publishes.add(task)
+        task.add_done_callback(self._inflight_publishes.discard)
 
     @staticmethod
     def _filter_handler_kwargs(handler: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -1248,6 +1392,7 @@ class Dispatcher:
         # hard stop. Route to END so the booking tools are physically
         # unmounted; the LLM still sees the Err message instructing the 911
         # redirect, but it can no longer book even if it ignores the guidance.
+        # Emergency check is FIRST so emergencies never become handoffs.
         if (
             self.state is State.BOOK_FLOW
             and tool_name == "suggest_specialty"
@@ -1255,6 +1400,15 @@ class Dispatcher:
             and result.code == "medical_emergency"
         ):
             self._transition("medical_emergency")
+            return
+        # Front-desk handoff: leave_message_for_front_desk Ok → HANDOFF.
+        if (
+            tool_name == LEAVE_MESSAGE_TOOL
+            and is_ok(result)
+            and self.state
+            in (State.CHOOSE_INTENT, State.BOOK_FLOW, State.CANCEL_FLOW, State.RESCHEDULE_FLOW)
+        ):
+            self._transition("needs_human")
             return
         if self.state is State.IDENTIFY_PATIENT and tool_name in (
             "find_patient_by_phone",
@@ -1326,6 +1480,7 @@ class Dispatcher:
         elif self.state is State.CONFIRM_BOOK and tool_name == "create_appointment":
             if is_ok(result):
                 self._transition("booked")
+                self._emit_booking_confirmation(result.value)
         elif (
             self.state is State.CONFIRM_CANCEL
             and tool_name == "cancel_appointment"
@@ -1370,7 +1525,7 @@ class Dispatcher:
             "state_change",
             {"from_state": prev_state, "to_state": dst.value, "trigger": label},
         )
-        if dst is State.END:
+        if dst in (State.END, State.HANDOFF):
             self._publish_outcome(label)
 
     async def _prefetch_upcoming_on_choose_intent(self) -> None:
@@ -1409,16 +1564,18 @@ class Dispatcher:
         self.memory.upcoming_appointments_prefetched = True
 
     def _publish_outcome(self, trigger_label: str) -> None:
-        """Emit the `outcome` event when the call has just reached END.
+        """Emit the `outcome` event when the call has just reached END or HANDOFF.
 
-        Four outcome categories — chosen so a clinic-analytics dashboard
-        can answer the four questions that actually matter:
+        Five outcome categories — chosen so a clinic-analytics dashboard
+        can answer the five questions that actually matter:
 
         - ``booked``      — `_transition` fired with label ``booked``.
         - ``cancelled``   — `_transition` fired with label ``cancelled``.
         - ``rescheduled`` — `_transition` fired with label ``rescheduled``
                             (CONFIRM_RESCHEDULE → END). A completed move is
                             a positive outcome, NOT an abandoned call.
+        - ``handed_off``  — `_transition` fired with label ``needs_human``
+                            (→ HANDOFF). A staff follow-up has been arranged.
         - ``refused``     — the bot reached a confirmation state and the
                             caller declined (the LLM steered us through
                             CONFIRM_BOOK / CONFIRM_CANCEL / CONFIRM_RESCHEDULE
@@ -1433,8 +1590,17 @@ class Dispatcher:
         The distinction matters: "refused" implies an offer was made and
         declined (a UX or trust signal); "abandoned" is a generic drop.
         Confusing them poisons clinic dashboards.
+
+        Guards against double-emission: a `handed_off` → END sequence would
+        fire ``_publish_outcome`` twice without the ``_outcome_published``
+        flag; the second call is a no-op.
         """
-        if trigger_label == "booked":
+        if self._outcome_published:
+            return
+        self._outcome_published = True
+        if trigger_label == "needs_human":
+            outcome = "handed_off"
+        elif trigger_label == "booked":
             outcome = "booked"
         elif trigger_label == "cancelled":
             outcome = "cancelled"

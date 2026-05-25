@@ -341,6 +341,14 @@ TASK_MESSAGES = {
         "else?' and do NOT re-open booking or cancellation; the call is "
         "ending. Do NOT call any tools."
     ),
+    "HANDOFF": (
+        "[STATE: HANDOFF] You have passed this caller's request to the "
+        "front-desk team. In one warm, short sentence, tell them the message "
+        "has been passed along and someone will call them back shortly — then "
+        "say a brief, friendly goodbye. "
+        "Do NOT book, cancel, reschedule, or look anything up. "
+        "The handoff is complete."
+    ),
 }
 
 
@@ -375,6 +383,14 @@ STATE_FILLERS: dict[str, str] = {
 FALLBACK_LINES = {
     "llm_loop_exhausted": "Hmm, I lost track for a moment — could you repeat that?",
     "dispatcher_crash": "Sorry, I didn't catch that — could you say it again?",
+    "stuck_handoff": (
+        "I'm having trouble completing this over the phone — I've flagged it "
+        "for our front desk, and someone will follow up with you shortly."
+    ),
+    "stuck_handoff_no_contact": (
+        "I'm sorry I wasn't able to help with this call. Please call us back "
+        "and our front desk team can assist you directly."
+    ),
 }
 
 

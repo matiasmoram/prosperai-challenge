@@ -2635,6 +2635,62 @@ def _script_new_patient_cancels_immediately_after_register() -> list[LLMReply]:
     ]
 
 
+def _script_caller_requests_human() -> list[LLMReply]:
+    # Ada is identified via phone. She immediately asks for a human.
+    # Dispatcher intercepts leave_message_for_front_desk → HANDOFF.
+    # The runner stops at HANDOFF (terminal holding state).
+    return [
+        # GREETING
+        _t("Hi, thanks for calling Prosper Health — how can I help today?"),
+        # IDENTIFY_PATIENT: ask for phone
+        _t("Sure — what's the best phone number to reach you under?"),
+        # IDENTIFY_PATIENT: phone search → Ada found → CHOOSE_INTENT
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        # CHOOSE_INTENT: ask intent
+        _t("Got it, Ada — how can I help you today?"),
+        # CHOOSE_INTENT: caller says "speak to a real person" → leave_message
+        _tool(
+            "leave_message_for_front_desk",
+            category="other",
+            summary="Caller requested to speak to a human member of staff.",
+            callback_wanted=True,
+        ),
+        # HANDOFF: bot speaks the callback confirmation line
+        _t(
+            "I've passed that to our front desk team — someone will call you back "
+            "shortly. Thank you for calling Prosper Health."
+        ),
+    ]
+
+
+def _script_bot_stuck_triggers_handoff() -> list[LLMReply]:
+    # Ada is identified. She asks to cancel. The bot enters CANCEL_FLOW and
+    # gets stuck: get_upcoming_appointments keeps failing (we return it from
+    # the LLM script but the EHR returns an ok result — however the mock LLM
+    # keeps re-calling it past the 4-call dedup limit). We simulate a loop
+    # exhaust by having the bot call the same tool 5 times; the dispatcher
+    # fires _emit_safety_net_handoff in the loop-exhaustion else-branch.
+    # The scenario's expected_terminal_state is "END" because after loop
+    # exhaustion the state stays at CANCEL_FLOW (not HANDOFF) — the safety
+    # net fires a mail write, not a state transition.
+    return [
+        _t("Hi, thanks for calling Prosper Health — book or cancel today?"),
+        _t("What's the best phone number to find you under?"),
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        # CHOOSE_INTENT: Ada says cancel → CANCEL_FLOW
+        _t("Got it, Ada — book, reschedule, or cancel?"),
+        # CANCEL_FLOW: 5 identical tool calls (> 2 dedup limit → blocked → loop exhausts)
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        _tool("get_upcoming_appointments", patient_id="__use_patient_id__"),
+        # Loop exhaustion → dispatcher injects fallback line + emits safety_net mail
+        # Script underrun from here — dispatcher emits the llm_loop_exhausted fallback
+        _end(),  # force END via sentinel after the stuck loop scenario
+    ]
+
+
 _BOT_SCRIPTS: dict[str, callable] = {
     "new_patient_books": _script_new_patient_books,
     "existing_patient_cancels": _script_existing_patient_cancels,
@@ -2768,6 +2824,9 @@ _BOT_SCRIPTS: dict[str, callable] = {
     ),
     "book_flow_cancel_demand_stays_book": _script_book_flow_cancel_demand_stays_book,
     "phone_retracted_fallback_to_name_dob": _script_phone_retracted_fallback_to_name_dob,
+    # F6 handoff scenarios
+    "caller_requests_human": _script_caller_requests_human,
+    "bot_stuck_triggers_handoff": _script_bot_stuck_triggers_handoff,
 }
 
 
@@ -3649,6 +3708,23 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         # CHOOSE_INTENT: immediately asks to reschedule (just registered).
         "Reschedule please.",
         "ok, nothing to move. goodbye.",
+    ],
+    # F6 handoff scenarios
+    "caller_requests_human": [
+        "Hi, I'd like some help.",
+        "202-555-0100.",
+        # CHOOSE_INTENT: ask for a real person
+        "I just need to speak to a real person please.",
+        # HANDOFF: bot confirms → caller says thanks + goodbye
+        "thanks, goodbye.",
+    ],
+    "bot_stuck_triggers_handoff": [
+        "Hi, I need to cancel my appointment.",
+        "202-555-0100.",
+        "Cancel please.",
+        # Bot loops and gets stuck — persona keeps prompting
+        "Please just cancel my appointment.",
+        "okay, goodbye.",
     ],
 }
 

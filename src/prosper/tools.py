@@ -32,6 +32,13 @@ ToolHandler = Callable[..., Awaitable[Result[dict[str, Any]]]]
 # FSM state, not the EHR. Named here so dispatcher + tests share one string.
 ROUTE_INTENT_TOOL: str = "route_intent"
 
+# Front-desk handoff tool. Whitelisted in ``flows.ALLOWED_TOOLS`` for the four
+# post-identity flow states but deliberately ABSENT from ``HANDLERS`` — the
+# dispatcher intercepts it (``Dispatcher._handle_leave_message``) because it
+# needs ``SessionMemory`` (identity comes from the verified caller, not the LLM
+# args) and the injected ``MailStore``, not the EHR client.
+LEAVE_MESSAGE_TOOL: str = "leave_message_for_front_desk"
+
 # Defensive bounds for any parsed date used downstream — DOBs and availability
 # query dates alike. Catches obviously-wrong values (year 9999 typos, dateutil
 # fuzzy-parser inventing 1990 from a stray digit) before they hit the DB.
@@ -756,6 +763,55 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    # Dispatcher-intercepted tool: whitelisted so the LLM can call it, but
+    # ABSENT from ``HANDLERS`` — the dispatcher handles it internally using
+    # ``SessionMemory`` + ``MailStore`` (see ``Dispatcher._handle_leave_message``).
+    "leave_message_for_front_desk": {
+        "type": "function",
+        "function": {
+            "name": "leave_message_for_front_desk",
+            "description": (
+                "Hand the caller off to the human front desk by leaving a "
+                "message for staff to follow up. Call this ONLY for things "
+                "you cannot do yourself: prescription refills, "
+                "insurance/billing questions, lab results/referrals/records, "
+                "or when the caller explicitly asks to speak to a person. "
+                "Do NOT call this for booking, cancelling, or rescheduling "
+                "— do those yourself. NEVER call this for a medical "
+                "emergency; for emergencies tell the caller to call 911 "
+                "immediately. The patient's contact details are attached "
+                "automatically from the verified caller."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "prescription",
+                            "insurance_billing",
+                            "records",
+                            "medical_followup",
+                            "other",
+                        ],
+                        "description": "Which kind of request this is.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": (
+                            "One short sentence for the front desk. "
+                            "Paraphrase the caller's request; do not invent."
+                        ),
+                    },
+                    "callback_wanted": {
+                        "type": "boolean",
+                        "description": "True if the caller wants someone to call them back.",
+                    },
+                },
+                "required": ["category", "summary", "callback_wanted"],
+            },
+        },
+    },
 }
 
 
@@ -776,6 +832,7 @@ HANDLERS: dict[str, ToolHandler] = {
 # evals) can reach the canonical defaults without re-importing prompts.py.
 __all__ = [
     "HANDLERS",
+    "LEAVE_MESSAGE_TOOL",
     "ROUTE_INTENT_TOOL",
     "SPECIALTY_DURATION_TABLE",
     "TOOL_SCHEMAS",

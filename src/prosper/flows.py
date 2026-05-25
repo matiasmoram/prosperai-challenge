@@ -22,6 +22,9 @@ class State(str, enum.Enum):
     CONFIRM_BOOK = "CONFIRM_BOOK"
     CONFIRM_CANCEL = "CONFIRM_CANCEL"
     CONFIRM_RESCHEDULE = "CONFIRM_RESCHEDULE"
+    # Terminal state: caller has been handed off to the human front desk.
+    # Reached via the `needs_human` transition from any post-identity flow state.
+    HANDOFF = "HANDOFF"
     END = "END"
 
 
@@ -36,16 +39,31 @@ ALLOWED_TOOLS: dict[State, set[str]] = {
     # caller's intent and the dispatcher validates the edge (see
     # ``Dispatcher._handle_route_intent``). It is whitelisted here but handled
     # internally — it has no EHR handler in ``HANDLERS`` (see ``INTERNAL_TOOLS``).
-    State.CHOOSE_INTENT: {"route_intent"},
-    State.BOOK_FLOW: {"list_availability_slots", "suggest_specialty"},
-    State.CANCEL_FLOW: {"get_upcoming_appointments"},
+    # ``leave_message_for_front_desk`` is whitelisted in the four post-identity
+    # flow states but handled internally (no EHR call, needs SessionMemory +
+    # MailStore). See ``INTERNAL_TOOLS`` and ``Dispatcher._handle_leave_message``.
+    State.CHOOSE_INTENT: {"route_intent", "leave_message_for_front_desk"},
+    State.BOOK_FLOW: {
+        "list_availability_slots",
+        "suggest_specialty",
+        "leave_message_for_front_desk",
+    },
+    State.CANCEL_FLOW: {"get_upcoming_appointments", "leave_message_for_front_desk"},
     # Reschedule needs BOTH lookups in one state so the bot can pick the
     # old appointment AND the new slot before committing. The atomic
     # ``reschedule_appointment`` tool then fires in CONFIRM_RESCHEDULE.
-    State.RESCHEDULE_FLOW: {"get_upcoming_appointments", "list_availability_slots"},
+    State.RESCHEDULE_FLOW: {
+        "get_upcoming_appointments",
+        "list_availability_slots",
+        "leave_message_for_front_desk",
+    },
     State.CONFIRM_BOOK: {"create_appointment"},
     State.CONFIRM_CANCEL: {"cancel_appointment"},
     State.CONFIRM_RESCHEDULE: {"reschedule_appointment"},
+    # HANDOFF is terminal: the caller has been handed off to the front desk.
+    # No tools are available — the bot speaks the HANDOFF task message then
+    # the FSM advances to END on the next goodbye.
+    State.HANDOFF: set(),
     State.END: set(),
 }
 
@@ -55,7 +73,9 @@ ALLOWED_TOOLS: dict[State, set[str]] = {
 # call them, but ``Dispatcher._llm_turn`` intercepts them before ``_execute_tool``.
 # Kept here so both the dispatcher (interception) and ``bot._should_emit_filler``
 # (which must not predict latency for a tool that fires none) share one source.
-INTERNAL_TOOLS: frozenset[str] = frozenset({"route_intent"})
+# ``leave_message_for_front_desk`` is intercepted because it needs SessionMemory +
+# the injected MailStore rather than the EHR client.
+INTERNAL_TOOLS: frozenset[str] = frozenset({"route_intent", "leave_message_for_front_desk"})
 
 
 TRANSITIONS: Mapping[State, Mapping[str, State]] = {
@@ -70,6 +90,7 @@ TRANSITIONS: Mapping[State, Mapping[str, State]] = {
         "wants_book": State.BOOK_FLOW,
         "wants_cancel": State.CANCEL_FLOW,
         "wants_reschedule": State.RESCHEDULE_FLOW,
+        "needs_human": State.HANDOFF,
         "goodbye": State.END,
     },
     State.BOOK_FLOW: {
@@ -80,11 +101,13 @@ TRANSITIONS: Mapping[State, Mapping[str, State]] = {
         # for a caller in a medical emergency — the 911 redirect is then a
         # hard FSM guarantee, not just prompt guidance (audit F-011).
         "medical_emergency": State.END,
+        "needs_human": State.HANDOFF,
         "goodbye": State.END,
     },
     State.CANCEL_FLOW: {
         "appointment_chosen": State.CONFIRM_CANCEL,
         "nothing_to_cancel": State.END,
+        "needs_human": State.HANDOFF,
         "goodbye": State.END,
     },
     State.RESCHEDULE_FLOW: {
@@ -92,6 +115,7 @@ TRANSITIONS: Mapping[State, Mapping[str, State]] = {
         "slot_chosen": State.CONFIRM_RESCHEDULE,
         # No upcoming appointments to move — wrap up gracefully.
         "nothing_to_reschedule": State.END,
+        "needs_human": State.HANDOFF,
         "goodbye": State.END,
     },
     State.CONFIRM_BOOK: {
@@ -110,6 +134,12 @@ TRANSITIONS: Mapping[State, Mapping[str, State]] = {
         # Backed out of confirmation — let the caller pick a different
         # appointment or slot inside RESCHEDULE_FLOW.
         "abort": State.RESCHEDULE_FLOW,
+        "goodbye": State.END,
+    },
+    # HANDOFF is terminal but has one more hop — the bot speaks its callback
+    # confirmation line then the call ends when the caller says goodbye.
+    State.HANDOFF: {
+        "handed_off": State.END,
         "goodbye": State.END,
     },
     State.END: {},
