@@ -218,3 +218,80 @@ async def test_concurrent_writes_same_session_do_not_interleave(tmp_path: Path) 
     for line in raw:
         # If the lock failed, a line would be a half-spliced JSON blob.
         ConsoleEvent.from_json(line)
+
+
+# ---- live-tail (`tail_events`) — backs the SSE follow endpoint -------------
+
+
+@pytest.mark.asyncio
+async def test_tail_events_missing_file_returns_empty(tmp_path: Path) -> None:
+    """Tailing a session before its first event is written is a no-op.
+
+    The follower starts polling the instant the call begins; the first event
+    may not have flushed yet. That must yield no events and not advance the
+    cursor, so the very first event is delivered on a later poll.
+    """
+    writer = AuditJSONLWriter(root=tmp_path)
+    events, next_line = await writer.tail_events("never-written", from_line=0)
+    assert events == []
+    assert next_line == 0
+
+
+@pytest.mark.asyncio
+async def test_tail_events_incremental_delivery(tmp_path: Path) -> None:
+    """Each poll returns only the lines appended since the prior `next_line`.
+
+    Simulates the follow loop against a file the writer keeps appending to:
+    first poll gets the backlog, a second immediate poll gets nothing, and a
+    poll after a fresh write gets exactly the new event.
+    """
+    writer = AuditJSONLWriter(root=tmp_path)
+    await writer.write(_tick(ts=1.0))
+    await writer.write(_tick(ts=2.0))
+
+    batch1, cursor = await writer.tail_events("s1", from_line=0)
+    assert [e.ts for e in batch1] == [1.0, 2.0]
+    assert cursor == 2
+
+    # No new lines → nothing delivered, cursor unchanged.
+    batch2, cursor = await writer.tail_events("s1", from_line=cursor)
+    assert batch2 == []
+    assert cursor == 2
+
+    # A new write appears on the next poll.
+    await writer.write(_tick(ts=3.0))
+    batch3, cursor = await writer.tail_events("s1", from_line=cursor)
+    assert [e.ts for e in batch3] == [3.0]
+    assert cursor == 3
+    await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_tail_events_torn_final_line_is_retried(tmp_path: Path) -> None:
+    """A final line without a trailing newline (mid-flush) is NOT consumed.
+
+    The cursor must not advance past a torn line, so once the writer appends
+    the newline the complete event is delivered on the next poll — never
+    dropped, never double-counted.
+    """
+    writer = AuditJSONLWriter(root=tmp_path)
+    await writer.write(_tick(ts=1.0))
+    # Append a complete event WITHOUT the trailing newline to mimic a write
+    # caught mid-flush (the writer flushes the JSON then the "\n" separately).
+    path = writer.path_for("s1")
+    torn = _tick(ts=2.0).to_json()
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(torn)  # no newline yet
+
+    batch1, cursor = await writer.tail_events("s1", from_line=0)
+    assert [e.ts for e in batch1] == [1.0], "torn line must not be delivered"
+    assert cursor == 1, "cursor must stop before the torn line"
+
+    # Writer completes the line (adds the newline).
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("\n")
+
+    batch2, cursor = await writer.tail_events("s1", from_line=cursor)
+    assert [e.ts for e in batch2] == [2.0], "the now-complete line is delivered once"
+    assert cursor == 2
+    await writer.close()

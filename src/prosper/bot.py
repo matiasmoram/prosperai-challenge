@@ -367,31 +367,41 @@ async def _startup_health_check() -> None:
 
 
 @contextlib.asynccontextmanager
-async def _maybe_console_ctx(
-    bus: ConsoleBus | None,
-    audit: AuditJSONLWriter | None,
+async def _telemetry_ctx(
+    bus: ConsoleBus,
+    audit: AuditJSONLWriter,
     *,
+    serve_console: bool,
     mail_store: Any = None,
     calendar_fetch: Any = None,
 ) -> AsyncIterator[None]:
-    """Run the embedded console server iff a bus + audit were built.
+    """Record the call to the audit log, optionally binding the console UI.
 
-    Keeps `run_bot` linear — without this helper the `async with` stack
-    would need a conditional that is awkward to express in Python's
-    `async with`.
+    The durable side (``audit.attach(bus)`` → ``data/audit/<session>.jsonl``)
+    runs on EVERY call so the standing console at ``:7861`` (run_all) can list
+    + replay it later and tail it live. ``serve_console`` additionally binds
+    the embedded uvicorn console server on ``:7861`` — kept OFF in run_all so
+    the bot does not race the standing server for that port.
 
-    When ``mail_store`` and ``calendar_fetch`` are both supplied, the
-    ``/frontdesk`` router is included in the same uvicorn app.
+    ``run_console_server`` already attaches audit internally, so when
+    ``serve_console`` is True we do not double-attach. When it is False we
+    attach audit directly and skip uvicorn entirely.
+
+    When ``mail_store`` and ``calendar_fetch`` are both supplied AND the
+    console is served here, the ``/frontdesk`` router is included in the same
+    uvicorn app. With ``serve_console`` False those surfaces are served by the
+    standing process instead, reading the same durable stores.
     """
-    if bus is None or audit is None:
-        yield
+    if serve_console:
+        async with run_console_server(
+            bus,
+            audit,
+            store=mail_store,
+            calendar_fetch=calendar_fetch,
+        ):
+            yield
         return
-    async with run_console_server(
-        bus,
-        audit,
-        store=mail_store,
-        calendar_fetch=calendar_fetch,
-    ):
+    async with audit.attach(bus):
         yield
 
 
@@ -407,34 +417,37 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         model="eleven_flash_v2_5",
     )
 
-    # Operator-console wiring. Opt-in via env so tests / eval runs that
-    # spin up a partial bot don't accidentally bind a port. Default off.
-    console_enabled = os.environ.get("PROSPER_CONSOLE_ENABLED", "1") == "1"
-    bus: ConsoleBus | None = None
-    audit: AuditJSONLWriter | None = None
-    # F6: MailStore + calendar fetcher — constructed only when the console is
-    # enabled so evals/tests never touch the filesystem.
-    mail_store_inst: Any = None
-    calendar_fetch_fn: Any = None
-    if console_enabled:
-        from prosper.integrations.mail import MailStore
+    # Telemetry + mail wiring. The bus, audit writer, and MailStore are built
+    # on EVERY live call — never gated — because:
+    #   * mail must persist on every call (handoffs / booking confirmations →
+    #     data/mail/mail.db → the front-desk inbox). Gating it dropped mail
+    #     silently when run_all launched the bot with PROSPER_CONSOLE_ENABLED=0.
+    #   * audit must record every call to data/audit/<session>.jsonl so the
+    #     standing console at :7861 can list, replay, and live-tail it.
+    # Only BINDING the embedded console uvicorn on :7861 is opt-out: run_all
+    # sets PROSPER_CONSOLE_ENABLED=0 so the bot does not race the standing
+    # console server for that port. Tests/evals build the dispatcher via
+    # `_build_dispatcher` with bus/mail_store=None directly and never reach
+    # this entrypoint, so they still touch no filesystem.
+    from prosper.integrations.mail import MailStore
 
-        bus = ConsoleBus()
-        audit = AuditJSONLWriter()
-        mail_store_inst = MailStore()
-        # Bind the EHR client (not yet opened at this point) via a closure.
-        # The async context manager for ehr is entered below; using a closure
-        # here ensures we capture the same ehr instance used by the dispatcher.
-        ehr_base_for_cal = _validated_ehr_url()
-        _ehr_for_cal = EHRClient.for_http(ehr_base_for_cal)
+    serve_console = os.environ.get("PROSPER_CONSOLE_ENABLED", "1") == "1"
+    bus = ConsoleBus()
+    audit = AuditJSONLWriter()
+    mail_store_inst: Any = MailStore()
+    # Calendar fetcher for the embedded /frontdesk surface. Only consumed when
+    # this process binds the console server (serve_console); the EHR client is
+    # opened lazily inside the closure, so building it unconditionally is free.
+    ehr_base_for_cal = _validated_ehr_url()
+    _ehr_for_cal = EHRClient.for_http(ehr_base_for_cal)
 
-        async def _calendar_fetch(from_date: Any, to_date: Any) -> Any:
-            async with _ehr_for_cal:
-                return await _ehr_for_cal.list_appointments_in_range(
-                    from_date=from_date, to_date=to_date
-                )
+    async def _calendar_fetch(from_date: Any, to_date: Any) -> Any:
+        async with _ehr_for_cal:
+            return await _ehr_for_cal.list_appointments_in_range(
+                from_date=from_date, to_date=to_date
+            )
 
-        calendar_fetch_fn = _calendar_fetch
+    calendar_fetch_fn: Any = _calendar_fetch
 
     dispatcher = _build_dispatcher(bus=bus, mail_store=mail_store_inst)
     # Own the EHR httpx client via async-with so it's released even if the
@@ -443,15 +456,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
     # startup). Previously __aexit__ ran only inside the disconnect handler
     # → guaranteed leak on abrupt termination and on every connect-time
     # failure.
-    # Stack the audit/console context around the EHR client so the
-    # operator UI sees events from the very first turn — and so the
-    # server is gracefully stopped even on exception paths. If the
-    # console is disabled (tests), `_maybe_console_ctx` yields a no-op.
+    # Stack the telemetry context around the EHR client so the audit log
+    # captures events from the very first turn — and so the embedded server
+    # (when bound) is gracefully stopped even on exception paths. Audit always
+    # attaches; the uvicorn :7861 bind happens only when serve_console.
     async with (
         dispatcher._ehr,  # bot owns this httpx client's lifecycle for the call
-        _maybe_console_ctx(
+        _telemetry_ctx(
             bus,
             audit,
+            serve_console=serve_console,
             mail_store=mail_store_inst,
             calendar_fetch=calendar_fetch_fn,
         ),
@@ -485,7 +499,17 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         )
         task = PipelineTask(
             pipeline,
-            params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+            # allow_interruptions=True is REQUIRED for barge-in: without it
+            # pipecat never cancels in-flight TTS when VAD detects the caller
+            # speaking, so the bot talks over the caller ("no se calla"). The
+            # VAD is already tuned for fast barge-in (see `bot()` VADParams) and
+            # `TTSAudibleObserver` only records meaningfully once interruptions
+            # actually fire — this flag is what makes that path live.
+            params=PipelineParams(
+                allow_interruptions=True,
+                enable_metrics=True,
+                enable_usage_metrics=True,
+            ),
             observers=[RTVIObserver(rtvi)],
         )
 

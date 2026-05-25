@@ -225,6 +225,61 @@ class AuditJSONLWriter:
                         stripped[:200],
                     )
 
+    async def tail_events(
+        self,
+        session_id: str,
+        *,
+        from_line: int,
+    ) -> tuple[list[ConsoleEvent], int]:
+        """Read events appended to a session's JSONL after ``from_line``.
+
+        Returns ``(new_events, next_line)`` where ``next_line`` is the line
+        index to pass on the following poll. Used by the live-tail SSE path so
+        a standing console (which has no in-process bus from the bot
+        subprocess) can follow an in-progress call by re-reading the growing
+        audit file. Malformed lines are skipped but still advance the counter
+        so a half-written final line is retried — never re-counted — next poll.
+
+        ``from_line`` is a 0-based count of FULLY-TERMINATED lines already
+        consumed. A fresh follower passes ``0`` to get the whole file, then
+        feeds back the returned ``next_line`` each poll. The file may not exist
+        yet (the first event has not been flushed): that yields
+        ``([], from_line)``.
+
+        A final line without a trailing newline is treated as torn (the writer
+        is mid-flush): it is NOT delivered and NOT counted, so the next poll
+        re-reads it once the writer appends the newline. This keeps follow
+        mode from dropping the most-recent event on a race with the writer.
+        """
+        path = self.path_for(session_id)
+        if not path.exists():
+            return ([], from_line)
+        events: list[ConsoleEvent] = []
+        # Count of fully-terminated lines seen so far (including skipped ones).
+        terminated = 0
+        async with aiofiles.open(path, encoding="utf-8") as handle:
+            async for line in handle:
+                if not line.endswith("\n"):
+                    # Torn final line (no newline yet) — leave it for the next
+                    # poll; do not count it so we re-read it once complete.
+                    break
+                if terminated < from_line:
+                    terminated += 1
+                    continue
+                terminated += 1
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    events.append(ConsoleEvent.from_json(stripped))
+                except (ValueError, KeyError):
+                    logger.warning(
+                        "audit-tail skipping malformed line in session=%s: %r",
+                        session_id,
+                        stripped[:200],
+                    )
+        return (events, terminated)
+
     def list_sessions(self) -> list[str]:
         """Return all session ids that have a `.jsonl` file on disk.
 

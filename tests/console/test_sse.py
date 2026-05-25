@@ -353,6 +353,134 @@ async def test_embedded_uvicorn_serves_console(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_follow_iter_tails_growing_file_then_closes_on_outcome(tmp_path: Path) -> None:
+    """`follow=1` mode delivers appended events, then closes on `outcome`.
+
+    Drives the helper directly (like the live-stream test) so we control the
+    poll cadence without waiting on a real 0.5 s interval. We write events to
+    the audit file *between* iterations to simulate a call in progress, and
+    assert the stream emits each new event and ends with `replay_complete`
+    once the `outcome` event lands — never replaying a `replay_complete` for a
+    still-running call.
+    """
+    from prosper.console import sse as sse_module
+
+    audit = AuditJSONLWriter(root=tmp_path)
+
+    class _FakeRequest:
+        async def is_disconnected(self) -> bool:
+            return False
+
+    # Shrink the poll so an empty poll returns a heartbeat near-instantly.
+    monkey = sse_module._FOLLOW_POLL_INTERVAL_S
+    sse_module._FOLLOW_POLL_INTERVAL_S = 0.01
+    try:
+        # Seed the backlog already on disk before the follower attaches.
+        await audit.write(
+            make_event(
+                "transcript_turn",
+                session_id="live1",
+                payload={"role": "user", "text": "hi", "turn_id": 1},
+                ts=0.0,
+            )
+        )
+        gen: AsyncIterator[str] = sse_module._follow_event_iter(
+            audit,
+            "live1",
+            _FakeRequest(),  # type: ignore[arg-type]
+        )
+
+        # First frame: the backlog event.
+        first = await asyncio.wait_for(gen.__anext__(), timeout=2.0)
+        assert first.startswith("data: ")
+        assert json.loads(first[len("data: ") :])["payload"]["text"] == "hi"
+
+        # Append a mid-call event; the next non-heartbeat frame must carry it.
+        await audit.write(
+            make_event(
+                "state_change",
+                session_id="live1",
+                payload={"from_state": "GREETING", "to_state": "CHOOSE_INTENT", "trigger": "t"},
+                ts=1.0,
+            )
+        )
+        frames: list[str] = []
+        for _ in range(50):
+            f = await asyncio.wait_for(gen.__anext__(), timeout=2.0)
+            frames.append(f)
+            if any(fr.startswith("data: ") for fr in frames):
+                break
+        data = [json.loads(f[len("data: ") :]) for f in frames if f.startswith("data: ")]
+        assert any(d["type"] == "state_change" for d in data)
+
+        # The call ends — an `outcome` event must terminate the follow stream
+        # with a `replay_complete` sentinel so the client stops polling.
+        await audit.write(
+            make_event(
+                "outcome",
+                session_id="live1",
+                payload={"outcome": "booked", "details": {"turns": 3}},
+                ts=2.0,
+            )
+        )
+        saw_complete = False
+        for _ in range(50):
+            f = await asyncio.wait_for(gen.__anext__(), timeout=2.0)
+            if f.startswith("event: replay_complete"):
+                saw_complete = True
+                break
+        assert saw_complete, "follow stream must close on the outcome event"
+        # The generator returns after the sentinel; the next step is StopAsyncIteration.
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(gen.__anext__(), timeout=2.0)
+    finally:
+        sse_module._FOLLOW_POLL_INTERVAL_S = monkey
+        await gen.aclose()
+
+
+@pytest.mark.asyncio
+async def test_follow_iter_missing_file_heartbeats_then_disconnects(tmp_path: Path) -> None:
+    """Follow before the first event is flushed yields a heartbeat, not a 404.
+
+    A follower attaches the instant a call starts — possibly before the audit
+    file exists. Plain replay 404s on a missing file; follow mode must instead
+    keep the stream open (heartbeat) and wait for events to appear. Driven
+    against the helper because an open-ended stream over `ASGITransport` has no
+    real disconnect, so we control termination via the fake request instead.
+    """
+    from prosper.console import sse as sse_module
+
+    audit = AuditJSONLWriter(root=tmp_path)
+
+    class _OneShotRequest:
+        """Disconnects after the first poll so the open-ended loop terminates."""
+
+        def __init__(self) -> None:
+            self._polls = 0
+
+        async def is_disconnected(self) -> bool:
+            self._polls += 1
+            return self._polls > 1
+
+    monkey = sse_module._FOLLOW_POLL_INTERVAL_S
+    sse_module._FOLLOW_POLL_INTERVAL_S = 0.01
+    try:
+        gen: AsyncIterator[str] = sse_module._follow_event_iter(
+            audit,
+            "not-yet",
+            _OneShotRequest(),  # type: ignore[arg-type]
+        )
+        first = await asyncio.wait_for(gen.__anext__(), timeout=2.0)
+        assert first.startswith(": ping"), "missing file must heartbeat, not error"
+        # The next poll sees is_disconnected() → True and the generator returns.
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(gen.__anext__(), timeout=2.0)
+    finally:
+        sse_module._FOLLOW_POLL_INTERVAL_S = monkey
+        await gen.aclose()
+
+
+@pytest.mark.asyncio
 async def test_sse_iterator_yields_heartbeat_under_idle() -> None:
     """No events for `_HEARTBEAT_INTERVAL_S` must produce a `: ping` frame."""
     from prosper.console import sse as sse_module

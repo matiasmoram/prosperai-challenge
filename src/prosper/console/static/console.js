@@ -293,8 +293,9 @@ function pickSessionFromPath() {
 }
 
 // Populate the session picker <select> from the /console/sessions API.
-// Returns the id of the newest session, or null if none exist.
-// On fetch failure, shows a retry banner and returns null.
+// Returns the sessions array ([{id, mtime_ts}, …] newest-first), or null on
+// fetch failure (also shows the retry banner). An empty array means "no
+// recordings yet" — distinct from null (server unreachable).
 async function loadSessions() {
   const picker = document.getElementById("session-picker");
   const errorBanner = document.getElementById("conn-error-banner");
@@ -323,7 +324,7 @@ async function loadSessions() {
         picker.value = sessions[0].id;
       }
     }
-    return sessions.length ? sessions[0].id : null;
+    return sessions;
   } catch (err) {
     // Distinguish genuine "no sessions" from a network/server failure.
     if (errorBanner) {
@@ -373,51 +374,91 @@ function showIdleLanding(hasSessions) {
   }
 }
 
-function connect(sessionId) {
+// Track the currently-open EventSource so a follow→done transition (or a
+// session switch) can tear it down before opening another.
+let activeSource = null;
+function closeActiveSource() {
+  if (activeSource) {
+    try { activeSource.close(); } catch (e) { /* already closed */ }
+    activeSource = null;
+  }
+}
+
+// `mode` is "replay" (operator picked a recorded session — paced, terminates)
+// or "follow" (auto-tailing a live/in-progress call from its growing audit
+// file — open-ended, self-closes on the `outcome` event). The in-process live
+// bus path (`/console/stream`) is tried first only in replay mode; follow mode
+// goes straight to the file-tail endpoint since the standing console has no
+// in-process bus from the bot subprocess (run_all topology).
+function connect(sessionId, mode = "follow") {
+  closeActiveSource();
   setText("session-label", `session ${sessionId}`);
-  // Decide live vs replay: try live first.  Heuristic: if no events arrive
-  // within 1.5 s, switch to the replay endpoint which reads from JSONL.
-  let url = `/console/stream/${encodeURIComponent(sessionId)}`;
-  let source = new EventSource(url);
+
+  // State shared with the open/message/error handlers in `attach`.
   let receivedAny = false;
+  let fallbackTimer = null;
 
-  const fallbackTimer = setTimeout(() => {
-    if (!receivedAny) {
-      source.close();
-      url = `/console/replay/${encodeURIComponent(sessionId)}`;
-      source = new EventSource(url);
-      attach(source);
-    }
-  }, 1500);
-
-  function attach(src) {
+  function attach(src, srcUrl) {
     src.onopen = () => {
-      const isReplay = url.includes("replay");
-      setConnState(isReplay ? "replay" : "live");
-      toggleReplayBanner(isReplay);
+      // Live bus OR live-tail follow → show as live. Paced replay → replay.
+      const live = srcUrl.includes("/stream/") || srcUrl.includes("follow=1");
+      setConnState(live ? "live" : "replay");
+      toggleReplayBanner(!live);
     };
     src.onerror = () => setConnState("reconnecting");
     src.onmessage = (msg) => {
       receivedAny = true;
-      clearTimeout(fallbackTimer);
-      try {
-        const ev = JSON.parse(msg.data);
-        appendRaw(ev);
-        dispatch(ev);
-      } catch (err) {
-        // Bad frame is silently dropped — operator UI must not error.
-      }
+      if (fallbackTimer !== null) clearTimeout(fallbackTimer);
+      handleFrame(msg);
     };
-    // Replay sends a terminal `replay_complete` named event once the JSONL
-    // is exhausted. Close the source on it — otherwise the browser treats
-    // the closed stream as a dropped connection and auto-reconnects,
-    // replaying the whole session again and duplicating every row.
+    // `replay_complete` ends both the paced replay AND a follow stream whose
+    // call has finished (server emits it after the `outcome` event). Close
+    // the source on it so the browser doesn't auto-reconnect and re-stream.
     src.addEventListener("replay_complete", () => {
       src.close();
+      if (activeSource === src) activeSource = null;
       setConnState("done");
     });
   }
-  attach(source);
+
+  if (mode === "follow") {
+    // Live-tail: no in-process bus to try (the standing console has none),
+    // read the growing JSONL directly via the follow endpoint.
+    const url = `/console/replay/${encodeURIComponent(sessionId)}?follow=1`;
+    const source = new EventSource(url);
+    activeSource = source;
+    attach(source, url);
+    return;
+  }
+
+  // Replay mode: try the in-process live bus first; if no events arrive
+  // within 1.5 s, fall back to the recorded JSONL replay.
+  let url = `/console/stream/${encodeURIComponent(sessionId)}`;
+  let source = new EventSource(url);
+  activeSource = source;
+  attach(source, url);
+
+  fallbackTimer = setTimeout(() => {
+    if (!receivedAny) {
+      source.close();
+      url = `/console/replay/${encodeURIComponent(sessionId)}`;
+      source = new EventSource(url);
+      activeSource = source;
+      attach(source, url);
+    }
+  }, 1500);
+}
+
+// Shared frame handler — parse, log, dispatch. A bad frame is dropped so the
+// operator UI never errors on a malformed event.
+function handleFrame(msg) {
+  try {
+    const ev = JSON.parse(msg.data);
+    appendRaw(ev);
+    dispatch(ev);
+  } catch (err) {
+    // Bad frame is silently dropped — operator UI must not error.
+  }
 }
 
 function dispatch(ev) {
@@ -464,18 +505,66 @@ document.addEventListener("DOMContentLoaded", async () => {
     dismissBtn.addEventListener("click", () => errorBanner.classList.add("hidden"));
   }
 
-  // Always populate the picker; only AUTO-CONNECT when the session was named
-  // explicitly in the URL (`/console/<id>`). Opening `/console` with no id must
-  // NOT auto-replay the newest recording — that looked like a live call when
-  // nothing was happening. Default = idle landing; replay is opt-in via picker.
-  const newest = await loadSessions();
+  // Populate the picker. When the URL names a session (`/console/<id>`), open
+  // it: follow mode if it is freshly-updated (a call in progress — keep
+  // tailing), replay mode if it is stale (a finished recording the operator
+  // chose to review — paced, with the amber REPLAY banner). When the URL has
+  // no id (`/console` root) we do NOT blindly replay the newest recording —
+  // that looked like a live call when nothing was happening. Instead we POLL
+  // /console/sessions and auto-follow the newest session only while it is
+  // freshly-updated, returning to idle when it ends.
+  const sessions = await loadSessions();
   if (errorBanner && !errorBanner.classList.contains("hidden")) return; // fetch failed
   const fromPath = pickSessionFromPath();
   if (fromPath) {
     if (picker) picker.value = fromPath;
-    connect(fromPath);
+    const meta = (sessions || []).find((s) => s.id === fromPath);
+    const isFresh = meta && Date.now() - meta.mtime_ts * 1000 <= LIVE_WINDOW_MS;
+    connect(fromPath, isFresh ? "follow" : "replay");
   } else {
     setConnState("idle");
-    showIdleLanding(Boolean(newest));
+    showIdleLanding(Boolean(sessions && sessions.length));
+    startLivePolling();
   }
 });
+
+// A session whose audit file was modified within this window is treated as an
+// in-progress call worth auto-following. Sized well above one voice turn so a
+// brief pause between turns doesn't look "ended", but short enough that a
+// finished call drops out of the window within a few seconds.
+const LIVE_WINDOW_MS = 12000;
+// How often the idle landing re-checks /console/sessions for a live call.
+const LIVE_POLL_INTERVAL_MS = 3000;
+
+// On the `/console` root (no URL session), poll for a freshly-updated session
+// and auto-follow it while the call is in progress. We only ever auto-follow a
+// session id we have not already followed, so a just-ended call is not
+// re-opened in a loop. When the followed stream ends (its `outcome`), the next
+// poll either finds a newer live call or returns to idle.
+function startLivePolling() {
+  let followingId = null;
+  async function poll() {
+    // Don't disturb a stream that is actively connected (live/replay/follow).
+    if (activeSource !== null) return;
+    let sessions = [];
+    try {
+      const r = await fetch("/console/sessions");
+      if (!r.ok) return; // transient; try again next tick
+      sessions = (await r.json()).sessions || [];
+    } catch (e) {
+      return; // network blip — the next poll retries
+    }
+    if (sessions.length === 0) return;
+    const top = sessions[0];
+    const ageMs = Date.now() - top.mtime_ts * 1000;
+    if (ageMs <= LIVE_WINDOW_MS && top.id !== followingId) {
+      // A fresh session we have not followed yet — treat as a live call.
+      followingId = top.id;
+      const picker = document.getElementById("session-picker");
+      if (picker) picker.value = top.id;
+      connect(top.id, "follow");
+    }
+  }
+  poll();
+  setInterval(poll, LIVE_POLL_INTERVAL_MS);
+}

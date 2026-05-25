@@ -52,6 +52,13 @@ _REPLAY_SPEED: float = float(os.environ.get("PROSPER_CONSOLE_REPLAY_SPEED", "1.0
 # tests can set it to 0 and stream the entire JSONL with no pacing at all.
 _REPLAY_MAX_GAP_S: float = float(os.environ.get("PROSPER_CONSOLE_REPLAY_MAX_GAP_S", "5.0"))
 
+# Live-tail (follow=1) poll interval. The standing console has no in-process
+# bus from the bot subprocess, so it follows an in-progress call by re-reading
+# the growing audit JSONL every this-many seconds. 0.5s is well under one
+# voice turn while keeping the file-read rate trivial. Module-level (not Final)
+# so tests can shrink it without monkey-patching the route.
+_FOLLOW_POLL_INTERVAL_S: float = float(os.environ.get("PROSPER_CONSOLE_FOLLOW_POLL_S", "0.5"))
+
 
 def _sse_format(event: ConsoleEvent) -> str:
     """Encode `event` as one SSE frame (`data:` line + blank line)."""
@@ -100,11 +107,25 @@ def build_router(
         )
 
     @router.get("/replay/{session_id}")
-    async def replay(session_id: str, request: Request) -> StreamingResponse:
-        """SSE replay of a recorded session from the audit JSONL."""
+    async def replay(session_id: str, request: Request, follow: bool = False) -> StreamingResponse:
+        """SSE replay of a recorded session from the audit JSONL.
+
+        ``follow=1`` switches to live-tail mode: after emitting the events
+        already on disk, the stream stays open and keeps emitting newly
+        appended events (no ``replay_complete`` sentinel) until the call ends
+        or the client disconnects. This lets a standing console — which has no
+        in-process bus from the bot subprocess — follow an in-progress call by
+        re-reading the growing audit file (run_all topology).
+        """
         _validate_session_id_or_raise(session_id)
-        if not audit.path_for(session_id).exists():
+        if not follow and not audit.path_for(session_id).exists():
             raise HTTPException(status_code=404, detail="session not found")
+        if follow:
+            return StreamingResponse(
+                _follow_event_iter(audit, session_id, request),
+                media_type="text/event-stream",
+                headers=_sse_headers(),
+            )
         return StreamingResponse(
             _replay_event_iter(audit, session_id, request),
             media_type="text/event-stream",
@@ -257,3 +278,47 @@ async def _replay_event_iter(
     # stream as a dropped connection and auto-reconnects, replaying the
     # whole session again and duplicating every rendered row.
     yield "event: replay_complete\ndata: {}\n\n"
+
+
+async def _follow_event_iter(
+    audit: AuditJSONLWriter,
+    session_id: str,
+    request: Request,
+) -> AsyncIterator[str]:
+    """Yield SSE frames by tailing a growing audit JSONL (live-tail mode).
+
+    Emits the events already on disk first (at full speed — an in-progress
+    call's history should appear instantly, not paced), then polls the file
+    every ``_FOLLOW_POLL_INTERVAL_S`` for newly appended events and emits
+    them as they land. A heartbeat is sent on any idle poll so proxies don't
+    idle-close the connection and the client's live indicator stays honest.
+
+    Unlike ``_replay_event_iter`` there is NO ``replay_complete`` sentinel:
+    the stream is open-ended and ends only when the client disconnects (or the
+    server tears down). The client treats this stream as live, not replay.
+
+    The ``outcome`` event marks the end of the call. We emit it, then a
+    ``replay_complete`` sentinel so the client closes cleanly instead of
+    polling a finished file forever.
+    """
+    next_line = 0
+    while True:
+        if await request.is_disconnected():
+            return
+        events, next_line = await audit.tail_events(session_id, from_line=next_line)
+        if not events:
+            yield _sse_heartbeat()
+            await asyncio.sleep(_FOLLOW_POLL_INTERVAL_S)
+            continue
+        ended = False
+        for event in events:
+            yield _sse_format(event)
+            if event.type == "outcome":
+                ended = True
+        if ended:
+            # Call is over; close the follower so it stops polling a finished
+            # file. Same sentinel the replay path uses — the client closes the
+            # EventSource on it.
+            yield "event: replay_complete\ndata: {}\n\n"
+            return
+        await asyncio.sleep(_FOLLOW_POLL_INTERVAL_S)

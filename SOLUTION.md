@@ -343,6 +343,16 @@ Wiring:
   every publish site is a hard no-op.
 - The bus uses bounded queues with overflow-drop semantics so a slow SSE
   client cannot back-pressure the call path.
+- **Bus + audit + mail are built on every live call, never gated.** In
+  `bot.py::run_bot` the `ConsoleBus`, `AuditJSONLWriter`, and `MailStore` are
+  constructed unconditionally and `audit.attach(bus)` runs for every call, so
+  `data/audit/<session>.jsonl` and `data/mail/mail.db` always persist. Only the
+  embedded uvicorn console server (`:7861`) is gated on `PROSPER_CONSOLE_ENABLED`
+  (`serve_console`): `make run-all` sets it to `0` so the bot does not race the
+  standing console for the port, yet mail still reaches the front-desk inbox and
+  every call is recorded for the standing console to list, replay, and live-tail.
+  (Earlier this wiring lived inside `if console_enabled:`, so run-all silently
+  dropped mail and recorded nothing.)
 - `_redact_tool_args` and `mask_name` / `mask_phone` enforce PII redaction
   on every payload before it hits the bus — the operator UI sees masked
   values, the transcript and audit log keep originals.
@@ -351,14 +361,30 @@ Wiring:
   Confusing the last two poisons clinic dashboards, so the categorisation
   is explicit.
 
-**Live vs replay (no fake-live).** `/console/stream/{id}` tails the live bus;
-`/console/replay/{id}` replays a recorded session from the audit JSONL. Opening
-`/console` with **no** session id shows an **idle landing** ("No live call in
-progress") and only populates the session picker — it does NOT auto-replay the
-newest recording, which previously looked like a live call on a standing console
-with no attached bus (e.g. under `make run-all`). Selecting a past session (or
-`/console/<id>`) replays it behind a prominent amber **REPLAY** banner so a
-recording is never mistaken for a live call.
+**Live, follow, and replay.** Three SSE paths feed the same renderers:
+
+- `/console/stream/{id}` tails the in-process live bus — only meaningful in the
+  *embedded* console (the bot's own process). The standing `run-all` console has
+  no in-process bus from the bot subprocess, so this path stays empty there.
+- `/console/replay/{id}` replays a recorded session from the audit JSONL, paced
+  by the recorded gaps, terminated by a `replay_complete` sentinel.
+- `/console/replay/{id}?follow=1` **live-tail**: emits the events already on disk
+  instantly, then polls the growing audit file (`AuditJSONLWriter.tail_events`,
+  `PROSPER_CONSOLE_FOLLOW_POLL_S`, default 0.5s) and emits new events as they
+  land. It self-closes with `replay_complete` when the call's `outcome` event is
+  written. This is how the standing `run-all` console follows an in-progress
+  call without an in-process bus. A finished session passed to `follow=1`
+  behaves exactly like replay (the `outcome` is already on disk).
+
+Opening `/console` with **no** session id shows an **idle landing** and then
+**polls `/console/sessions`**; when the newest session's audit file was modified
+within a live window (~12 s), the client auto-follows it (`follow=1`) so an
+in-progress call appears and updates without operator action, returning to idle
+when it ends. It does NOT blindly auto-replay a stale recording (which would
+look like a live call). Selecting a past session (or `/console/<id>`) opens it in
+follow mode too — instant for a finished recording (ends on its `outcome`),
+live-updating if the call is still going — behind an amber **REPLAY** banner when
+the stream is a paced replay rather than live/follow.
 
 Design spec: `docs/superpowers/specs/2026-05-20-operator-console-design.md`
 + `docs/adr/004-operator-console-event-stream.md`.
