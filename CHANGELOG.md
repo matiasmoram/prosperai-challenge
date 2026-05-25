@@ -171,6 +171,9 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
   `_emit_cancellation_notice` (provider/start recovered from `last_upcoming_appointments`) +
   `_emit_reschedule_notice`; shared `_caller_identity()`/`_fire_mail()`; SPA rose/blue kinds;
   +4 tests (`test_mail_lifecycle.py`). 5 mail kinds total.
+- `3e8309a` — **SOLUTION.md accuracy pass**: fix stale counts (scenarios 107/63→108, handlers
+  8→9, events 8→9, ADRs 001..004→001..006) + restore file-map omissions (`integrations/`,
+  `observers.py`, `speculation.py`, `run_all.py`/`frontdesk_server.py`/`sim_call.py`, `tester/`).
 
 Open items for the human: `OPEN_QUESTIONS.md` (barge-in live verification, FUTURE 4.1
 cross-call provider memory, two-tier CHOOSE_INTENT routing authority).
