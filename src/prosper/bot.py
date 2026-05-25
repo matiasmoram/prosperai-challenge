@@ -88,13 +88,19 @@ _ALLOWED_EHR_SCHEMES = {"http", "https"}
 def _validated_ehr_url() -> str:
     """Resolve + sanity-check the EHR base URL from env.
 
-    SSRF guard: anyone who controls .env (compromised CI, sloppy deploy)
+    SSRF context: anyone who controls .env (compromised CI, sloppy deploy)
     could repoint the bot at e.g. http://169.254.169.254/latest/meta-data
     (cloud metadata) or an internal admin endpoint, then phish the LLM into
-    triggering tool calls that exfiltrate the response. We don't let that
-    happen — only http/https are accepted, the URL must parse, and the
-    hostname must be present. Hostname allowlisting beyond this is left to
-    the deploy environment (network policy / egress firewall).
+    triggering tool calls that exfiltrate the response.
+
+    What THIS function enforces: scheme must be http/https and a hostname must
+    be present (a malformed or file:// URL fails fast at startup). It does NOT
+    block private / link-local / metadata IPs — and deliberately so: the legit
+    default is loopback (127.0.0.1), a parse-time IP check cannot be trusted
+    anyway (DNS rebinding, IPv6, and httpx connecting by hostname not the parsed
+    IP would all bypass it), and adding one would be false security. Egress
+    control to dangerous IP ranges is the deploy environment's job (network
+    policy / egress firewall) — see SECURITY.md.
     """
     raw = os.environ.get("PROSPER_EHR_URL", "http://127.0.0.1:8000")
     parsed = urlparse(raw)

@@ -22,10 +22,14 @@ The threat model and full audit live in
 The controls actually in the codebase today:
 
 - **SSRF guard at startup.** `PROSPER_EHR_URL` is parsed and rejected if
-  the scheme is not `http`/`https` or the hostname is missing. This blocks
-  the easy SSRF where a tampered `.env` repoints the bot at cloud metadata
-  (`169.254.169.254`) and the LLM is phished into exfiltrating the
-  response. See `src/prosper/bot.py::_validated_ehr_url`.
+  the scheme is not `http`/`https` or the hostname is missing — closing the
+  scheme-based exfil vectors (`file://`, `gopher://`, schemeless) at startup.
+  It does **not** block dangerous IP ranges (e.g. the cloud-metadata address
+  `169.254.169.254`): the legit default is loopback, and a parse-time IP check
+  is bypassable (DNS rebinding, IPv6, httpx connecting by hostname), so it would
+  be false security. Blocking egress to metadata/internal ranges is the deploy
+  environment's job (network policy / egress firewall). See
+  `src/prosper/bot.py::_validated_ehr_url`.
 - **PII redaction before the LLM.** Tool results never reach the model with
   raw `patient_id` / `appointment_id` / `slot_id` UUIDs; the dispatcher
   compresses them to a human-readable summary so a leaked transcript is
