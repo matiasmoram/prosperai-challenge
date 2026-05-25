@@ -185,6 +185,13 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
   green because scenarios pass the canonical value. Fix: `tools._normalize_specialty` (difflib fuzzy
   map to SPECIALTY_DURATION_TABLE keys, cutoff 0.6) at the tool boundary, before primary + scan probes;
   unknown specialties pass through. +unit test. ARCHITECTURE §13.3. 769 tests, mock-eval 108/108.
+- `877670a` — **scrub references to other candidates' solutions (submission hygiene)**: the repo
+  cited other candidates' private submissions by name across docs (some with file-line code
+  citations). Deleted the pure-competitor-analysis spec, anonymized the prior-art discussion in
+  `interruption_design.md` + `speculative_race.md` (design takeaways kept, names/paths dropped),
+  removed name-drops elsewhere, and renamed the already-gitignored local reference folder to a
+  neutral name (`.gitignore`/`.dockerignore` updated). `git grep` for every name/path/phrase now
+  returns zero; the reference material stays local-only and unpushable. Docs only, no code change.
 - `00e3731` — **doc test-count reconciliation**: SOLUTION.md (×2) + ARCHITECTURE §0 still said
   ~715 tests (`tests/` 544 + `tester/` 171) while the verify set now collects 770 (`tests/` 582 +
   `tester/` 172 + evals 16; 769 pass / 1 skip). CHANGELOG already recorded 769 at `27bf511` — only
