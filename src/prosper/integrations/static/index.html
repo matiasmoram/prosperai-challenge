@@ -97,8 +97,8 @@
     /* Time-axis week view: an hours gutter + 7 day columns. Events are
        absolutely positioned by start time, with height = duration, so you can
        see when each appointment starts AND ends. --hour-px is set in JS. */
-    .cal-matrix { display: grid; grid-template-columns: 60px repeat(7, minmax(130px, 1fr));
-                  min-width: 920px; }
+    .cal-matrix { display: grid; grid-template-columns: 60px repeat(7, minmax(150px, 1fr));
+                  min-width: 1040px; }
     .cal-corner { position: sticky; top: 0; left: 0; z-index: 4; background: var(--panel);
                   border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); }
     .cal-dayhead { position: sticky; top: 0; z-index: 3; background: var(--panel);
@@ -119,13 +119,13 @@
                     to bottom, transparent 0, transparent calc(var(--hour-px) - 1px),
                     var(--line) calc(var(--hour-px) - 1px), var(--line) var(--hour-px)); }
     .cal-daycol.today { background-color: #f5f9ff; }
-    .cal-event { position: absolute; border-radius: 5px; padding: 2px 6px; overflow: hidden;
+    .cal-event { position: absolute; border-radius: 5px; padding: 3px 7px; overflow: hidden;
                  border-left: 3px solid var(--ev-accent, #94a3b8);
                  background: var(--ev-bg, #eef1f4); color: var(--ink);
-                 box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+                 box-shadow: 0 1px 2px rgba(0,0,0,.06); line-height: 1.3; }
     .cal-event .etime { font-weight: 700; font-size: 11px; white-space: nowrap;
                         color: var(--ev-accent, #475569); }
-    .cal-event .epat { font-weight: 600; font-size: 12px; overflow: hidden;
+    .cal-event .epat { font-weight: 600; font-size: 12.5px; overflow: hidden;
                        text-overflow: ellipsis; white-space: nowrap; }
     .cal-event .eprov { font-size: 11px; color: #556; overflow: hidden;
                         text-overflow: ellipsis; white-space: nowrap; }

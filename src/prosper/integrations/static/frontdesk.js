@@ -145,7 +145,9 @@ const specColor = (s) => SPECIALTY_COLORS[s] || { bg: "#eef1f4", accent: "#64748
 // Time-axis window: clinic hours. Slots run 09:00–17:00; show 9am→5pm.
 const DAY_START_H = 9;
 const DAY_END_H = 17;
-const HOUR_PX = 64; // vertical pixels per hour
+// Vertical pixels per hour. Tall enough that a 30-min block (HOUR_PX/2) fits
+// three lines — time range + patient + provider — without clipping the name.
+const HOUR_PX = 104;
 
 // "9 AM", "12 PM", "1 PM", "5 PM"
 function fmtHour(h) {
