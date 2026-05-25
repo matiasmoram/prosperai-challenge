@@ -98,6 +98,11 @@ class SessionMemory:
 
     identified_patient: dict[str, Any] | None = None
     last_slots: list[dict[str, Any]] = field(default_factory=list)
+    # slot_ids actually SHOWN to the LLM in the last availability render (a
+    # day-spanning sample, not the full list). A write must target a SHOWN slot,
+    # not just any slot in last_slots — else the model could book a middle slot
+    # the caller never heard. Empty = no constraint (no list rendered yet).
+    last_shown_slot_ids: set[str] = field(default_factory=set)
     last_upcoming_appointments: list[dict[str, Any]] = field(default_factory=list)
     # Set when caller's wording implies reschedule rather than plain cancel
     # ("I want to reschedule", "move my appointment"). On a successful
@@ -338,6 +343,16 @@ _INTENT_TO_LABEL: Final[dict[str, str]] = {
 }
 
 
+def _sample_slot_indices(n: int) -> list[int]:
+    """Indices of slots SHOWN to the LLM by `_redact_for_llm` for an availability
+    render: all of them when <=6, else a day-spanning sample (first 3 + last 3).
+    Single source of truth so the render and the write-validation never drift.
+    """
+    if n <= 6:
+        return list(range(n))
+    return [0, 1, 2, n - 3, n - 2, n - 1]
+
+
 def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
     """Compact, UUID-free string the LLM can safely consume.
 
@@ -379,9 +394,9 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
         # there were none (live bug). Show a spread across the day (first 3 +
         # last 3) WITH their real handle indices, and state the full time span,
         # so the model can offer afternoon times and the handles still resolve.
-        sample = list(enumerate(slots))
-        head = [_fmt(i, s) for i, s in sample[:3]]
-        tail = [_fmt(i, s) for i, s in sample[-3:]]
+        shown = _sample_slot_indices(len(slots))
+        head = [_fmt(i, slots[i]) for i in shown[:3]]
+        tail = [_fmt(i, slots[i]) for i in shown[3:]]
         span = f"{slots[0]['start_at_iso']} to {slots[-1]['start_at_iso']}"
         listed = "; ".join([*head, "…", *tail])
         return (
@@ -744,6 +759,15 @@ class Dispatcher:
                     self._maybe_transition_from_bot_text(reply.text)
                 break
 
+            # Pre-scan THIS batch for reads so the offer-then-confirm guard fires
+            # even if the model emits a write BEFORE its prerequisite read in the
+            # same tool_calls array (adversarial ordering) — populating
+            # reads_this_turn only after a read executed would miss that case.
+            reads_this_turn.update(
+                c.name
+                for c in reply.tool_calls
+                if c.name in ("list_availability_slots", "get_upcoming_appointments")
+            )
             for call in reply.tool_calls:
                 if call.name not in ALLOWED_TOOLS[self.state]:
                     self.transcript.append(
@@ -1394,6 +1418,20 @@ class Dispatcher:
                     ),
                     retryable=True,
                 )
+            # Must be a slot actually SHOWN to the LLM, not just present in the
+            # full list — for a many-slot day only a day-spanning sample is
+            # rendered, so a non-shown middle slot means the model picked a time
+            # the caller never heard. Make it offer it first.
+            if self.memory.last_shown_slot_ids and slot_id not in self.memory.last_shown_slot_ids:
+                return Err(
+                    code="hallucinated_slot_id",
+                    message=(
+                        f"slot_id {slot_id!r} was not offered to the caller — only "
+                        f"a sample of times was shown. Read the available times "
+                        f"back and let the caller pick one before booking."
+                    ),
+                    retryable=True,
+                )
             patient_id = args.get("patient_id")
             identified = self.memory.identified_patient or {}
             known_patient = identified.get("id")
@@ -1482,6 +1520,16 @@ class Dispatcher:
                     ),
                     retryable=True,
                 )
+            if self.memory.last_shown_slot_ids and slot_id not in self.memory.last_shown_slot_ids:
+                return Err(
+                    code="hallucinated_slot_id",
+                    message=(
+                        f"slot_id {slot_id!r} was not offered to the caller — only "
+                        f"a sample of times was shown. Read the available times "
+                        f"back and let the caller pick one before booking."
+                    ),
+                    retryable=True,
+                )
         return None
 
     def _record_tool_result(
@@ -1516,6 +1564,19 @@ class Dispatcher:
                 self.memory.last_slots = (
                     primary_slots if primary_slots else (fallback or {}).get("slots", [])
                 )
+                # Record which slot_ids were actually SHOWN to the LLM so a write
+                # can only target an offered slot (see last_shown_slot_ids). The
+                # primary path renders a day-spanning sample; the fallback path
+                # renders the first 6 — mirror each exactly so validation matches
+                # the render.
+                if primary_slots:
+                    shown_idx = _sample_slot_indices(len(primary_slots))
+                    self.memory.last_shown_slot_ids = {
+                        primary_slots[i]["slot_id"] for i in shown_idx
+                    }
+                else:
+                    fb_slots = (fallback or {}).get("slots", [])
+                    self.memory.last_shown_slot_ids = {s["slot_id"] for s in fb_slots[:6]}
                 if self.memory.last_slots:
                     self._publish_slots_offered(self.memory.last_slots)
             elif name == "suggest_specialty":

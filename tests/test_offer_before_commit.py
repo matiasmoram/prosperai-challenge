@@ -276,3 +276,83 @@ async def test_create_allowed_on_a_natural_pick_not_a_yes(
             e.get("kind") in ("tool_ok", "tool_err") and e.get("name") == "create_appointment"
             for e in d.transcript
         ), "create_appointment must reach execution on a natural pick"
+
+
+class _SilentLLM(LLMClientProtocol):
+    async def generate(
+        self, *, state: str, history: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> LLMReply:
+        return LLMReply(text="")
+
+
+async def test_create_rejects_unshown_middle_slot(seeded_ehr_client: EHRClient) -> None:
+    """Many-slot day: only a day-spanning sample is shown to the LLM. Booking a
+    middle slot the caller never heard is rejected — even though it IS in
+    last_slots — so the model can't commit a time it never offered."""
+    from prosper.dispatcher import _sample_slot_indices
+
+    async with seeded_ehr_client:
+        d = Dispatcher(llm=_SilentLLM(), ehr_client=seeded_ehr_client)
+        d.memory.identified_patient = {"id": "p1"}
+        d.memory.last_slots = [{"slot_id": f"slot-{i}"} for i in range(8)]
+        shown = _sample_slot_indices(8)  # [0,1,2,5,6,7] — middle 3,4 hidden
+        d.memory.last_shown_slot_ids = {d.memory.last_slots[i]["slot_id"] for i in shown}
+
+        ok = d._validate_against_memory(
+            "create_appointment", {"slot_id": "slot-0", "patient_id": "p1"}
+        )
+        assert ok is None, "a SHOWN slot must pass validation"
+
+        err = d._validate_against_memory(
+            "create_appointment", {"slot_id": "slot-4", "patient_id": "p1"}
+        )
+        assert err is not None and err.code == "hallucinated_slot_id", (
+            "an UNSHOWN middle slot must be rejected"
+        )
+
+
+async def test_create_blocked_when_write_precedes_read_in_same_batch(
+    seeded_ehr_client: EHRClient,
+) -> None:
+    """Adversarial ordering: the model emits create_appointment BEFORE
+    list_availability_slots in one tool_calls array. The pre-scan still blocks
+    the write (offer-then-confirm), so order within the batch can't slip it."""
+
+    class _ReverseOrderLLM(LLMClientProtocol):
+        calls = 0
+
+        async def generate(
+            self, *, state: str, history: list[dict[str, Any]], tools: list[dict[str, Any]]
+        ) -> LLMReply:
+            type(self).calls += 1
+            if type(self).calls == 1:
+                return LLMReply(
+                    text="",
+                    tool_calls=[
+                        ToolCall(name="create_appointment", arguments={"slot_id": "1"}, id="b"),
+                        ToolCall(
+                            name="list_availability_slots",
+                            arguments={"date": _tomorrow_iso(), "specialty": "General Practice"},
+                            id="l",
+                        ),
+                    ],
+                )
+            return LLMReply(text="Here's what's open — which works?")
+
+    async with seeded_ehr_client:
+        d = Dispatcher(llm=_ReverseOrderLLM(), ehr_client=seeded_ehr_client)
+        d.state = State.CONFIRM_BOOK
+        d.memory.identified_patient = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "phone": "2025550100",
+        }
+        await d.handle_user_turn("just book me something tomorrow")
+
+        kinds = [e.get("kind") for e in d.transcript]
+        assert "write_before_offer_blocked" in kinds
+        assert not any(
+            e.get("kind") in ("tool_ok", "tool_err") and e.get("name") == "create_appointment"
+            for e in d.transcript
+        ), "create must NOT execute even when emitted before the read in the batch"
