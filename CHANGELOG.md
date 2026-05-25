@@ -177,6 +177,14 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `7a285e3` — **AvailabilityCache adjudicated spec** (FUTURE 1.3, council-decided): full 4-tuple
   key, repo-layer placement, evict-on-commit (reschedule=2 dates, multi-slot=all chained dates),
   TTL 10s default-off, DB-409 stays the guard. Documented, not built (remote-EHR-only payoff).
+- `d93d39d` — **confirm states keep their read tool (architecture)**: CONFIRM_BOOK/CANCEL/RESCHEDULE
+  no longer expose only the write — they regain `list_availability_slots`/`get_upcoming_appointments`
+  so a non-yes ("which are free?") re-offers instead of cornering the bot into booking a slot the
+  caller never chose (live bug). Prompts: commit on natural confirmation, never on a question. +test.
+- `4ba58e2` — **barge-in VAD + diagnostics**: live, the bot never stopped on interrupt (0
+  `turn_interrupted`). Pipecat's interruption logic is correct; the VAD wasn't detecting the barge-in
+  over the bot's audio. VAD tuned harder (`confidence` 0.35→0.25, `min_volume` 0.15→0.06) + per-call
+  `VAD: user started speaking`/`INTERRUPTION fired` logs to localise detection-vs-flush vs mic/echo.
 - `9a07885` — **date + filler fixes (prompt half, from live log)**: dated 10-day weekday table in
   the `[CONTEXT]` anchor (LLM was resolving 'next Monday' to a Sunday date); neutral fillers (CONFIRM_*/
   REGISTER no longer say 'Booking that now' while the caller is declining).

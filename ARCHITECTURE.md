@@ -815,8 +815,16 @@ Active work the main branch does not yet reflect:
   the *next* `TranscriptionFrame`s and must aggregate into one turn; cancelling on
   interrupt would silently drop the interrupting utterance. It *does* cancel on
   `EndFrame` (hang-up) so a half-collected utterance never fires after the call
-  ends. VAD tuned for barge-in: `confidence=0.35`, `min_volume=0.15`,
-  `start_secs=0.1`.
+  ends. VAD tuned aggressively for barge-in: `confidence=0.25`,
+  `min_volume=0.06`, `start_secs=0.1` — live testing showed a soft "yeah/no"
+  over the bot's audio never crossed the old gate (0 interruptions fired).
+  Pipecat's interruption *logic* is correct (`allow_interruptions=True`, no
+  `interruption_strategies` → it pushes the interrupt the moment the
+  input-transport VAD reports SPEAKING); the failure mode is **detection**.
+  `DispatcherProcessor` logs `VAD: user started speaking` / `VAD: INTERRUPTION
+  fired` so each call shows whether the VAD heard the barge-in (if not →
+  mic/echo, e.g. speakers without echo cancellation — acoustic, not code) vs. a
+  downstream flush problem.
 
   **Test coverage (offline, $0, in `make verify`):** `tests/test_barge_in.py`
   (the truncation method — N-002), `tests/test_observers.py` (observer
