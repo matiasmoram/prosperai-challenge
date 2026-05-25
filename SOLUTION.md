@@ -36,14 +36,49 @@ mid-call ("actually, can we move it instead?"), who ramble, or whose phone line
 garbles a word. It asks again instead of guessing, and it never pretends to have
 done something it didn't.
 
+## Pipeline — how a call flows
+
+A call moves through a fixed sequence of stages. The agent only does one thing at
+a time, and can't skip ahead (it can't book before it knows who you are, and
+won't commit anything until you've confirmed):
+
+1. **Greeting.** It answers, gives its name, and asks who's calling and how it
+   can help.
+2. **Identify you.** It looks you up — first by phone number (quickest), then by
+   name + date of birth if the phone doesn't match.
+3. **Register if you're new.** No match? It asks "have you been here before?",
+   then collects name, date of birth, and phone, reads them back, and creates
+   your record.
+4. **What do you need?** Book, cancel, or reschedule — it works out which from
+   what you say.
+5. **For a booking — what kind of visit (this is the interesting part).** It asks
+   what you're coming in for. **If you just describe what's wrong** ("I've been
+   really anxious", "my knee's been hurting"), it works out the right kind of
+   doctor for you (therapist, GP, physio, dermatologist, psychiatrist) **and the
+   right visit length** — a first mental-health visit needs more time than a
+   routine check-up. If you already know what you want ("a dermatologist"), it
+   just uses that. Not sure what's on offer? It lists the options.
+6. **Find a time.** It asks roughly when suits you (a day, morning vs afternoon),
+   checks the calendar, and offers two or three fitting times — never a long
+   list. If there's a lot open it narrows first; if a doctor's booked solid it
+   proposes the next free day.
+7. **Confirm, then do it.** You pick a time; it reads it back; only when you
+   actually agree does it book — and it only tells you "you're all set" after the
+   database has accepted the write. Cancel and reschedule work the same way: pull
+   up your appointments, you pick which, confirm, done.
+8. **Wrap up + notify staff.** It says goodbye, and the booking / cancellation /
+   reschedule lands in the front-desk inbox and on the clinic calendar.
+
+Throughout, two rules never bend: it confirms before changing anything, and it
+asks you to repeat rather than guess when it didn't catch you.
+
 ## What it can do
 
 - **Have a real conversation** — natural voice in and out, warm (not robotic)
-  tone, and it **stops talking the moment the caller cuts in**, the way a person
-  would. Crucially, when you talk over it, it remembers *only the part of its
-  sentence you actually heard* — so if it gets cut off halfway through "I have
-  Monday, Tuesday, or…", it won't later assume it already offered you Wednesday.
-  That keeps the conversation honest after an interruption instead of drifting.
+  tone, turn-taking that joins choppy speech into one thought, and a
+  "didn't-catch-that, please repeat" reflex instead of guessing at garbled
+  input. (Reliable *barge-in* — cutting the bot off mid-sentence and having it
+  stop instantly — is still being worked on; see "What we'd build next".)
 - **Know who it's talking to** — looks the caller up by phone or by name + date
   of birth, sorts out look-alikes by reading the options back, and registers new
   patients. It will not touch anyone's appointments until it's sure who's on the
@@ -94,7 +129,7 @@ trust. Where each stands today:
 |---|---|
 | **Speed** — phone calls can't have awkward pauses | The agent does the minimum work per turn, speaks a brief "one moment" only when a step is actually slow, and is tuned so the database is never the bottleneck. Real timing is measured, not guessed. |
 | **Reliability** — AI providers fail | Automatic retries, a fallback model, a calm spoken recovery line, and a message to staff so a failure is never silent. |
-| **Talking over the agent (barge-in)** — the most-noticed call bug | It stops on a dime and keeps an honest record of only what the caller heard, so an interruption never leaves it confused. Covered by 30+ automated interruption tests (cut off at every point, rapid repeats, hang-ups mid-sentence) plus a real synthesise-and-listen-back audio check. |
+| **Talking over the agent (barge-in)** — the most-noticed call bug | **Partly there, not finished.** The *logic* is built and tested (when an interruption is detected the bot truncates its memory to only what the caller heard) — but in live testing the voice detector doesn't reliably catch the caller speaking *over* the bot's own audio, so the bot often doesn't actually stop. This is an open item — see "What we'd build next". |
 | **No false confirmations** — the cardinal sin | Enforced structurally (above) *and* caught automatically by tests that flag any "it's booked" with no matching database write. |
 | **Testing without dialing in by hand** | A simulated caller (driven by AI, with a goal and a personality) calls the agent automatically, and the results are checked by hard rules. 100+ scripted scenarios run in ~5 seconds with zero cost; adversarial and "messy caller" suites probe the edges. |
 | **Privacy / security** | PII masking, input size limits, and a guard that stops the agent from being pointed at an internal/cloud address. |
@@ -158,6 +193,14 @@ naming for a reviewer:
 - **A real audio test loop.** The conversation logic is tested exhaustively in
   text; testing the *spoken* round-trip (synthesised voice → agent → voice back)
   is the natural next layer — see the testing notes below.
+- **Reliable barge-in (cutting the bot off).** The interruption *handling* is
+  built — when the bot is interrupted it correctly trims its memory to only what
+  the caller actually heard — but the trigger isn't reliable yet: the voice
+  detector struggles to register the caller speaking *over* the bot's own audio
+  (worse on speakers without echo cancellation), so the bot frequently keeps
+  talking. Closing this means tuning the voice-activity detection (and/or
+  driving the interrupt from the speech-to-text stream) and verifying on a real
+  headset — the structural wiring is already in place.
 
 The complete, honest "what's deferred and why" list lives in `ARCHITECTURE.md`
 §16 / §16.1 and the ranked roadmap in `FUTURE.md`.

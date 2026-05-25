@@ -662,9 +662,15 @@ this repo sits:
 | every commit | FSM/handle invariants, golden-trace replay, scripted mock scenarios | $0 offline | shipped (`evals/`, `trace_replay.py`, `tester/`) |
 | every commit | **property-based FSM fuzzing** (Hypothesis `RuleBasedStateMachine`) | $0 offline | planned (see §14) |
 | every commit | **tool-receipt hallucination gate** | $0 offline | shipped (`tester/`) |
-| broad coverage | **autonomous adversarial persona caller** (persona+goal+stop) | cheap (tokens) | shipped (`tester/simulate.py`) |
+| broad coverage | **autonomous adversarial persona caller** (persona+goal+stop) | cheap (tokens) | **beta** (`tester/simulate.py`) — runs, finds real issues, but not yet a stable gate (drift/variance) |
 | nightly | live persona-sim + judge, `pass^k` reliability, latency/cost gate | $ tokens | partial (`evals/sim.py`, `judge.py`, `eval-baseline`) |
-| pre-release | full audio loop TTS→agent→STT + noise/accent/barge-in | $$ telephony | intentionally cut (§16) |
+| pre-release | full audio loop TTS→agent→STT + noise/accent/barge-in | $$ telephony | **partial/beta**: real ElevenLabs TTS→STT round-trip smoke shipped (`evals/audio_smoke/`, 3 assertions); full synth-caller→live-pipeline→judge loop still cut (§16) |
+
+> **Maturity caveat (honest):** the offline tiers + demo transcripts are mature
+> and gate every commit. The two **API-driven** testers — the OpenAI autonomous
+> caller and the ElevenLabs acoustic smoke — are **beta**: they work and have
+> caught real problems, but neither is yet a low-variance, repeatable gate.
+> Hardening both is open work (`docs/tester.md` "Maturity"; `FUTURE.md`).
 
 The prototypes off this brainstorm live in **`tester/`** (build order chosen by
 an LLM council; see `tester/README.md`):
@@ -799,8 +805,16 @@ Active work the main branch does not yet reflect:
   booking-confirmation fire-and-forget (`_emit_booking_confirmation`); two new
   eval scenarios (`caller_requests_human`, `bot_stuck_triggers_handoff`). See
   §5, §6, §8.1, ADR 006.
-- **Barge-in / interruption handling — SHIPPED (Wave 7, 2026-05-25).**
-  *"Talking over the bot"* — the most-noticed call bug — handled end to end.
+- **Barge-in / interruption handling — PARTIAL (logic shipped, live trigger
+  unreliable; see `FUTURE.md` §3.4).** The interruption *handling* is built and
+  tested; the *trigger* does NOT fire reliably in live calls — the audit shows
+  **0 `turn_interrupted` events across real calls** because the input VAD isn't
+  registering the caller speaking over the bot's own audio (browser echo
+  cancellation strips it). So the bot frequently does NOT stop when interrupted.
+  Earlier revisions of this doc over-claimed it as done; this is the honest
+  state. The wiring below is correct and the history-truncation is solid — what's
+  missing is reliable *detection* of the barge-in. Open work + ranked fixes:
+  `FUTURE.md` §3.4.
 
   **Pipeline + frame flow.** Frames travel downstream
   `transport.input()` (Silero VAD) → `DispatcherProcessor` → `tts` →

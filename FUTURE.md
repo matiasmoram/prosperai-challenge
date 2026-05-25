@@ -234,6 +234,44 @@ stub + judge pass; the current acoustic tier already proves vendor fidelity. See
 
 ---
 
+### 3.4 Reliable barge-in (interruption cut-off) — OPEN, partially built
+
+**Status:** the interruption *handling* is shipped and tested; the *trigger* is
+not reliable in live calls. This is the honest state — earlier docs over-claimed
+it as done.
+
+**What works:** `allow_interruptions=True` on the pipeline, a Silero VAD on the
+input transport, and `TTSAudibleObserver` →
+`dispatcher.mark_last_assistant_interrupted` so that **when** an interruption
+fires, the bot's history is truncated to only the audible prefix (honest
+timeline). Unit + pipeline + 26-case stress tests all green.
+
+**What doesn't:** in live testing the bot does NOT reliably stop when the caller
+talks over it — the audit shows **0 `turn_interrupted` events across calls**. The
+input VAD isn't registering the caller's voice *over the bot's own audio*: the
+browser's echo cancellation (mic `echoCancellation: true`) strips the bot output
+and attenuates the overlapping caller voice, so the VAD signal never crosses the
+gate (the ElevenLabs server STT only transcribes the interjection *after* the bot
+stops). Lowering the gate (`confidence` 0.35→0.25, `min_volume` 0.15→0.06) did not
+fix it.
+
+**What to try (ranked):**
+- Drive the interrupt from the **STT speech-start** event (ElevenLabs realtime
+  STT has its own VAD that DID detect the speech) instead of / in addition to the
+  transport Silero VAD — the STT signal is what actually fires today.
+- A dedicated **acoustic-echo-cancellation** path or a server-side mix-minus so
+  the bot's own audio isn't fed back into the VAD.
+- Verify on a **real headset** (kills room echo) to isolate environment from code.
+- The `VAD: user started speaking` / `VAD: INTERRUPTION fired` diagnostics already
+  in `DispatcherProcessor` localise detection-vs-flush per call — use them to
+  confirm which stage is failing before changing more.
+
+**Files to touch:** `src/prosper/bot.py` (VAD / STT interrupt wiring), maybe
+`src/prosper/observers.py`. **Effort:** M–L | **Risk:** med (Pipecat
+transport/VAD internals; live-audio-only verification).
+
+---
+
 ## 4. EHR Depth
 
 ### 4.1 Provider Preference Capture and Routing

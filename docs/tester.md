@@ -21,6 +21,27 @@ and is run on demand. **A scenario or sim run is honest because the assertions
 measure real effects** (DB row deltas, FSM terminal state, tool receipts) — never
 the mock's own scripted output echoed back.
 
+> ### ⚠ Maturity — read this
+>
+> **Mature / trustworthy:** the offline layers (1–3) and the **demo transcripts**
+> — scripted scenarios, tool-receipt + clarification gates, golden traces, and
+> the captured demo conversations are solid and gate every commit.
+>
+> **Beta / unfinished:** anything that drives the agent **through a live API** is
+> still beta and needs more work before it's a dependable gate:
+> - **OpenAI-driven sim (Layer 4, `tester/simulate.py` / `live_sim.py`).** The
+>   autonomous adversarial caller (LLM-vs-LLM) runs and has surfaced real issues,
+>   but it's not yet a stable repeatable gate — persona-caller drift, run-to-run
+>   variance, partial invariant coverage. Treat its output as a signal, not a
+>   verdict.
+> - **ElevenLabs-driven acoustic smoke (`evals/audio_smoke/`).** The real
+>   TTS→STT round-trip works and is double-gated (`PROSPER_AUDIO_LIVE=1`), but
+>   it's a thin smoke check (3 round-trip assertions), not the full
+>   synth-caller → live-pipeline → judge loop.
+>
+> Both API-driven testers still need to be hardened into reliable, low-variance
+> gates — that work is open.
+
 ---
 
 ## Layer 1 — Non-AI unit + integration tests (pytest)
