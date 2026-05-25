@@ -74,14 +74,29 @@ def _seed_if_needed() -> None:
 
 
 def _pump(label: str, proc: subprocess.Popen[str]) -> None:
-    """Stream one child's combined output with a [label] prefix."""
+    """Stream one child's combined output with a [label] prefix.
+
+    Must NEVER raise: if this thread dies the child's stdout pipe stops being
+    drained, its buffer fills, and the child blocks on its next print (which is
+    how the bot used to freeze on :7860). So every write is guarded.
+    """
     assert proc.stdout is not None  # noqa: S101 — type narrowing, stdout=PIPE guarantees it
     for line in proc.stdout:
-        sys.stdout.write(f"[{label}] {line}")
-        sys.stdout.flush()
+        try:
+            sys.stdout.write(f"[{label}] {line}")
+            sys.stdout.flush()
+        except Exception:  # noqa: S110 — draining must never die; a failed log line is fine
+            pass
 
 
 def main() -> int:
+    # Our own stdout is cp1252 on a default Windows console; printing the
+    # children's UTF-8 lines (emoji, JSON spans) would crash. Force UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(Exception):
+                reconfigure(encoding="utf-8", errors="replace")
     _seed_if_needed()
     children: list[tuple[str, subprocess.Popen[str]]] = []
     for label, cmd, extra_env in _PROCS:
@@ -89,10 +104,17 @@ def main() -> int:
         proc = subprocess.Popen(  # noqa: S603 — fixed commands, uv on PATH, no shell
             cmd,
             cwd=ROOT,
-            env=env,
+            env={**env, "PYTHONIOENCODING": "utf-8"},
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            # Decode child output as UTF-8 and never die on a stray byte. On
+            # Windows the default was cp1252, so pipecat's emoji / our JSON span
+            # logs raised UnicodeDecodeError in the pump thread — which then
+            # stopped draining the pipe, the child's stdout buffer filled, and
+            # the child BLOCKED on its next print (bot froze, :7860 hung).
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
         )
         children.append((label, proc))
