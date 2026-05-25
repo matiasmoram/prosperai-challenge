@@ -135,6 +135,29 @@ uv run python -m evals --mock-llm       # same thing, without make
 (Full command list, environment variables, and operations manual: see
 `ARCHITECTURE.md` §2–§3 and `README.md`.)
 
+## What we'd build next (and why it isn't here yet)
+
+A few things were deliberately left for later — not forgotten, decided. Two worth
+naming for a reviewer:
+
+- **Caching the "what's free?" lookups.** When the agent checks availability, it
+  asks the database every time. A short-lived cache could skip repeat lookups —
+  but on the current setup that lookup already takes ~10 ms, so caching would save
+  noise, not time. It only becomes worthwhile if the medical-records system moves
+  to a remote server (where each lookup costs 100–300 ms). The catch: the version
+  that *would* speed up a remote system is also the one that can quietly show a
+  slot as "free" after someone else just took it — so doing it correctly means
+  the cache must instantly forget a day's availability whenever an appointment on
+  that day is booked, cancelled, or moved. The full, correct design is written up
+  ready to build (`FUTURE.md` §1.3); we just don't pay its complexity for a
+  saving we can't yet measure.
+- **A real audio test loop.** The conversation logic is tested exhaustively in
+  text; testing the *spoken* round-trip (synthesised voice → agent → voice back)
+  is the natural next layer — see the testing notes below.
+
+The complete, honest "what's deferred and why" list lives in `ARCHITECTURE.md`
+§16 / §16.1 and the ranked roadmap in `FUTURE.md`.
+
 ## Where the detail lives
 
 | If you want… | Read |

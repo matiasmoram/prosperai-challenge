@@ -32,17 +32,79 @@ state.
 
 ---
 
-### 1.3 AvailabilityCache with 60-Second TTL
+### 1.3 AvailabilityCache (server-side, opt-in, default-off)
 
-**Why this matters to Prosper:** `list_availability_slots` is the highest-frequency EHR read during a call (called once per date the caller asks about). Even at the current ~10 ms p50, caching removes it from the critical path entirely and demonstrates production thinking about hot-path reads.
+**Status:** deferred-by-design (see `ARCHITECTURE.md` §16.1). Spec below is the
+adjudicated design (two independent research passes + an LLM council, 2026-05-25)
+so it can be built correctly in one sitting when the EHR moves remote. **Not yet
+built** — on the current in-process SQLite a slot read is ~10 ms, so a cache
+saves noise; the design only pays off against a remote EHR (100–300 ms).
 
-- Add `AvailabilityCache` dataclass in `src/prosper/ehr/repository.py` holding a `dict[tuple[date, str | None], tuple[list[Slot], float]]` (key = date + optional provider_id, value = result + expiry timestamp).
-- Wrap `list_availability_slots` in the repository with a `get_or_refresh` that checks the cache first; invalidate on `create_appointment` or `cancel_appointment` for the same date.
-- Expose `PROSPER_AVAILABILITY_CACHE_TTL` env var defaulting to `60`; set to `0` to disable (tests should set it to `0` to stay deterministic).
-- Add bench entry to `docs/bench-results.md` comparing cold vs warm p50.
+**Why this matters to Prosper:** the availability read is the highest-frequency
+EHR call during a booking. Caching it demonstrates hot-path thinking — but only
+honestly, with correct invalidation, which is the entire difficulty.
 
-**Files to touch:** `src/prosper/ehr/repository.py`, `env.example`, `docs/bench-results.md`, `tests/test_ehr.py`
-**Effort:** S | **Risk:** low
+**The two corrections to the naive spec (both are latent bugs):**
+1. The real repository symbol is **`list_available_slots`** (not
+   `list_availability_slots` — the root `CLAUDE.md`, `ehr/CLAUDE.md`, and older
+   text miscall it; fix those references in the same change, rule 11).
+2. The cache key MUST be the **full 4-tuple**
+   `(date, provider_id, specialty_lowercased, duration_minutes)`. A
+   `(date, provider_id)` key aliases a 30-min query with a 90-min one and an
+   unfiltered query with a `specialty="Therapist"` one → wrong results.
+   (`specialty` is lowercased because the query matches `ilike`.)
+
+**Placement — server-side, inside the repository (NOT the API edge, NOT the
+bot):**
+- Live inside `repository.py`. Populate in `list_available_slots`; **evict inside
+  the three write functions (`create_appointment`, `cancel_appointment`,
+  `reschedule_appointment`) immediately after a successful `commit()`** so
+  invalidation is co-located with the mutation and structurally cannot be
+  forgotten. A decorator or endpoint-edge cache can't see *which* dates changed
+  and silently misses the hard cases below.
+- Store **serialized `SlotOut` dicts, not ORM `Slot` objects** — `Slot` is
+  session-bound and `_slot_to_out` lazy-loads `provider.name`; reusing a detached
+  instance raises `DetachedInstanceError`.
+- **Why not bot-side (`EHRClient`)?** That's the *only* placement that beats a
+  remote HTTP round-trip, but it's **unsafe across processes**: a second bot, the
+  front desk, or another call mutates the DB with no invalidation signal reaching
+  the bot's cache → stale forever. The safe server-side cache only removes the
+  EHR's internal ~10 ms DB read; the version that would actually beat remote
+  latency is the unsafe one. That tension is exactly why this is deferred, not
+  shipped.
+
+**Invalidation (the real hazard is a *hidden freed slot*, not a stale free one):**
+| Write | Date(s) to evict |
+|---|---|
+| `create_appointment` | the booked slot's date — and for 60/90-min visits, **every chained slot's date** |
+| `cancel_appointment` | the freed appointment's slot date |
+| `reschedule_appointment` | **two** dates — old slot date AND new slot date |
+
+A stale *"slot still free"* hit is **safe**: the DB partial-unique index returns
+`409 slot_taken` and the bot re-offers (the cache is advisory, never the
+authority). A stale *"freed slot hidden"* hit has **no DB guard** — hence
+eviction on cancel/reschedule is mandatory.
+
+**Config + TTL:**
+- `ENABLE_AVAILABILITY_CACHE` (default `false` — ship opt-in; on local SQLite
+  it's a no-op, only enable when the EHR is remote).
+- `PROSPER_AVAILABILITY_CACHE_TTL` seconds (default `10`; `0` = disabled). Short
+  because a caller who just cancelled should see the freed slot almost
+  immediately; TTL is only a backstop behind explicit eviction. Tests set `0` for
+  determinism (the `cutoff = now()` intra-day decay already makes warm vs cold
+  results differ across slot boundaries).
+
+**Production upgrade path (FUTURE-of-FUTURE):** multi-process needs a shared
+cache (Redis) with a pub/sub `availability-evict` topic broadcasting affected
+`(provider, date)` on every write. **Do not implement a bot-side cache without
+that channel.**
+
+**Files to touch:** `src/prosper/ehr/repository.py`, `src/prosper/ehr/api.py`
+(wire the enable flag), `env.example`, `docs/bench-results.md` (cold vs warm
+p50), `tests/ehr/test_repository.py` (eviction-on-write + 409-still-fires +
+freed-slot-reappears), and the `list_availability_slots`→`list_available_slots`
+doc-name fixes.
+**Effort:** S–M | **Risk:** low (opt-in, default-off, DB remains the guard)
 
 ---
 
