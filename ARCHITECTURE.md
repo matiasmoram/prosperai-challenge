@@ -878,19 +878,24 @@ Active work the main branch does not yet reflect:
   That also enforces rule 6 ("never dump full lists") structurally. Bigger change
   (touches `_redact_for_llm`, `SessionMemory`, tool args, several scenarios).
 - **`BOOK_FLOW → CONFIRM_BOOK` fires on "slots listed", not "slot selected"
-  (design smell — Phase 2, committed).** `_maybe_transition_from_tool`
+  (design smell — Phase 2 DROPPED 2026-05-25).** `_maybe_transition_from_tool`
   (`dispatcher.py`) triggers `slot_chosen` the moment `list_availability_slots`
   returns ANY slots, so CONFIRM_BOOK is entered before the caller picks — or even
   before a specialty is set. Live consequence: a caller's "what type of doctors
   are there?" landed in CONFIRM_BOOK (a confirm-a-slot prompt) and was refused;
-  times get offered before the visit type is locked. Phase 1 (shipped) is a
-  prompt mitigation: BOOK_FLOW already mandates specialty-first, and CONFIRM_BOOK
-  now lists specialties / re-opens options instead of refusing. **Phase 2 (the
-  root fix, council-decided A→B 2026-05-25):** transition only on an actual slot
-  *selection* (reuse the asymmetric `_AFFIRM`/`_INFO_SEEKING` consent signal from
-  §13.7); BOOK_FLOW owns specialty + listing + re-narrowing, CONFIRM_BOOK becomes
-  a pure final yes/no. Reworks order-sensitive golden traces + the eval scenarios
-  that assert the early transition — medium blast radius, not a gut.
+  times get offered before the visit type is locked. **Phase 1 (shipped, `e8f23de`)**
+  is a prompt mitigation: BOOK_FLOW already mandates specialty-first, and
+  CONFIRM_BOOK now lists specialties / re-opens options instead of refusing.
+  **Phase 2 (a structural transition fix) was proposed, then DROPPED after a
+  devil's-advocate council pass (2026-05-25):** the consent gate (§13.7) already
+  removes the only *harmful* consequence (no write without affirmation), so a
+  transition rewrite adds zero safety; worse, gating *forward progress* on the
+  same fuzzy `_AFFIRM`/`_INFO_SEEKING` heuristic introduces a NEW failure mode —
+  a regex miss on a real pick ("10 a.m. works") would strand the caller in
+  BOOK_FLOW, which is audibly worse than a misnamed trigger. Verdict: not worth
+  the golden-trace/eval churn. The only salvageable micro-action (also not yet
+  done) is renaming the `slot_chosen` trigger → `slots_listed` to kill the
+  semantic lie — but that still touches 2 golden traces, so it is deferred too.
 
 The eval suite pins both the plain specialty-filter behaviour
 (`specialty_filter_therapist`, `specialty_unknown_falls_back`,
