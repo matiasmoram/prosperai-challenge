@@ -9,7 +9,7 @@ cache. Task messages stay under 1 KB to keep per-turn output budgets tight.
 from __future__ import annotations
 
 import os
-from datetime import datetime, tzinfo
+from datetime import datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 MIN_PERSONA_TOKENS_FOR_CACHE = 1024
@@ -393,15 +393,20 @@ TASK_MESSAGES = {
 # IDENTIFY_PATIENT first sentence MUST start with "One moment." — the
 # dispatcher-processor unit test asserts the exact opener so a UX
 # regression there is caught immediately.
+# Fillers fire BEFORE the LLM decides what to do, so they must NOT presume the
+# action. Earlier committal lines ("Booking that for you now.", "Got it, setting
+# that up.") played even when the caller was declining or correcting — the bot
+# said "Booking that" right before saying "actually, that's the wrong day". Keep
+# every filler a neutral "I'm working on it" acknowledgement.
 STATE_FILLERS: dict[str, str] = {
     "IDENTIFY_PATIENT": "One moment.",
-    "REGISTER_PATIENT": "Got it, setting that up.",
+    "REGISTER_PATIENT": "One moment.",
     "BOOK_FLOW": "Let me check what's available.",
     "CANCEL_FLOW": "Pulling up your appointments.",
     "RESCHEDULE_FLOW": "Pulling up your appointments and what's free.",
-    "CONFIRM_BOOK": "Booking that for you now.",
-    "CONFIRM_CANCEL": "Cancelling that now.",
-    "CONFIRM_RESCHEDULE": "Moving that for you now.",
+    "CONFIRM_BOOK": "One moment.",
+    "CONFIRM_CANCEL": "One moment.",
+    "CONFIRM_RESCHEDULE": "One moment.",
 }
 
 # Spoken-fallback strings the dispatcher / bot reach for when the call hits
@@ -511,10 +516,22 @@ def build_task_message(
     """
     tz, tz_label = _resolve_clinic_tz()
     now = datetime.now(tz) if tz is not None else datetime.now()
+    # Give the model a DATED weekday table for the next ~10 days. LLMs are
+    # unreliable at weekday arithmetic ("next Monday" was resolved to a Sunday
+    # date in live testing). Listing the actual dates turns the mapping into a
+    # lookup instead of a calculation.
+    today = now.date()
+    cal = "; ".join(
+        (today + timedelta(days=i)).strftime("%a %Y-%m-%d") + (" (today)" if i == 0 else "")
+        for i in range(10)
+    )
     anchor = (
         f"[CONTEXT] Today is {now.strftime('%A, %Y-%m-%d')} "
-        f"(clinic timezone: {tz_label}). "
-        "Use this as the anchor for all relative dates."
+        f"(clinic timezone: {tz_label}). Upcoming days — {cal}. "
+        "Resolve every weekday the caller names ('Monday', 'next Tuesday') by "
+        "matching it to a date in THIS list — never compute the date yourself. "
+        "'next <weekday>' = the soonest FUTURE date with that weekday (not today, "
+        "even if today is that weekday)."
     )
     task = TASK_MESSAGES[state]
     if state == "CHOOSE_INTENT" and choose_intent_has_appointments is False:
