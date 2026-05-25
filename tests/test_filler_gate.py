@@ -34,7 +34,20 @@ from prosper.flows import State
 def _make_processor(dispatcher: object) -> DispatcherProcessor:
     proc = DispatcherProcessor(dispatcher)  # type: ignore[arg-type]
     proc.push_frame = AsyncMock()  # type: ignore[method-assign]
+    # Transcript turns are debounced (fragments aggregate, flush after a quiet
+    # gap); a tiny window keeps these integration tests fast.
+    proc._agg_window_s = 0.05
     return proc
+
+
+async def _feed(proc: DispatcherProcessor, text: str) -> None:
+    """Feed one transcript fragment, then await the debounced flush."""
+    await proc.process_frame(
+        TranscriptionFrame(text=text, user_id="u", timestamp="t"), FrameDirection.DOWNSTREAM
+    )
+    task = proc._agg_task
+    if task is not None:
+        await task
 
 
 def _dispatcher_with_summary(state: State, summary: dict[str, dict[str, float]]) -> MagicMock:
@@ -118,8 +131,7 @@ async def test_processor_suppresses_filler_in_warm_fast_state() -> None:
     }
     d = _dispatcher_with_summary(State.IDENTIFY_PATIENT, fast_summary)
     proc = _make_processor(d)
-    frame = TranscriptionFrame(text="my phone is 2025550100", user_id="u", timestamp="t")
-    await proc.process_frame(frame, FrameDirection.DOWNSTREAM)
+    await _feed(proc, "my phone is 2025550100")
 
     pushed_texts = [
         call.args[0].text
@@ -138,8 +150,7 @@ async def test_processor_emits_filler_in_warm_slow_state() -> None:
     }
     d = _dispatcher_with_summary(State.BOOK_FLOW, slow_summary)
     proc = _make_processor(d)
-    frame = TranscriptionFrame(text="any time tuesday", user_id="u", timestamp="t")
-    await proc.process_frame(frame, FrameDirection.DOWNSTREAM)
+    await _feed(proc, "any time tuesday")
 
     pushed_texts = [
         call.args[0].text

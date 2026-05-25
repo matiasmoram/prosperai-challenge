@@ -45,6 +45,13 @@ _RETRYABLE = (
     RateLimitError,
 )
 
+# Per-request timeout on every OpenAI call. Without it the openai client
+# defaults to 600s, so a slow-but-successful response (regional brownout) blocks
+# the dispatcher silently for tens of seconds mid-call ("1 min callado bookeando").
+# With it, a stuck call raises APITimeoutError (which IS in _RETRYABLE) so it
+# fails fast → retry → fallback → graceful canned line, never a long dead-air.
+_DEFAULT_LLM_TIMEOUT_S = float(os.environ.get("PROSPER_LLM_TIMEOUT_S", "15"))
+
 
 class OpenAILLMAdapter:
     def __init__(
@@ -60,6 +67,7 @@ class OpenAILLMAdapter:
         max_attempts: int = 3,
         retry_wait_initial: float = 0.5,
         retry_wait_max: float = 4.0,
+        request_timeout: float = _DEFAULT_LLM_TIMEOUT_S,
     ) -> None:
         self._client = client
         self._model = model
@@ -70,6 +78,7 @@ class OpenAILLMAdapter:
         self._max_attempts = max_attempts
         self._retry_wait_initial = retry_wait_initial
         self._retry_wait_max = retry_wait_max
+        self._request_timeout = request_timeout
 
     async def generate(
         self,
@@ -114,6 +123,9 @@ class OpenAILLMAdapter:
             "model": model,
             "messages": history,
             "temperature": self._temperature,
+            # Fail fast on a hung call (see _DEFAULT_LLM_TIMEOUT_S) → APITimeoutError
+            # → tenacity retries → fallback, instead of the 600s client default.
+            "timeout": self._request_timeout,
         }
         if tools:
             kwargs["tools"] = tools
@@ -282,6 +294,10 @@ async def classify_symptoms(
             ],
             temperature=0.0,
             response_format={"type": "json_schema", "json_schema": _TRIAGE_JSON_SCHEMA},
+            # Fail fast on a hung triage call → caught below as triage_unavailable
+            # so the bot asks the caller to name a specialty instead of going
+            # silent for the client default (600s).
+            timeout=_DEFAULT_LLM_TIMEOUT_S,
         )
     except _RETRYABLE as e:
         return Err(
