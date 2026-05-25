@@ -768,22 +768,52 @@ Active work the main branch does not yet reflect:
   eval scenarios (`caller_requests_human`, `bot_stuck_triggers_handoff`). See
   §5, §6, §8.1, ADR 006.
 - **Barge-in / interruption handling — SHIPPED (Wave 7, 2026-05-25).**
-  `TTSAudibleObserver` (`src/prosper/observers.py`) sits between the TTS
-  service and `transport.output` in the Pipecat pipeline. On
-  `InterruptionFrame` it flushes the accumulated `TTSTextFrame` buffer and
-  calls `dispatcher.mark_last_assistant_interrupted(spoken_text)`, which
-  truncates `history[-1]` to the audible portion and appends
-  `" [INTERRUPTED by user]"` so the next LLM call sees an honest timeline.
-  `CLINIC_PERSONA` already contains the annotation explanation. VAD is tuned
-  for barge-in (`confidence=0.35`, `min_volume=0.15`, `start_secs=0.1`).
-  Unit tests in `tests/test_barge_in.py` cover partial-text truncation,
-  empty-buffer `[NOT HEARD]` prefix, idempotency, empty-history no-op, and
-  non-assistant-last-turn no-op (N-002). The **pipeline propagation** —
-  `TTSAudibleObserver` → real dispatcher, plus aggregation under interruption
-  and `EndFrame` hang-up — is now covered offline ($0, in `make verify`) by
-  `tests/test_barge_in_pipeline.py` (frame injection, no live audio). Only the
-  *acoustic* TTS→STT round-trip (catching STT mis-transcription) and live VAD
-  behaviour still need staging / the deferred audio tier (`FUTURE.md` §2.4).
+  *"Talking over the bot"* — the most-noticed call bug — handled end to end.
+
+  **Pipeline + frame flow.** Frames travel downstream
+  `transport.input()` (Silero VAD) → `DispatcherProcessor` → `tts` →
+  `TTSAudibleObserver` → `transport.output()`. When the caller starts speaking
+  while the bot is talking, the VAD emits a `StartInterruptionFrame` (a subclass
+  of `InterruptionFrame`) downstream; Pipecat's own machinery flushes the TTS /
+  output queues so audio stops. The honesty work is layered on top of that.
+
+  **`TTSAudibleObserver`** (`src/prosper/observers.py`) tracks what the bot
+  *actually said*. Lifecycle: `BotStartedSpeakingFrame` → clear buffer + mark
+  speaking; each `TTSTextFrame` while speaking → append its payload;
+  `BotStoppedSpeakingFrame` (clean end) → discard; `InterruptionFrame` **while
+  speaking** → flush the buffered audible prefix to the `on_interrupt` callback
+  and clear. The `and self._speaking` guard is load-bearing: a spurious
+  interrupt *between* turns (line noise, a cough) must NOT fire, or it would
+  overwrite a fully-spoken turn with `[NOT HEARD]`.
+
+  **`dispatcher.mark_last_assistant_interrupted(spoken)`** rewrites `history[-1]`
+  to `f"{spoken.strip()}… [INTERRUPTED by user]"` (or `"[NOT HEARD] [INTERRUPTED
+  by user]"` if nothing was audible), so the next LLM turn sees an honest record
+  of *what the caller actually heard* — preventing the model from assuming it
+  offered options it got cut off before saying. It is idempotent (returns early
+  if the marker is already present) and a no-op when `history[-1]` isn't an
+  assistant turn. It also emits a `turn_interrupted` console event and logs
+  `INTERRUPT registered …` so a live barge-in is observable.
+
+  **Interplay with turn aggregation (subtle, deliberate).** `DispatcherProcessor`
+  debounces choppy STT fragments into one turn via `_agg_task`. It does **not**
+  cancel that task on `InterruptionFrame` — the caller's barge-in words arrive as
+  the *next* `TranscriptionFrame`s and must aggregate into one turn; cancelling on
+  interrupt would silently drop the interrupting utterance. It *does* cancel on
+  `EndFrame` (hang-up) so a half-collected utterance never fires after the call
+  ends. VAD tuned for barge-in: `confidence=0.35`, `min_volume=0.15`,
+  `start_secs=0.1`.
+
+  **Test coverage (offline, $0, in `make verify`):** `tests/test_barge_in.py`
+  (the truncation method — N-002), `tests/test_observers.py` (observer
+  lifecycle), `tests/test_barge_in_pipeline.py` (4 canonical propagation cases:
+  observer→real-dispatcher, hang-up cancels aggregation, words-not-lost),
+  `tests/test_barge_in_stress.py` (**26 overlap patterns** — interrupt at every
+  point of a reply, 10 consecutive interrupted turns, rapid repeats, spurious
+  bursts, interrupt-then-choppy-barge-in, interrupt-then-silence). The acoustic
+  layer (`evals/audio_smoke/`) confirms TTS→STT fidelity. **Deferred:** wiring
+  synthesised caller audio through the *live* VAD + WebSocket-STT pipeline with a
+  judge (`FUTURE.md` §2.4) — needs staging.
 - **Speculative race.** `docs/research/speculative_race.md` — research
   notes on overlapping STT partials with speculative LLM kickoff to
   reduce TTFT. Not yet wired.

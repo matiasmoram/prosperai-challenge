@@ -40,7 +40,10 @@ done something it didn't.
 
 - **Have a real conversation** — natural voice in and out, warm (not robotic)
   tone, and it **stops talking the moment the caller cuts in**, the way a person
-  would.
+  would. Crucially, when you talk over it, it remembers *only the part of its
+  sentence you actually heard* — so if it gets cut off halfway through "I have
+  Monday, Tuesday, or…", it won't later assume it already offered you Wednesday.
+  That keeps the conversation honest after an interruption instead of drifting.
 - **Know who it's talking to** — looks the caller up by phone or by name + date
   of birth, sorts out look-alikes by reading the options back, and registers new
   patients. It will not touch anyone's appointments until it's sure who's on the
@@ -91,6 +94,7 @@ trust. Where each stands today:
 |---|---|
 | **Speed** — phone calls can't have awkward pauses | The agent does the minimum work per turn, speaks a brief "one moment" only when a step is actually slow, and is tuned so the database is never the bottleneck. Real timing is measured, not guessed. |
 | **Reliability** — AI providers fail | Automatic retries, a fallback model, a calm spoken recovery line, and a message to staff so a failure is never silent. |
+| **Talking over the agent (barge-in)** — the most-noticed call bug | It stops on a dime and keeps an honest record of only what the caller heard, so an interruption never leaves it confused. Covered by 30+ automated interruption tests (cut off at every point, rapid repeats, hang-ups mid-sentence) plus a real synthesise-and-listen-back audio check. |
 | **No false confirmations** — the cardinal sin | Enforced structurally (above) *and* caught automatically by tests that flag any "it's booked" with no matching database write. |
 | **Testing without dialing in by hand** | A simulated caller (driven by AI, with a goal and a personality) calls the agent automatically, and the results are checked by hard rules. 100+ scripted scenarios run in ~5 seconds with zero cost; adversarial and "messy caller" suites probe the edges. |
 | **Privacy / security** | PII masking, input size limits, and a guard that stops the agent from being pointed at an internal/cloud address. |
