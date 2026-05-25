@@ -74,6 +74,27 @@ gen-eval` targets.
 Landed (commit `bfb3a70`). `evals/trace_replay.py` + `make replay` /
 `make replay-record`.
 
+### 2.4 Real audio smoke loop (TTS → STT round-trip)
+
+**Why:** the challenge deliverable lists *"automated eval suite (LLM-as-judge
+over scripted scenarios + **smoke audio tests**)"*. Every other layer is built and
+green (108 text scenarios, paired judge + state assertion, tool-receipt gate,
+live adversarial caller). The one piece still **stubbed** is the audio half:
+`evals/audio_smoke/test_audio_smoke.py` today only asserts the bot module imports
+and the dispatcher initialises — it does **not** synthesise speech, feed it back
+through STT, and judge the result. So a regression that passes at the text level
+but breaks on real audio (TTS artefacts, STT mishears) would not be caught
+automatically.
+
+**What:** a small nightly/pre-deploy harness — synth caller utterance (ElevenLabs
+TTS) → bot pipeline → bot STT → dispatcher → bot TTS → caller-side STT → LLM judge
+on the round-trip transcript. Marked `-m audio`, kept out of `make verify` (needs
+ElevenLabs credits + recorded WAVs in CI).
+
+**Status:** deferred by design (see `ARCHITECTURE.md` §16 *Intentional cuts* +
+§17 *Future work* #5). Tracked here so the one partially-met deliverable is
+explicit rather than buried in a cuts table.
+
 ---
 
 ## 3. Voice UX / Latency
