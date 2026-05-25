@@ -126,3 +126,57 @@ async def test_create_allowed_on_a_later_turn(seeded_ehr_client: EHRClient) -> N
         # write was free to proceed.
         kinds = [e.get("kind") for e in d.transcript]
         assert "write_before_offer_blocked" not in kinds
+
+
+async def test_confirm_book_can_relist_instead_of_being_trapped(
+    seeded_ehr_client: EHRClient,
+) -> None:
+    """In CONFIRM_BOOK a caller who asks 'which are free?' (not a yes/no) must be
+    able to re-list — the state is no longer a write-only trap. list_availability_
+    slots is NOT rejected, and nothing is booked on the question."""
+
+    class _RelistLLM(LLMClientProtocol):
+        calls = 0
+
+        async def generate(
+            self, *, state: str, history: list[dict[str, Any]], tools: list[dict[str, Any]]
+        ) -> LLMReply:
+            type(self).calls += 1
+            if type(self).calls == 1:
+                return LLMReply(
+                    text="",
+                    tool_calls=[
+                        ToolCall(
+                            name="list_availability_slots",
+                            arguments={"date": _tomorrow_iso(), "specialty": "General Practice"},
+                            id="relist",
+                        )
+                    ],
+                )
+            return LLMReply(text="Here are the open times — which works for you?")
+
+    async with seeded_ehr_client:
+        d = Dispatcher(llm=_RelistLLM(), ehr_client=seeded_ehr_client)
+        d.state = State.CONFIRM_BOOK
+        d.memory.identified_patient = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "phone": "2025550100",
+        }
+        await d.handle_user_turn("wait, which ones are actually free?")
+
+        # list_availability_slots was allowed (NOT rejected) in CONFIRM_BOOK...
+        assert not any(
+            e.get("kind") == "tool_rejected" and e.get("name") == "list_availability_slots"
+            for e in d.transcript
+        )
+        assert any(
+            e.get("kind") == "tool_ok" and e.get("name") == "list_availability_slots"
+            for e in d.transcript
+        )
+        # ...and nothing was booked off the question.
+        assert not any(
+            e.get("kind") in ("tool_ok", "tool_err") and e.get("name") == "create_appointment"
+            for e in d.transcript
+        )

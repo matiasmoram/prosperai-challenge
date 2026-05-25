@@ -46,9 +46,21 @@ def test_tool_whitelist_per_state() -> None:
         "list_availability_slots",
         "leave_message_for_front_desk",
     }
-    assert ALLOWED_TOOLS[State.CONFIRM_BOOK] == {"create_appointment"}
-    assert ALLOWED_TOOLS[State.CONFIRM_CANCEL] == {"cancel_appointment"}
-    assert ALLOWED_TOOLS[State.CONFIRM_RESCHEDULE] == {"reschedule_appointment"}
+    # Confirm states keep their READ tool so a non-yes ("which are free?") can
+    # re-offer instead of cornering the bot into the write (see flows.py).
+    assert ALLOWED_TOOLS[State.CONFIRM_BOOK] == {
+        "create_appointment",
+        "list_availability_slots",
+    }
+    assert ALLOWED_TOOLS[State.CONFIRM_CANCEL] == {
+        "cancel_appointment",
+        "get_upcoming_appointments",
+    }
+    assert ALLOWED_TOOLS[State.CONFIRM_RESCHEDULE] == {
+        "reschedule_appointment",
+        "get_upcoming_appointments",
+        "list_availability_slots",
+    }
     assert ALLOWED_TOOLS[State.HANDOFF] == set()
     assert ALLOWED_TOOLS[State.END] == set()
 

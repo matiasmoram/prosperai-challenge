@@ -324,43 +324,45 @@ TASK_MESSAGES = {
         "on another patient's appointment."
     ),
     "CONFIRM_BOOK": (
-        "[STATE: CONFIRM_BOOK] Read back the chosen date, time-of-day, "
-        "and provider name in a single short sentence, then ask 'shall I "
-        "go ahead and book that?'. Wait for explicit yes or no. On yes, "
-        "call create_appointment passing the chosen slot's enumerated "
-        'number as slot_id (e.g. "1" for the first slot offered); set '
-        "notes only if the caller already volunteered a reason for the visit. "
-        "The dispatcher fills in patient_id — tool arguments are internal, "
-        "never read them aloud. On no, ask whether they want a different time "
-        "or to cancel out. Do NOT tell the caller they are booked until "
-        "create_appointment returns Ok in this turn."
+        "[STATE: CONFIRM_BOOK] Read back the chosen date, time-of-day, and "
+        "provider in one short sentence and ask if you should book it. Book "
+        "(call create_appointment with the chosen slot's enumerated number as "
+        'slot_id, e.g. "1") ONLY when the caller clearly commits to THAT '
+        "specific time. A natural commitment counts — 'yes', 'yeah', 'that "
+        "one', 'the 2:30', 'sounds good', 'go ahead' — you do NOT need a literal "
+        "'yes'. But a QUESTION or a request for other options is NOT consent: if "
+        "they ask 'which are free?', 'anything in the afternoon?', 'another "
+        "day?', or seem unsure, do NOT book — call list_availability_slots to "
+        "re-offer matching times (or answer), then re-confirm. Set notes only if "
+        "they volunteered a reason. The dispatcher fills patient_id; never read "
+        "tool arguments aloud. Do NOT say they're booked until create_appointment "
+        "returns Ok this turn."
     ),
     "CONFIRM_CANCEL": (
-        "[STATE: CONFIRM_CANCEL] Read back the appointment you're about "
-        "to cancel in one short sentence (date, time-of-day, provider), "
-        "then ask 'shall I go ahead and cancel that?'. Wait for explicit "
-        "yes or no. On yes, call cancel_appointment passing the chosen "
-        'appointment\'s enumerated number as appointment_id (e.g. "1" '
-        "for the first in the list). Tool argument names and numbers "
-        "are internal — never read them aloud. On no, ask whether they "
-        "meant a different one or want to keep it. Do NOT tell the caller "
-        "it's cancelled until cancel_appointment returns Ok in this turn. "
-        "If the caller's original wording was 'reschedule' / 'move', the "
-        "dispatcher routes to BOOK_FLOW automatically after the cancel "
-        "succeeds — confirm the cancel briefly and continue with the new "
-        "booking without making them start over."
+        "[STATE: CONFIRM_CANCEL] Read back the appointment to cancel in one "
+        "short sentence (date, time-of-day, provider) and ask if you should "
+        "cancel it. Cancel (call cancel_appointment with the chosen "
+        'appointment\'s enumerated number as appointment_id, e.g. "1") ONLY on a '
+        "clear commitment — natural phrasings count, no literal 'yes' required. "
+        "A question or 'which ones do I have?' is NOT consent: call "
+        "get_upcoming_appointments to read the list back, or answer — do NOT "
+        "cancel on a question. Never read tool arguments aloud. Do NOT say it's "
+        "cancelled until cancel_appointment returns Ok this turn. If the caller's "
+        "wording was 'reschedule'/'move', the dispatcher routes to BOOK_FLOW "
+        "after the cancel succeeds — confirm briefly and continue."
     ),
     "CONFIRM_RESCHEDULE": (
-        "[STATE: CONFIRM_RESCHEDULE] Read back both the old appointment "
-        "and the new slot in one sentence (e.g. 'I'll move your visit "
-        "from Tuesday at ten with Dr. Patel to Thursday at two — go ahead?'). "
-        "Wait for explicit yes or no. On yes, call reschedule_appointment "
-        "with the appointment's bracketed handle as appointment_id and "
-        'the new slot\'s bracketed handle as slot_id (e.g. "1" and "2"). '
-        "On no, ask whether they want a different time or to keep the original. "
-        "Do NOT tell the caller it's moved until reschedule_appointment "
-        "returns Ok in this turn. The swap is atomic — if the new slot "
-        "is taken, the original visit is preserved automatically."
+        "[STATE: CONFIRM_RESCHEDULE] Read back the old appointment and the new "
+        "slot in one sentence (e.g. 'I'll move your visit from Tuesday at ten to "
+        "Thursday at two — go ahead?') and ask if you should move it. Move it "
+        "(call reschedule_appointment with the appointment's handle as "
+        'appointment_id and the new slot\'s handle as slot_id, e.g. "1" and "2") '
+        "ONLY on a clear commitment — natural phrasings count, no literal 'yes' "
+        "needed. If they want a different time or ask what's free, call "
+        "list_availability_slots (or get_upcoming_appointments) to re-offer — do "
+        "NOT reschedule on a question. Do NOT say it's moved until "
+        "reschedule_appointment returns Ok this turn. The swap is atomic — if the "
+        "new slot is taken, the original is preserved."
     ),
     "END": (
         "[STATE: END] Wrap up in one warm sentence — confirm what just "

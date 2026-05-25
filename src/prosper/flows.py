@@ -71,9 +71,21 @@ ALLOWED_TOOLS: dict[State, set[str]] = {
         "list_availability_slots",
         "leave_message_for_front_desk",
     },
-    State.CONFIRM_BOOK: {"create_appointment"},
-    State.CONFIRM_CANCEL: {"cancel_appointment"},
-    State.CONFIRM_RESCHEDULE: {"reschedule_appointment"},
+    # The confirm states keep their READ tool alongside the write so a caller
+    # who does NOT give a clean yes/no — "which ones are free?", "what about the
+    # afternoon?", "any other times?" — can be re-offered options instead of the
+    # bot being cornered with only the write tool (it then books a slot the
+    # caller never chose, seen live). Booking is still gated to a later turn by
+    # the dispatcher's offer-then-confirm guard (`_READ_BEFORE_WRITE`), so the
+    # re-list cannot auto-commit. Humans confirm in many ways; this lets the LLM
+    # interpret naturally and gives it a way back to listing.
+    State.CONFIRM_BOOK: {"create_appointment", "list_availability_slots"},
+    State.CONFIRM_CANCEL: {"cancel_appointment", "get_upcoming_appointments"},
+    State.CONFIRM_RESCHEDULE: {
+        "reschedule_appointment",
+        "get_upcoming_appointments",
+        "list_availability_slots",
+    },
     # HANDOFF is terminal: the caller has been handed off to the front desk.
     # No tools are available — the bot speaks the HANDOFF task message then
     # the FSM advances to END on the next goodbye.
