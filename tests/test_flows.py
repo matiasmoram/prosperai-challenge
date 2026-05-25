@@ -25,8 +25,12 @@ def test_tool_whitelist_per_state() -> None:
     assert ALLOWED_TOOLS[State.IDENTIFY_PATIENT] == {
         "find_patient_by_phone",
         "find_patient_by_name_dob",
+        "leave_message_for_front_desk",
     }
-    assert ALLOWED_TOOLS[State.REGISTER_PATIENT] == {"create_patient"}
+    assert ALLOWED_TOOLS[State.REGISTER_PATIENT] == {
+        "create_patient",
+        "leave_message_for_front_desk",
+    }
     assert ALLOWED_TOOLS[State.CHOOSE_INTENT] == {"route_intent", "leave_message_for_front_desk"}
     assert ALLOWED_TOOLS[State.BOOK_FLOW] == {
         "list_availability_slots",

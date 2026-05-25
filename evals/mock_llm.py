@@ -2635,6 +2635,49 @@ def _script_new_patient_cancels_immediately_after_register() -> list[LLMReply]:
     ]
 
 
+def _script_identity_unfound_existing_handoff() -> list[LLMReply]:
+    # Bob Turner is not in the DB. Phone lookup → no match → bot tries name+DOB.
+    # Name+DOB lookup → no match. Bot asks "have you been here before?".
+    # Bob insists yes → bot tries name+DOB once more (or just the same call
+    # we already did). Still no match → bot calls leave_message_for_front_desk
+    # → HANDOFF. Runner stops at HANDOFF.
+    return [
+        # GREETING
+        _t("Hi, you've reached Prosper Health — what's your name, and how can I help you today?"),
+        # IDENTIFY_PATIENT: caller gives name; bot tries phone first
+        _t("What's your phone number so I can look you up?"),
+        # phone lookup → no match
+        _tool("find_patient_by_phone", phone="555-000-9999"),
+        # no match → try name + DOB
+        _t("I didn't find anyone under that number. Could I get your name and date of birth?"),
+        # name+DOB lookup → no match
+        _tool("find_patient_by_name_dob", name="Bob Turner", dob="1975-04-05"),
+        # still no match → ask "have you been here before?"
+        _t(
+            "I'm not finding a record under that name and date of birth. "
+            "Have you been to our clinic before, or would you like me to register you?"
+        ),
+        # caller insists they're existing → try name+DOB one more time carefully
+        _tool("find_patient_by_name_dob", name="Bob Turner", dob="1975-04-05"),
+        # still nothing → hand off to front desk
+        _tool(
+            "leave_message_for_front_desk",
+            category="other",
+            summary=(
+                "Caller Bob Turner (phone 555-000-9999, DOB April 5 1975) insists "
+                "they are an existing patient but I cannot locate their record. "
+                "Please look them up and call back."
+            ),
+            callback_wanted=True,
+        ),
+        # HANDOFF: bot speaks confirmation
+        _t(
+            "I've let our front desk know — someone will look into your record "
+            "and give you a call back shortly. Thank you for your patience."
+        ),
+    ]
+
+
 def _script_caller_requests_human() -> list[LLMReply]:
     # Ada is identified via phone. She immediately asks for a human.
     # Dispatcher intercepts leave_message_for_front_desk → HANDOFF.
@@ -2824,6 +2867,8 @@ _BOT_SCRIPTS: dict[str, callable] = {
     ),
     "book_flow_cancel_demand_stays_book": _script_book_flow_cancel_demand_stays_book,
     "phone_retracted_fallback_to_name_dob": _script_phone_retracted_fallback_to_name_dob,
+    # Wave 5: identity-not-found → handoff
+    "identity_unfound_existing_handoff": _script_identity_unfound_existing_handoff,
     # F6 handoff scenarios
     "caller_requests_human": _script_caller_requests_human,
     "bot_stuck_triggers_handoff": _script_bot_stuck_triggers_handoff,
@@ -3708,6 +3753,20 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         # CHOOSE_INTENT: immediately asks to reschedule (just registered).
         "Reschedule please.",
         "ok, nothing to move. goodbye.",
+    ],
+    # Wave 5: identity-not-found → handoff
+    "identity_unfound_existing_handoff": [
+        "Hi, I need some help.",
+        # IDENTIFY_PATIENT: phone lookup
+        "555-000-9999.",
+        # no match → bot asks name+DOB
+        "Bob Turner, April 5th 1975.",
+        # still no match → bot asks if been here before
+        "Yes, I have been here before — I am definitely in your system.",
+        # bot tries again with DOB
+        "April 5th 1975.",
+        # HANDOFF: bot confirms front-desk message
+        "okay thank you, goodbye.",
     ],
     # F6 handoff scenarios
     "caller_requests_human": [

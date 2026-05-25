@@ -33,8 +33,22 @@ STATES: tuple[State, ...] = tuple(State)
 
 ALLOWED_TOOLS: dict[State, set[str]] = {
     State.GREETING: set(),
-    State.IDENTIFY_PATIENT: {"find_patient_by_phone", "find_patient_by_name_dob"},
-    State.REGISTER_PATIENT: {"create_patient"},
+    # ``leave_message_for_front_desk`` is whitelisted here too so a caller
+    # who insists they are already in the system (but DOB keeps failing) can
+    # be handed off to the front desk during identification rather than being
+    # forced into new-patient registration. The tool is dispatcher-intercepted
+    # (no HANDLERS entry) — identity comes from whatever is already in
+    # SessionMemory, falling back to the LLM-collected name/phone in the summary.
+    State.IDENTIFY_PATIENT: {
+        "find_patient_by_phone",
+        "find_patient_by_name_dob",
+        "leave_message_for_front_desk",
+    },
+    # ``leave_message_for_front_desk`` in REGISTER_PATIENT allows the bot to
+    # hand off a caller who reached registration but is actually an existing
+    # patient whose record cannot be found (e.g. registered under a different
+    # phone). Same intercepted pattern — avoids creating a duplicate patient.
+    State.REGISTER_PATIENT: {"create_patient", "leave_message_for_front_desk"},
     # ``route_intent`` is the HYBRID navigation tool: the LLM proposes the
     # caller's intent and the dispatcher validates the edge (see
     # ``Dispatcher._handle_route_intent``). It is whitelisted here but handled
@@ -83,9 +97,18 @@ TRANSITIONS: Mapping[State, Mapping[str, State]] = {
     State.IDENTIFY_PATIENT: {
         "patient_found": State.CHOOSE_INTENT,
         "no_match": State.REGISTER_PATIENT,
+        # Caller insists they are already in the system but name+DOB never matches
+        # → bot hands off to the front desk rather than forcing registration.
+        "needs_human": State.HANDOFF,
         "goodbye": State.END,
     },
-    State.REGISTER_PATIENT: {"registered": State.CHOOSE_INTENT, "goodbye": State.END},
+    State.REGISTER_PATIENT: {
+        "registered": State.CHOOSE_INTENT,
+        # Caller reached REGISTER_PATIENT but turns out to be an existing patient
+        # whose record cannot be found → hand off rather than create a duplicate.
+        "needs_human": State.HANDOFF,
+        "goodbye": State.END,
+    },
     State.CHOOSE_INTENT: {
         "wants_book": State.BOOK_FLOW,
         "wants_cancel": State.CANCEL_FLOW,

@@ -1402,11 +1402,21 @@ class Dispatcher:
             self._transition("medical_emergency")
             return
         # Front-desk handoff: leave_message_for_front_desk Ok → HANDOFF.
+        # Reachable from any post-greeting state including IDENTIFY_PATIENT and
+        # REGISTER_PATIENT (caller insists they're in the system but DOB never
+        # matches → bot hands off rather than forcing new-patient registration).
         if (
             tool_name == LEAVE_MESSAGE_TOOL
             and is_ok(result)
             and self.state
-            in (State.CHOOSE_INTENT, State.BOOK_FLOW, State.CANCEL_FLOW, State.RESCHEDULE_FLOW)
+            in (
+                State.IDENTIFY_PATIENT,
+                State.REGISTER_PATIENT,
+                State.CHOOSE_INTENT,
+                State.BOOK_FLOW,
+                State.CANCEL_FLOW,
+                State.RESCHEDULE_FLOW,
+            )
         ):
             self._transition("needs_human")
             return

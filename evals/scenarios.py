@@ -3749,6 +3749,41 @@ SCENARIOS: list[Scenario] = [
         ],
         max_turns=20,
     ),
+    # Wave 5: identity-not-found → handoff
+    Scenario(
+        name="identity_unfound_existing_handoff",
+        tags=frozenset({"handoff", "identity", "f6"}),
+        persona=(
+            "You are Bob Turner. Your phone is 555-000-9999 — not in the system. "
+            "When asked for your name and DOB, say 'Bob Turner, April 5th 1975'. "
+            "When the bot says it cannot find you and asks if you've been before, "
+            "insist VERBATIM: 'Yes, I have been here before — I am definitely in your system.' "
+            "Give your DOB again when asked: 'April 5th 1975'. "
+            "After the bot tells you it will have the front desk follow up, say "
+            "VERBATIM: 'okay thank you, goodbye.'"
+        ),
+        setup=_setup_existing_no_appts,  # seeds Ada; Bob is not in DB
+        expected_state=StateExpectation(
+            patient_count_delta=0,  # no new patient created
+            active_appointment_count_delta=0,
+            expected_terminal_state="HANDOFF",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "find_patient_by_name_dob",
+                "leave_message_for_front_desk",
+            ],
+            # Must NOT register a new patient for someone claiming to be existing
+            forbidden_tool_calls=["create_patient", "create_appointment"],
+        ),
+        judge_criteria=[
+            "the bot could not find the caller's record after trying phone and name+DOB",
+            "the bot asked whether the caller had been to the clinic before",
+            "the bot did NOT register a new patient for someone who claims to be existing",
+            "the bot offered to have the front desk follow up",
+            "the bot left a message so the front desk can locate the record and call back",
+        ],
+        max_turns=12,
+    ),
     # F6 handoff scenarios
     Scenario(
         name="caller_requests_human",
