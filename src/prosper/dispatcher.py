@@ -577,6 +577,13 @@ class Dispatcher:
             return
         truncated = spoken_text.strip()
         last["content"] = f"{truncated}…{marker}" if truncated else f"[NOT HEARD]{marker}"
+        # Visible signal so a live barge-in test can confirm the interruption was
+        # actually DETECTED (marker set). If you cut the bot off and this line
+        # does NOT appear, the VAD/pipeline never registered the interrupt — that
+        # is a pipeline issue, not a prompt one.
+        logger.info(
+            "INTERRUPT registered — truncated assistant turn to: %r", truncated or "(nothing)"
+        )
         self._publish(
             "turn_interrupted",
             {
