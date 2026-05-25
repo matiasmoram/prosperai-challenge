@@ -41,6 +41,19 @@ from prosper.tools import HANDLERS, LEAVE_MESSAGE_TOOL, ROUTE_INTENT_TOOL, TOOL_
 
 logger = logging.getLogger(__name__)
 
+# Offer-then-confirm invariant (architecture, not prompt). A write tool must not
+# fire in the SAME caller turn as the read that produced its options: the caller
+# has to hear the slots/appointments and pick one on a LATER turn before we
+# commit the (irreversible) write. Maps each write to the read(s) that must
+# precede it by a turn. Enforced in handle_user_turn — see `reads_this_turn`.
+# Live bug this fixes: the model listed availability and immediately booked a
+# morning slot the caller never chose, on "afternoon any day".
+_READ_BEFORE_WRITE: dict[str, tuple[str, ...]] = {
+    "create_appointment": ("list_availability_slots",),
+    "reschedule_appointment": ("list_availability_slots",),
+    "cancel_appointment": ("get_upcoming_appointments",),
+}
+
 
 @dataclass
 class ToolCall:
@@ -336,14 +349,30 @@ def _redact_for_llm(name: str, value: dict[str, Any]) -> str:
         if not slots:
             return f"no slots available for {asked_date} or the next 6 days"
         # Lead with the total so the model applies the adaptive rule: many →
-        # invert (ask preference, don't list); few → read 2-3. We still show
-        # the first 6 as concrete handles regardless.
+        # invert (ask preference, don't list); few → read 2-3.
         total = value.get("total_returned", len(slots))
-        listed = "; ".join(
-            f"[{i + 1}] {s['start_at_iso']} with {s['provider_name']}"
-            for i, s in enumerate(slots[:6])
+
+        def _fmt(i: int, s: dict[str, Any]) -> str:
+            return f"[{i + 1}] {s['start_at_iso']} with {s['provider_name']}"
+
+        if len(slots) <= 6:
+            listed = "; ".join(_fmt(i, s) for i, s in enumerate(slots))
+            return f"{total} slots available on {asked_date}: {listed}"
+        # Many slots: showing only the FIRST 6 hid the afternoon entirely — they
+        # were all morning, so the bot wrongly told a caller "afternoon any day"
+        # there were none (live bug). Show a spread across the day (first 3 +
+        # last 3) WITH their real handle indices, and state the full time span,
+        # so the model can offer afternoon times and the handles still resolve.
+        sample = list(enumerate(slots))
+        head = [_fmt(i, s) for i, s in sample[:3]]
+        tail = [_fmt(i, s) for i, s in sample[-3:]]
+        span = f"{slots[0]['start_at_iso']} to {slots[-1]['start_at_iso']}"
+        listed = "; ".join([*head, "…", *tail])
+        return (
+            f"{total} slots available on {asked_date}, spanning {span} "
+            f"(sample across the day; ask the caller's preferred time, then read "
+            f"matching options): {listed}"
         )
-        return f"{total} slots available on {asked_date} (showing first {min(total, 6)}): {listed}"
     if name == "get_upcoming_appointments":
         appts = value.get("appointments", [])
         if not appts:
@@ -613,6 +642,9 @@ class Dispatcher:
         ):
             await self._prefetch_upcoming_on_choose_intent()
         tool_call_signatures: dict[str, int] = {}
+        # Reads executed THIS turn — a write whose prerequisite read is in here
+        # is blocked (offer-then-confirm; see _READ_BEFORE_WRITE).
+        reads_this_turn: set[str] = set()
         for _ in range(4):
             llm_started = time.perf_counter()
             async with self.timing.measure(
@@ -732,6 +764,34 @@ class Dispatcher:
                         }
                     )
                     continue
+                # OFFER-THEN-CONFIRM (architecture, not prompt). A write tool must
+                # not commit in the same turn its options were just read. Force the
+                # bot to present the slots/appointments and let the caller pick on
+                # their next turn. The irreversible DB write is gated here so a
+                # model that tries to list-and-book in one shot (seen live: booked
+                # a morning slot on "afternoon any day") can't.
+                _required_reads = _READ_BEFORE_WRITE.get(call.name)
+                if _required_reads and any(r in reads_this_turn for r in _required_reads):
+                    self.transcript.append(
+                        {
+                            "kind": "write_before_offer_blocked",
+                            "name": call.name,
+                            "state": self.state.value,
+                        }
+                    )
+                    self.history.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": (
+                                f"BLOCKED: do not call '{call.name}' in the same turn "
+                                "you looked up availability/appointments. Read the "
+                                "options back to the caller and wait for them to choose "
+                                "a specific one on their next turn before committing."
+                            ),
+                        }
+                    )
+                    continue
                 # HYBRID navigation: route_intent is whitelisted but has no EHR
                 # handler — the dispatcher applies the transition itself after
                 # validating it against the FSM (LLM proposes, dispatcher
@@ -745,6 +805,8 @@ class Dispatcher:
                     result = await self._handle_leave_message(call)
                 else:
                     result = await self._execute_tool(call)
+                if call.name in ("list_availability_slots", "get_upcoming_appointments"):
+                    reads_this_turn.add(call.name)
                 self._record_tool_result(call.name, result, tool_call_id=call.id)
                 self._maybe_transition_from_tool(call.name, result)
 
