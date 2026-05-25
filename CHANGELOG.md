@@ -174,6 +174,10 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `3e8309a` — **SOLUTION.md accuracy pass**: fix stale counts (scenarios 107/63→108, handlers
   8→9, events 8→9, ADRs 001..004→001..006) + restore file-map omissions (`integrations/`,
   `observers.py`, `speculation.py`, `run_all.py`/`frontdesk_server.py`/`sim_call.py`, `tester/`).
+- `478db64` — **doc split**: `SOLUTION.md` → non-technical executive overview;
+  technical reference + ops manual `git mv`'d to **`ARCHITECTURE.md`** (history kept,
+  §-numbers unchanged). Rule 11 ledger now = `ARCHITECTURE.md`; all active `SOLUTION.md §N`
+  pointers repointed (CLAUDE×4, CONTRIBUTING, README, FUTURE, FEATURES, tester/README, code comments).
 
 Open items for the human: `OPEN_QUESTIONS.md` (barge-in live verification, FUTURE 4.1
 cross-call provider memory, two-tier CHOOSE_INTENT routing authority).
