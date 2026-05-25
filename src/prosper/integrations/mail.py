@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,12 +21,27 @@ from typing import Final
 import aiofiles
 
 _DEFAULT_ROOT_NAME: Final[str] = "data/mail"
+# Filename-safe charset for a session id used as a file stem. Real ids are
+# UUIDs (unaffected); anything else is reduced to this set so a malformed id
+# with path separators or ".." can never address a path outside the mail root.
+_UNSAFE_STEM_CHARS: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_-]")
 
 
 def _resolve_default_root() -> Path:
     """Compute the default mail root, honouring ``PROSPER_MAIL_ROOT``."""
     override = os.environ.get("PROSPER_MAIL_ROOT")
     return Path(override) if override else Path(_DEFAULT_ROOT_NAME)
+
+
+def _safe_session_stem(session_id: str) -> str:
+    """Sanitise a session id into a traversal-safe filename stem.
+
+    Mail files carry real PII; a session id containing ``/`` or ``..`` would let
+    an append escape the mail root. The canonical id is preserved inside each
+    JSON record, so reducing the *filename* to a safe charset loses nothing.
+    """
+    stem = _UNSAFE_STEM_CHARS.sub("_", session_id)
+    return stem or "_unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +126,7 @@ class MailStore:
     async def write(self, message: MailMessage) -> None:
         """Append ``message`` as one JSON line to its session file."""
         self._root.mkdir(parents=True, exist_ok=True)
-        path = self._root / f"{message.session_id}.jsonl"
+        path = self._root / f"{_safe_session_stem(message.session_id)}.jsonl"
         async with aiofiles.open(path, mode="a", encoding="utf-8") as handle:
             await handle.write(message.to_json() + "\n")
             await handle.flush()
