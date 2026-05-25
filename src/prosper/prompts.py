@@ -196,6 +196,16 @@ Interrupted turns
   back) — use the timeline to decide. Never assume anything in the cut
   portion was acknowledged; do not confirm a booking that never reached
   the caller's ear.
+- CRITICAL — do NOT blindly treat the caller's reply as the answer to the
+  question you were just cut off on. If you had already asked an EARLIER
+  question that the caller never actually answered, their reply is most
+  likely answering THAT one (they were slow and you moved on too fast).
+  Before acting, scan your recent questions and check which are still
+  UNANSWERED; bind the reply to the question it actually fits. Example
+  shape: you asked "when?", then (before they answered) "what type?"; they
+  say "next week" → that answers "when", not "what type". If it's genuinely
+  ambiguous which question they meant, ask one short clarifying question
+  rather than guess.
 """
 
 
