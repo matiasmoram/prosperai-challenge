@@ -115,10 +115,21 @@ make run-all               # launch everything: agent, EHR, console + front desk
 # then open http://127.0.0.1:7861/call and click Connect to talk to it
 ```
 
+**On Windows / no `make`?** Run the exact same steps with `uv` directly:
+
+```bash
+cp env.example .env                     # (PowerShell: copy env.example .env)
+uv sync                                 # = make install
+uv run python scripts/seed.py           # = make seed
+uv run python scripts/run_all.py        # = make run-all
+# then open http://127.0.0.1:7861/call and click Connect to talk to it
+```
+
 Want proof without making a call or spending a cent?
 
 ```bash
-make mock-eval             # run all 108 scenarios offline in ~5 s
+make mock-eval                          # all 108 scenarios offline in ~5 s
+uv run python -m evals --mock-llm       # same thing, without make
 ```
 
 (Full command list, environment variables, and operations manual: see
