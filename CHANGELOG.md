@@ -177,6 +177,14 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `7a285e3` — **AvailabilityCache adjudicated spec** (FUTURE 1.3, council-decided): full 4-tuple
   key, repo-layer placement, evict-on-commit (reschedule=2 dates, multi-slot=all chained dates),
   TTL 10s default-off, DB-409 stays the guard. Documented, not built (remote-EHR-only payoff).
+- `db34ef3` — **consent gate (architecture, from live log)**: completes the offer-then-confirm
+  invariant. `_READ_BEFORE_WRITE` only blocked list+book in the SAME turn; a CONFIRM_* state
+  persists across turns, so the model could fire create/cancel/reschedule on a turn that was a
+  QUESTION (live `7c9d55a5`: caller asked "tell me which ones are not taken" → model booked an
+  un-offered Ben Osei slot, ended the call, then hallucinated "no slots"). New gate refuses the
+  write when the caller's last turn matches `_INFO_SEEKING` and NOT `_AFFIRM` — asymmetric, so
+  natural picks ("the 2:30", "go ahead") still commit; zero extra LLM round-trips; doesn't touch
+  `create_patient`. +2 tests. ARCHITECTURE §13.7 + §14 (offered-slot redesign as follow-up).
 - `d93d39d` — **confirm states keep their read tool (architecture)**: CONFIRM_BOOK/CANCEL/RESCHEDULE
   no longer expose only the write — they regain `list_availability_slots`/`get_upcoming_appointments`
   so a non-yes ("which are free?") re-offers instead of cornering the bot into booking a slot the
