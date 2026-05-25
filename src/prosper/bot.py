@@ -54,8 +54,10 @@ from pipecat.frames.frames import (
     Frame,
     LLMMessagesAppendFrame,
     StartFrame,
+    StartInterruptionFrame,
     TranscriptionFrame,
     TTSSpeakFrame,
+    UserStartedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -249,6 +251,17 @@ class DispatcherProcessor(FrameProcessor):
             if opener:
                 await self.push_frame(TTSSpeakFrame(opener))
             return
+
+        # Barge-in diagnostics: these fire ONLY if the input-transport VAD
+        # actually detects the caller speaking. If you talk over the bot and
+        # neither line appears in the log, the VAD never heard you (mic/echo —
+        # the bot's own audio is masking your voice; try headphones), NOT a
+        # dispatcher bug. If they DO appear but the bot keeps talking, the
+        # problem is downstream flush. This is the line that ends the guessing.
+        if isinstance(frame, UserStartedSpeakingFrame):
+            logger.info("VAD: user started speaking (barge-in candidate)")
+        elif isinstance(frame, StartInterruptionFrame):
+            logger.info("VAD: INTERRUPTION fired — cancelling bot speech")
 
         if isinstance(frame, TranscriptionFrame) and frame.text:
             # Buffer the fragment; a quiet gap flushes the joined utterance as
@@ -610,19 +623,25 @@ async def bot(runner_args: RunnerArguments) -> None:
             # cut the bot off mid-sentence. With higher thresholds the bot
             # kept talking over the caller because it never saw a
             # user_started_speaking event to interrupt the TTS ("no se calla").
-            # - confidence=0.35: lower speech-probability gate so the caller's
-            #   voice is detected even layered over the bot's own audio.
-            # - min_volume=0.15: catch softer interjections ("wait", "no").
-            # - start_secs=0.1: trigger the interrupt fast so the bot stops
-            #   within ~100ms of the caller speaking.
-            # - stop_secs=1.0: still long enough not to clip natural pauses
-            #   between digits / sentences while the caller is talking.
+            # Tuned aggressively for BARGE-IN: live testing showed the caller
+            # talking over the bot was NOT detected (0 interruptions) — the
+            # bot's own audio masks a soft overlapping "yeah"/"no" so it never
+            # crossed the gate. Lowered both gates so an interjection layered
+            # over TTS still registers as speech and fires the interruption:
+            # - confidence=0.25: lower speech-probability gate.
+            # - min_volume=0.06: catch quiet interjections over the bot audio.
+            # - start_secs=0.1: fire the interrupt within ~100ms.
+            # - stop_secs=1.0: don't clip natural pauses between digits.
+            # If this over-fires (bot interrupts itself on echo), the caller is
+            # likely on speakers without echo cancellation — raise back toward
+            # 0.35 / 0.15. The VAD log lines in DispatcherProcessor make the real
+            # behaviour visible per call.
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
-                    confidence=0.35,
+                    confidence=0.25,
                     start_secs=0.1,
                     stop_secs=1.0,
-                    min_volume=0.15,
+                    min_volume=0.06,
                 ),
             ),
         ),
