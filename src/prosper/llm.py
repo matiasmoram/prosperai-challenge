@@ -345,8 +345,18 @@ async def classify_symptoms(
             retryable=False,
         )
     # Defensive clamp: if the model accidentally emits a floor > recommended
-    # (violates the ≤ contract), silently lower the floor to the recommended
-    # rather than returning an Err that blocks the whole booking flow.
+    # (violates the ≤ contract), lower the floor to the recommended rather than
+    # returning an Err that blocks the whole booking flow. Log it — a persistent
+    # clamp means the triage model is drifting and the slip must be observable in
+    # ops logs, not swallowed (review rev-spine LOW).
+    if int(minimum_safe_raw) > int(duration):
+        logger.warning(
+            "triage floor > recommended (floor={}, duration={}); clamping to {} — "
+            "model may be drifting on the minimum_safe_minutes ≤ duration_minutes contract",
+            minimum_safe_raw,
+            duration,
+            duration,
+        )
     minimum_safe_minutes = min(int(minimum_safe_raw), int(duration))
     # ``confidence`` should be a number, but a misbehaving model might emit a
     # string ("high") or omit it. Coerce defensively — a bad value must yield

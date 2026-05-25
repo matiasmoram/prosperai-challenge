@@ -360,6 +360,46 @@ def test_validate_against_memory_above_floor_passes(ehr_client: EHRClient) -> No
     assert err is None
 
 
+def test_validate_against_memory_below_floor_as_string_still_rejected(
+    ehr_client: EHRClient,
+) -> None:
+    """F-002 regression: the LLM may emit duration_minutes as a string ("30").
+    Pydantic on the EHR coerces it, so the floor guard must coerce identically —
+    otherwise it fails open and a sub-floor booking slips past."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(
+        identified_patient={"id": "patient-A"},
+        last_slots=[{"slot_id": "slot-1"}],
+        minimum_safe_minutes=60,
+    )
+    err = d._validate_against_memory(
+        "create_appointment",
+        {"slot_id": "slot-1", "patient_id": "patient-A", "duration_minutes": "30"},
+    )
+    assert err is not None
+    assert err.code == "below_minimum_safe_duration"
+
+
+def test_validate_against_memory_below_floor_as_float_still_rejected(
+    ehr_client: EHRClient,
+) -> None:
+    """F-002 regression: a float duration (30.0) must coerce and be rejected."""
+    canned = CannedLLM([])
+    d = Dispatcher(llm=canned, ehr_client=ehr_client)
+    d.memory = SessionMemory(
+        identified_patient={"id": "patient-A"},
+        last_slots=[{"slot_id": "slot-1"}],
+        minimum_safe_minutes=60,
+    )
+    err = d._validate_against_memory(
+        "create_appointment",
+        {"slot_id": "slot-1", "patient_id": "patient-A", "duration_minutes": 30.0},
+    )
+    assert err is not None
+    assert err.code == "below_minimum_safe_duration"
+
+
 # ---------------------------------------------------------------------------
 # _record_tool_result — Err path
 # ---------------------------------------------------------------------------

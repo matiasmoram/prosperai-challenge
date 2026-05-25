@@ -216,6 +216,28 @@ def _maybe_handle_index(candidate: Any) -> int | None:
     return int(match.group(1)) - 1
 
 
+def _as_duration_int(value: Any) -> int | None:
+    """Coerce an LLM-supplied ``duration_minutes`` to int, or None if not numeric.
+
+    The OpenAI schema marks the field ``integer`` but a model may still emit a
+    string ("30") or float (30.0). Pydantic on the EHR coerces those before the
+    booking lands, so the clinical-floor guard must coerce identically — else it
+    compares with ``isinstance(int)`` only, fails open on a string duration, and
+    a sub-floor booking slips past the F-002 guard. ``bool`` is excluded (it
+    subclasses ``int`` but is never a valid duration).
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        return int(text) if text.lstrip("-").isdigit() else None
+    return None
+
+
 # Ordinal words → 0-based index, for picking from a short disambiguation
 # list ("the first one", "second please"). Only the first few — caller is
 # choosing between 2-3 candidates, never a long list.
@@ -1163,8 +1185,8 @@ class Dispatcher:
             # callers who bypassed triage can still book any valid duration.
             floor = self.memory.minimum_safe_minutes
             if floor is not None:
-                chosen = args.get("duration_minutes")
-                if isinstance(chosen, int) and chosen < floor:
+                chosen = _as_duration_int(args.get("duration_minutes"))
+                if chosen is not None and chosen < floor:
                     return Err(
                         code="below_minimum_safe_duration",
                         message=(
@@ -1397,6 +1419,16 @@ class Dispatcher:
         if _RESCHEDULE_INTENT.search(user_text):
             self.memory.wants_reschedule = True
         if self.state is State.CHOOSE_INTENT:
+            # TWO-TIER intent routing (deliberate, do not collapse): this regex
+            # is the fast-path for DECISIVE phrasings — it transitions without an
+            # LLM round-trip (hard rule 7: latency is a feature). Anything it does
+            # NOT match falls through with no transition, the LLM turn runs, and
+            # the `route_intent` tool (hybrid NLU, ADR-council 2026-05-24) resolves
+            # the ambiguous case. Once this regex transitions out of CHOOSE_INTENT,
+            # `route_intent` is no longer whitelisted, so the two paths never
+            # double-fire. Keep this regex narrow + reschedule-first so it only
+            # claims clear intents; ambiguity is the LLM's job, not the regex's.
+            #
             # Reschedule is a sub-intent of cancel — check it first so
             # "move my appointment" routes to the atomic RESCHEDULE_FLOW
             # rather than falling into CANCEL_FLOW and then chaining
@@ -1618,6 +1650,10 @@ class Dispatcher:
             appts = await self._ehr.get_upcoming_appointments(str(patient_id))
         except Exception:
             # EHR error: flag stays False → choose_ctx stays None → normal UX.
+            # Log at debug so a persistent EHR outage during CHOOSE_INTENT entry
+            # is observable (the prefetch is advisory, so we degrade quietly —
+            # but silent-forever hides a real backend health issue; rev-spine LOW).
+            logger.debug("CHOOSE_INTENT prefetch failed; falling back to normal UX", exc_info=True)
             return
         self.memory.last_upcoming_appointments = [
             {

@@ -37,6 +37,20 @@ Format: `Q — context · INTERIM CHOICE made · how to change it`.
   talking? repeats the cut-off line? ignores you?) — that symptom is needed to fix
   any real runtime issue, since it can't be reproduced offline.
 
+## Architectural-authority questions (review mode, 2026-05-25)
+
+- **Two-tier intent routing in CHOOSE_INTENT (regex fast-path + LLM `route_intent`
+  fallback).** A reviewer flagged that the regex in `_maybe_transition_from_user_text`
+  runs BEFORE the LLM turn, so it front-runs the `route_intent` tool: any decisive
+  phrasing the regex matches transitions without an LLM round-trip, and `route_intent`
+  only resolves the phrases the regex misses. INTERIM CHOICE: **keep both** — the regex
+  is a deliberate latency optimization (hard rule 7) and routes the key cases correctly
+  (reschedule-first; "change my appointment" → reschedule). Documented the two-tier
+  contract in-code so nobody collapses it by accident. FSM edge-validation prevents
+  double-fire. CHANGE IT IF: you'd rather have a single source of truth and let the LLM
+  own ALL CHOOSE_INTENT routing (simpler, but +1 LLM round-trip per call → slower). This
+  is an architecture-authority call, hence logged not unilaterally refactored.
+
 ## Deferred / flagged (not done — your call)
 
 - **route_intent ambiguity (F7 sim finding).** An ambiguous "I want to change my
