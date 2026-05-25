@@ -397,6 +397,15 @@ FALLBACK_LINES = {
         "I'm sorry I wasn't able to help with this call. Please call us back "
         "and our front desk team can assist you directly."
     ),
+    # Spoken when the LLM call itself fails completely (tenacity retries +
+    # fallback model both exhausted). A bot_failed mail is fired in parallel
+    # so staff know to call this person back. F3 owns the exact wording;
+    # keep it warm, brief, and free of jargon. ≤ 2 sentences.
+    "system_failure": (
+        "I'm sorry — our system is having trouble right now and I wasn't able "
+        "to complete your request. I've let our front desk know, and someone "
+        "will call you back shortly."
+    ),
 }
 
 

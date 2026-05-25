@@ -592,7 +592,25 @@ class Dispatcher:
                 session_id=self.session_id,
                 turn_id=self.turn_id,
             ):
-                reply = await self._llm.generate(state=self.state.value, history=msgs, tools=tools)
+                try:
+                    reply = await self._llm.generate(
+                        state=self.state.value, history=msgs, tools=tools
+                    )
+                except Exception:
+                    # LLM totally failed: tenacity retries exhausted AND the
+                    # fallback model (if configured) also failed. Speak a calm
+                    # canned line — no LLM needed — and fire a bot_failed mail
+                    # so staff know this caller needs a human follow-up.
+                    # The exception does NOT propagate; bot.py's outer
+                    # try/except remains the safety net for everything else.
+                    logger.exception(
+                        "LLM generate failed (session=%s state=%s); speaking system_failure line",
+                        self.session_id,
+                        self.state.value,
+                    )
+                    self.transcript.append({"kind": "llm_total_failure", "state": self.state.value})
+                    self._emit_system_failure_mail()
+                    return FALLBACK_LINES["system_failure"]
             llm_duration_ms = (time.perf_counter() - llm_started) * 1000.0
             self._publish("latency_tick", {"phase": "llm", "duration_ms": llm_duration_ms})
             if reply.usage is not None:
@@ -953,6 +971,46 @@ class Dispatcher:
             body=(
                 f"The assistant got stuck in state {self.state.value} and could not "
                 f"finish the caller's request. Please follow up."
+            ),
+            patient_name=name,
+            patient_phone=phone,
+            category="bot_failed",
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._mail.write(msg))
+        self._inflight_publishes.add(task)
+        task.add_done_callback(self._inflight_publishes.discard)
+
+    def _emit_system_failure_mail(self) -> None:
+        """Fire-and-forget bot_failed mail when the LLM call totally fails.
+
+        Distinct from ``_emit_safety_net_handoff`` (loop exhaustion) — this
+        fires when tenacity retries AND the fallback model both raise, meaning
+        the call path has no LLM at all. Staff see a "system failure" subject
+        so they can distinguish a stuck-loop call from a total outage call.
+        Fire-and-forget via ``_inflight_publishes``; a write failure is
+        swallowed so the already-failed path doesn't crash further.
+        """
+        if self._mail is None:
+            return
+        patient = self.memory.identified_patient or {}
+        name = (
+            f"{patient.get('first_name', '')} {patient.get('last_name', '')}".strip()
+            or "(unknown — see transcript)"
+        )
+        phone = str(patient.get("phone") or "(unknown)")
+        msg = make_message(
+            session_id=self.session_id,
+            kind="bot_failed",
+            to_label="reception@prosper.health",
+            subject=f"System failure — {name}",
+            body=(
+                f"The LLM call failed completely (retries + fallback exhausted) in "
+                f"state {self.state.value}. The caller heard a canned apology line. "
+                f"Please follow up with this caller."
             ),
             patient_name=name,
             patient_phone=phone,

@@ -283,6 +283,11 @@ class DispatcherProcessor(FrameProcessor):
         # last-resort guard for live calls; mid-pipeline crash would kill the WebRTC session
         except Exception as e:
             logger.exception("dispatcher.handle_user_turn raised: {}", e)
+            # Fire a best-effort bot_failed mail so staff know this caller
+            # needs a human follow-up. The LLM-total-failure path fires its
+            # own mail inside _llm_turn; this catch covers anything else
+            # (EHR client crash, unexpected bug) that escapes the dispatcher.
+            self._dispatcher._emit_system_failure_mail()
             reply = prompts.FALLBACK_LINES["dispatcher_crash"]
         if self._stt_end_ts is not None:
             ttft_ms = (time.perf_counter() - self._stt_end_ts) * 1000
