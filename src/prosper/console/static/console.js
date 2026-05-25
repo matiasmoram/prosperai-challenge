@@ -336,11 +336,41 @@ async function loadSessions() {
   }
 }
 
-async function resolveSessionId() {
-  const fromPath = pickSessionFromPath();
-  if (fromPath) return fromPath;
-  // Fallback: fetch the session list and pick the newest (index 0).
-  return loadSessions();
+// Reveal/hide the amber "REPLAY" banner so a recorded session is never mistaken
+// for a live call. When showing, label it with the selected session's id + time
+// (read from the picker option text).
+function toggleReplayBanner(on) {
+  const banner = document.getElementById("replay-banner");
+  if (!banner) return;
+  if (!on) {
+    banner.classList.add("hidden");
+    return;
+  }
+  const meta = document.getElementById("replay-meta");
+  const picker = document.getElementById("session-picker");
+  if (meta && picker && picker.selectedIndex >= 0) {
+    const opt = picker.options[picker.selectedIndex];
+    meta.textContent = opt && opt.textContent ? ` · ${opt.textContent}` : "";
+  }
+  banner.classList.remove("hidden");
+}
+
+// Idle landing shown when /console is opened with no live call in progress.
+// Replaces the "awaiting first turn…" placeholders that otherwise read like a
+// call is starting. `hasSessions` toggles the replay hint.
+function showIdleLanding(hasSessions) {
+  setText("activity-line", "No live call in progress.");
+  const transcript = document.getElementById("transcript-list");
+  if (transcript) {
+    const hint = hasSessions
+      ? "No live call. Pick a recorded session above to replay it."
+      : "No live call, and no recorded sessions yet.";
+    transcript.replaceChildren();
+    const li = document.createElement("li");
+    li.className = "text-slate-400 italic";
+    li.textContent = hint;
+    transcript.appendChild(li);
+  }
 }
 
 function connect(sessionId) {
@@ -361,7 +391,11 @@ function connect(sessionId) {
   }, 1500);
 
   function attach(src) {
-    src.onopen = () => setConnState(url.includes("replay") ? "replay" : "live");
+    src.onopen = () => {
+      const isReplay = url.includes("replay");
+      setConnState(isReplay ? "replay" : "live");
+      toggleReplayBanner(isReplay);
+    };
     src.onerror = () => setConnState("reconnecting");
     src.onmessage = (msg) => {
       receivedAny = true;
@@ -430,16 +464,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     dismissBtn.addEventListener("click", () => errorBanner.classList.add("hidden"));
   }
 
-  const sid = await resolveSessionId();
-  if (!sid) {
-    // loadSessions already set the error banner if it was a fetch failure.
-    // If the banner is still hidden it's a genuine empty state.
-    if (errorBanner && errorBanner.classList.contains("hidden")) {
-      setConnState("idle");
-    }
-    return;
+  // Always populate the picker; only AUTO-CONNECT when the session was named
+  // explicitly in the URL (`/console/<id>`). Opening `/console` with no id must
+  // NOT auto-replay the newest recording — that looked like a live call when
+  // nothing was happening. Default = idle landing; replay is opt-in via picker.
+  const newest = await loadSessions();
+  if (errorBanner && !errorBanner.classList.contains("hidden")) return; // fetch failed
+  const fromPath = pickSessionFromPath();
+  if (fromPath) {
+    if (picker) picker.value = fromPath;
+    connect(fromPath);
+  } else {
+    setConnState("idle");
+    showIdleLanding(Boolean(newest));
   }
-  // If a picker exists, keep it in sync with the currently-displayed session.
-  if (picker) picker.value = sid;
-  connect(sid);
 });

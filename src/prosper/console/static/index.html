@@ -33,6 +33,13 @@
             class="ml-4 text-red-500 hover:text-red-700 font-semibold">dismiss</button>
   </div>
 
+  <!-- Replay banner — shown ONLY when viewing a recorded past session, so a
+       replay is never mistaken for a live call. -->
+  <div id="replay-banner"
+       class="hidden bg-amber-100 border-b border-amber-300 px-6 py-2 text-xs font-semibold text-amber-800 shrink-0">
+    ⏺ REPLAY — recorded past session<span id="replay-meta"></span>. This is NOT a live call.
+  </div>
+
   <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between shrink-0">
     <div class="flex items-center gap-3">
       <div class="w-8 h-8 rounded-lg bg-sky-600 text-white flex items-center justify-center font-bold">P</div>

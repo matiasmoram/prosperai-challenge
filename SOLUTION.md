@@ -351,6 +351,15 @@ Wiring:
   Confusing the last two poisons clinic dashboards, so the categorisation
   is explicit.
 
+**Live vs replay (no fake-live).** `/console/stream/{id}` tails the live bus;
+`/console/replay/{id}` replays a recorded session from the audit JSONL. Opening
+`/console` with **no** session id shows an **idle landing** ("No live call in
+progress") and only populates the session picker — it does NOT auto-replay the
+newest recording, which previously looked like a live call on a standing console
+with no attached bus (e.g. under `make run-all`). Selecting a past session (or
+`/console/<id>`) replays it behind a prominent amber **REPLAY** banner so a
+recording is never mistaken for a live call.
+
 Design spec: `docs/superpowers/specs/2026-05-20-operator-console-design.md`
 + `docs/adr/004-operator-console-event-stream.md`.
 

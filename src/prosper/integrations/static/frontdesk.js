@@ -6,6 +6,9 @@ const mailView = document.getElementById("mail-view");
 const calView = document.getElementById("cal-view");
 const calGrid = document.getElementById("cal-grid");
 const calRange = document.getElementById("cal-range");
+const calPrev = document.getElementById("cal-prev");
+const calToday = document.getElementById("cal-today");
+const calNext = document.getElementById("cal-next");
 const tabMail = document.getElementById("tab-mail");
 const tabCal = document.getElementById("tab-cal");
 
@@ -139,10 +142,17 @@ const SPECIALTY_COLORS = {
 };
 const specColor = (s) => SPECIALTY_COLORS[s] || { bg: "#eef1f4", accent: "#64748b" };
 
-function weekDays() {
+// Which week the grid is showing, in weeks from today (0 = current week,
+// -1 = last week, +1 = next week). Nav buttons mutate this; the poll reads it.
+let weekOffset = 0;
+
+// The 7 days for `today + offset*7`, today-anchored (day 0 is today's weekday
+// in the current week) to match the original "this week = today..today+6".
+function weekDays(offset) {
   const out = [];
   const base = new Date();
   base.setHours(0, 0, 0, 0);
+  base.setDate(base.getDate() + offset * 7);
   for (let i = 0; i < 7; i++) {
     const d = new Date(base);
     d.setDate(base.getDate() + i);
@@ -157,11 +167,12 @@ function renderCalendar(entries) {
   const scrollTop = calGrid.scrollTop;
   const scrollLeft = calGrid.scrollLeft;
 
-  const days = weekDays();
-  calRange.textContent =
+  const days = weekDays(weekOffset);
+  const span =
     days[0].toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
     " – " +
     days[6].toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  calRange.textContent = weekOffset === 0 ? "This week · " + span : span;
 
   // Bucket appointments by calendar day, ordered by time within each day.
   const byDay = new Map();
@@ -178,7 +189,8 @@ function renderCalendar(entries) {
 
   calGrid.replaceChildren();
   if (placed === 0) {
-    calGrid.appendChild(el("div", "cal-empty", "No appointments this week."));
+    const when = weekOffset === 0 ? "this week" : "in " + span;
+    calGrid.appendChild(el("div", "cal-empty", "No appointments " + when + "."));
     return;
   }
 
@@ -219,7 +231,7 @@ function renderCalendar(entries) {
 }
 
 async function loadCalendar() {
-  const days = weekDays();
+  const days = weekDays(weekOffset);
   try {
     const r = await fetch(
       "/frontdesk/appointments?from=" + isoDate(days[0]) + "&to=" + isoDate(days[6])
@@ -231,6 +243,16 @@ async function loadCalendar() {
     calGrid.appendChild(el("div", "cal-empty", "Could not load calendar."));
   }
 }
+
+// Move the grid by `delta` weeks (or jump to 0 for "Today") and re-fetch.
+function gotoWeek(offset) {
+  weekOffset = offset;
+  loadCalendar();
+}
+
+calPrev.addEventListener("click", () => gotoWeek(weekOffset - 1));
+calNext.addEventListener("click", () => gotoWeek(weekOffset + 1));
+calToday.addEventListener("click", () => gotoWeek(0));
 
 // ---- tabs -------------------------------------------------------------------
 

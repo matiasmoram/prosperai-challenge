@@ -84,6 +84,14 @@
                display: flex; align-items: baseline; gap: 10px; }
     .cal-bar .title { font-weight: 600; font-size: 15px; }
     .cal-bar .sub { color: var(--muted); font-size: 12px; }
+    .cal-nav { display: inline-flex; gap: 4px; align-self: center; }
+    .cal-nav button {
+      font: inherit; font-size: 13px; cursor: pointer; color: var(--ink);
+      background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+      padding: 4px 10px;
+    }
+    .cal-nav button:hover { background: #f5f9ff; border-color: var(--accent); }
+    .cal-nav button:active { background: var(--sel); }
     .cal-empty { padding: 32px; color: var(--muted); }
     .cal-grid { flex: 1; overflow: auto; display: grid;
                 grid-template-columns: repeat(7, minmax(150px, 1fr)); gap: 1px;
@@ -134,7 +142,12 @@
 
     <section id="cal-view" class="hidden">
       <div class="cal-bar">
-        <span class="title">This week</span>
+        <span class="title">Calendar</span>
+        <span class="cal-nav">
+          <button id="cal-prev" type="button" aria-label="Previous week">‹ Prev</button>
+          <button id="cal-today" type="button">Today</button>
+          <button id="cal-next" type="button" aria-label="Next week">Next ›</button>
+        </span>
         <span class="sub" id="cal-range"></span>
       </div>
       <div class="cal-grid" id="cal-grid"></div>

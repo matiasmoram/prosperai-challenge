@@ -1,23 +1,28 @@
 """Seed the local SQLite EHR with demo data.
 
 Inserts ten providers across five specialties (two per specialty: Therapist,
-Psychiatrist, General Practice, Dermatologist, Physiotherapist) and ~1960
-slots (next 14 days, 9am-5pm UTC, every 30 min, lunch noon-1pm skipped)
-plus 16 demo patients with deliberate variety:
+Psychiatrist, General Practice, Dermatologist, Physiotherapist) and a five-week
+slot grid (one past week + four future weeks, 9am-5pm UTC, every 30 min, lunch
+noon-1pm skipped) plus 16 demo patients with deliberate variety:
 
-- At least one patient with ≥4 upcoming appointments seeded.
+- At least one patient with ≥4 upcoming appointments seeded (Ada Lovelace).
+- A bulk fill of ~40-55 booked appointments spread deterministically across
+  business days so the front-desk calendar has content every week (past week,
+  this week, and the next three) rather than a near-empty grid.
 - Two pairs of similar names (same last name, different DOB) to exercise
   the name+DOB lookup path.
 - DOB spread: elderly (1939), young-adult (2002), and mid-career.
 - Non-ASCII / apostrophe names to stress-test ``normalize_name``.
 
-Idempotent: skips inserts if matching rows already exist.
+Idempotent: skips inserts if matching rows already exist; the per-slot
+existing-appointment check means re-running never double-books.
 
 Run: ``uv run python scripts/seed.py``
 """
 
 from __future__ import annotations
 
+import random
 from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import select
@@ -106,11 +111,19 @@ DEMO_PATIENTS: list[dict[str, object]] = [
 # Slot generation
 # ---------------------------------------------------------------------------
 
-def _make_slots_for_provider(provider_id: str, base: date) -> list[Slot]:
-    """Generate 30-min slots Mon-Fri 09:00-17:00 naive-UTC for 14 days."""
+# Slot grid spans one past week + four future weeks so the front-desk calendar
+# has content to browse in either direction (not just "this week").
+_SLOT_WINDOW_START_OFFSET = -7  # days before today
+_SLOT_WINDOW_DAYS = 35  # total calendar days generated (≈ 5 weeks)
+
+
+def _make_slots_for_provider(
+    provider_id: str, start: date, days: int = _SLOT_WINDOW_DAYS
+) -> list[Slot]:
+    """Generate 30-min slots Mon-Fri 09:00-17:00 naive-UTC across ``days`` days."""
     slots: list[Slot] = []
-    for day_offset in range(14):
-        d = base + timedelta(days=day_offset)
+    for day_offset in range(days):
+        d = start + timedelta(days=day_offset)
         # Skip weekends (Mon=0 … Sun=6).
         if d.weekday() >= 5:
             continue
@@ -118,14 +131,14 @@ def _make_slots_for_provider(provider_id: str, base: date) -> list[Slot]:
             if hour == 12:
                 continue  # lunch
             for minute in (0, 30):
-                start = datetime.combine(d, time(hour, minute), tzinfo=timezone.utc)
+                start_dt = datetime.combine(d, time(hour, minute), tzinfo=timezone.utc)
                 # Strip tzinfo → naive UTC (seed convention).
-                start = start.replace(tzinfo=None)
+                start_dt = start_dt.replace(tzinfo=None)
                 slots.append(
                     Slot(
                         provider_id=provider_id,
-                        start_at=start,
-                        end_at=start + timedelta(minutes=30),
+                        start_at=start_dt,
+                        end_at=start_dt + timedelta(minutes=30),
                     )
                 )
     return slots
@@ -136,6 +149,7 @@ def _make_slots_for_provider(provider_id: str, base: date) -> list[Slot]:
 # We book her into future slots (days 2-5) so get_upcoming_appointments picks
 # them up; these are deliberately spread across different providers.
 # ---------------------------------------------------------------------------
+
 
 def _seed_ada_appointments(session: Session, ada_id: str, base: date) -> None:
     """Book Ada Lovelace into four slots spread across different providers.
@@ -188,8 +202,98 @@ def _seed_ada_appointments(session: Session, ada_id: str, base: date) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bulk demo appointments — fill the front-desk calendar so it isn't sparse.
+#
+# Deterministic (seeded RNG) so the candidate set is *fixed*: the same
+# (day, hour, minute) triples are chosen every run, mapped to the same
+# (provider, patient) by candidate index.  Idempotency is structural — a
+# re-run picks the identical fixed candidates, finds their slots already
+# booked, and adds nothing.  A taken candidate is *dropped*, never substituted
+# with the next free slot (substitution is what would re-fill on every run).
+#
+# We walk every business day from (today-5) to (today+20).  Patients rotate
+# (Ada excluded so we don't clash with her four upcoming demo bookings) and
+# providers rotate so specialties stay spread across the week.
+# ---------------------------------------------------------------------------
+
+_BULK_WINDOW_START_OFFSET = -5  # first business-day candidate (days from today)
+# +26 reaches into the fourth future week so every visible week (past, this,
+# +1, +2, +3) gets content. Stays inside the 35-day slot grid (today-7..+27).
+_BULK_WINDOW_END_OFFSET = 26  # last business-day candidate (days from today)
+_BULK_HOURS: tuple[int, ...] = (9, 10, 11, 14, 15, 16)
+_BULK_MINUTES: tuple[int, ...] = (0, 30)
+_BULK_PER_DAY = 3  # appointments booked per business day
+
+
+def _seed_bulk_appointments(session: Session, today: date) -> None:
+    """Book ~40-55 appointments deterministically across the slot window.
+
+    Spreads bookings over business days from ``today-5`` to ``today+20`` so
+    every visible week of the calendar has content.  Excludes Ada (she has her
+    own four demo bookings).  The candidate set is fixed per run, so skipping a
+    missing or already-booked slot leaves it dropped (not substituted) and the
+    seed stays idempotent on re-run.
+    """
+    rng = random.Random(20260525)  # noqa: S311 — demo-data spread, not crypto
+
+    providers = session.execute(select(Provider)).scalars().all()
+    # Exclude Ada (phone +12025550100) so her four-appointment demo is untouched.
+    patients = [
+        p for p in session.execute(select(Patient)).scalars().all() if p.phone != "+12025550100"
+    ]
+    if not providers or not patients:
+        return  # nothing to book against; guard only
+
+    # ci = global candidate index → drives provider/patient rotation. It
+    # advances once per *candidate considered* (not per successful add) so a
+    # given candidate always maps to the same provider+patient across runs.
+    ci = 0
+    for day_offset in range(_BULK_WINDOW_START_OFFSET, _BULK_WINDOW_END_OFFSET + 1):
+        d = today + timedelta(days=day_offset)
+        if d.weekday() >= 5:
+            continue  # weekends have no slots
+        # Fix the per-day candidate times deterministically: shuffle the full
+        # grid with the seeded RNG, then take a stable slice. Same seed → same
+        # slice every run.
+        time_choices = [(h, m) for h in _BULK_HOURS for m in _BULK_MINUTES]
+        rng.shuffle(time_choices)
+        for hour, minute in time_choices[:_BULK_PER_DAY]:
+            provider = providers[ci % len(providers)]
+            patient = patients[ci % len(patients)]
+            ci += 1
+            slot_start = datetime(d.year, d.month, d.day, hour, minute)
+            slot = session.execute(
+                select(Slot).where(
+                    Slot.provider_id == provider.id,
+                    Slot.start_at == slot_start,
+                )
+            ).scalar_one_or_none()
+            if slot is None:
+                continue  # dropped, not substituted
+            existing = session.execute(
+                select(Appointment).where(
+                    Appointment.slot_id == slot.id,
+                    Appointment.status == "scheduled",
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                continue  # already booked (re-run, or Ada holds it) → drop
+            session.add(
+                Appointment(
+                    patient_id=patient.id,
+                    slot_id=slot.id,
+                    duration_minutes=30,
+                    status="scheduled",
+                )
+            )
+
+    session.commit()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     engine = get_engine()
@@ -197,28 +301,26 @@ def main() -> None:
     with Session(engine) as session:
         # -- providers -------------------------------------------------------
         for name, tz, specialty in PROVIDERS:
-            if not session.execute(
-                select(Provider).where(Provider.name == name)
-            ).first():
+            if not session.execute(select(Provider).where(Provider.name == name)).first():
                 session.add(Provider(name=name, timezone=tz, specialty=specialty))
         session.commit()
 
+        today = datetime.now(timezone.utc).date()
+
         # -- slots -----------------------------------------------------------
+        # Grid spans one past week + four future weeks (see _SLOT_WINDOW_*),
+        # so the calendar has browsable content in both directions. Ada's and
+        # the bulk bookings anchor on ``today`` (not the window start) so the
+        # upcoming-appointment demo always lands in the future.
         if session.execute(select(Slot).limit(1)).first() is None:
-            base = datetime.now(timezone.utc).date() + timedelta(days=1)
+            slot_start = today + timedelta(days=_SLOT_WINDOW_START_OFFSET)
             for prov in session.execute(select(Provider)).scalars():
-                session.add_all(_make_slots_for_provider(prov.id, base))
+                session.add_all(_make_slots_for_provider(prov.id, slot_start, _SLOT_WINDOW_DAYS))
             session.commit()
-        else:
-            # Derive base from existing slots (idempotent re-run).
-            first_slot = session.execute(select(Slot).limit(1)).scalar_one()
-            base = first_slot.start_at.date() - timedelta(days=0)
 
         # -- patients --------------------------------------------------------
         for p in DEMO_PATIENTS:
-            if not session.execute(
-                select(Patient).where(Patient.phone == p["phone"])
-            ).first():
+            if not session.execute(select(Patient).where(Patient.phone == p["phone"])).first():
                 session.add(Patient(**p))
         session.commit()
 
@@ -227,7 +329,10 @@ def main() -> None:
             select(Patient).where(Patient.phone == "+12025550100")
         ).scalar_one_or_none()
         if ada_row is not None:
-            _seed_ada_appointments(session, ada_row.id, base)
+            _seed_ada_appointments(session, ada_row.id, today)
+
+        # -- bulk calendar fill ----------------------------------------------
+        _seed_bulk_appointments(session, today)
 
         # -- summary ---------------------------------------------------------
         prov_count = session.execute(select(Provider)).scalars().all()
@@ -238,17 +343,19 @@ def main() -> None:
         # Per-specialty breakdown.
         specialty_counts: dict[str, int] = {}
         for prov in prov_count:
-            specialty_counts[prov.specialty] = (
-                specialty_counts.get(prov.specialty, 0) + 1
-            )
-        breakdown = ", ".join(
-            f"{sp}={n}" for sp, n in sorted(specialty_counts.items())
-        )
+            specialty_counts[prov.specialty] = specialty_counts.get(prov.specialty, 0) + 1
+        breakdown = ", ".join(f"{sp}={n}" for sp, n in sorted(specialty_counts.items()))
+        scheduled = [a for a in appt_count if a.status == "scheduled"]
         print(
             f"seeded: providers={len(prov_count)} slots={len(slot_count)} "
-            f"patients={len(pat_count)} appointments={len(appt_count)}"
+            f"patients={len(pat_count)} appointments={len(appt_count)} "
+            f"(scheduled={len(scheduled)})"
         )
         print(f"  specialty breakdown: {breakdown}")
+        print(
+            "  calendar fill: Ada (4 upcoming) + bulk spread across "
+            f"{_BULK_WINDOW_START_OFFSET}..+{_BULK_WINDOW_END_OFFSET} days"
+        )
 
 
 if __name__ == "__main__":
