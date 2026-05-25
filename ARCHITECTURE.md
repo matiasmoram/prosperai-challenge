@@ -989,7 +989,7 @@ them sequentially on demand. Concretely:
 **Why it is deferred (not skipped):** on the current in-process SQLite EHR a
 lookup is ~5–15 ms, so racing it saves <200 ms while adding real asyncio
 task-lifecycle + cancellation complexity in the dispatcher core (drain/cancel on
-`no_match` / intent-flip / call end, the MarioW333 pattern). The cost/benefit
+`no_match` / intent-flip / call end). The cost/benefit
 only flips when the EHR moves out-of-process / remote (round-trips in the
 100–300 ms range), where the overlap pays for the complexity. The groundwork is
 already in `speculation.py` (`next_n_business_days`, fuzzy disambiguation

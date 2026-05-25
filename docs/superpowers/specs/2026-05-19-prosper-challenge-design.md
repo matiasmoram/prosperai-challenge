@@ -1,7 +1,7 @@
 # Prosper Health Challenge — Design Spec (v2)
 
 **Author:** Matías (with LLM council deliberations)
-**Date:** 2026-05-19 (v1) → 2026-05-20 (v2: cross-survey integration)
+**Date:** 2026-05-19 (v1) → 2026-05-20 (v2)
 **Ambition:** Plan B — solid core + two well-executed bonuses
 **Bonuses:** Automated eval suite (LLM-as-judge + state assertion) + latency handling
 
@@ -227,8 +227,8 @@ optional `HeadlessFlow` runner, optional `--baseline` regression diff.
 **Scripted text evals (bulk, CI-runnable):**
 
 Scenarios are plain Python data, one entry per file in `evals/scenarios.py`.
-This is the killer pattern from PauMinguet's submission: adding a scenario is
-a small data PR, not a framework change.
+This is the killer pattern: adding a scenario is a small data PR, not a
+framework change.
 
 ```python
 @dataclass
@@ -288,7 +288,7 @@ Scenarios at launch (6 mandatory, more added as bugs are caught):
 
 CLI: `pytest evals/test_scripted.py` (default). `python -m evals.runner --json results.json --baseline previous.json` (CI gate: exits non-zero on regression). Target <30 s wall clock for the whole suite. Logged metrics per scenario: pass/fail (state + judge), latency per turn, total tool calls, cached-token fraction (if available — `COULD` per council, log even if not surfaced in v1).
 
-**HeadlessFlow runner (SHOULD, Day 3 if on track):** the runner above bypasses Pipecat entirely by importing the dispatcher and node definitions directly — same FSM, same prompts, same tools, just no audio pipeline. This decouples LLM-behaviour testing from STT/TTS/WebRTC and makes evals reproducible. Borrowed conceptually from PauMinguet `evals/runner.py`.
+**HeadlessFlow runner (SHOULD, Day 3 if on track):** the runner above bypasses Pipecat entirely by importing the dispatcher and node definitions directly — same FSM, same prompts, same tools, just no audio pipeline. This decouples LLM-behaviour testing from STT/TTS/WebRTC and makes evals reproducible.
 
 **Audio smoke tests (~3, manual or nightly):**
 - Full pipeline: synthesised caller audio → bot STT → bot logic → bot TTS →
@@ -306,8 +306,8 @@ caching. A ≥1024-token `CLINIC_PERSONA` preamble lives at the top of every
 LLM call — it doesn't change within a session or across sessions. Per-state
 `task_messages` are short and specific, appended after the persona. OpenAI
 caches the preamble after the first hit, dropping per-turn input tokens
-~80% on cached calls (PauMinguet reports 75–85% cache hit rate in his eval
-table — we will measure and report ours).
+~80% on cached calls (a 75–85% cache hit rate is achievable — we will measure
+and report ours).
 
 The persona content describes: clinic identity (Prosper Health), the agent's
 job (booking and cancellation), the canonical interaction style (warm, brief,

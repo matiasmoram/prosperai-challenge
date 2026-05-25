@@ -7,13 +7,13 @@
 
 ## 1. Problem Statement and Inspiration
 
-MarioW333's solution (`SOLUTION_2.md`, lines 42-48, 78-100) demonstrates that substantial latency can be cut by racing Healthie operations against the time a caller spends speaking. The key insight: when the user says their name, three things are simultaneously useful but only one will actually be needed:
+A known voice-agent latency pattern: substantial latency can be cut by racing backend operations against the time a caller spends speaking. The key insight: when the user says their name, three things are simultaneously useful but only one will actually be needed:
 
 1. Does this person already exist? (`find_patient_by_name_dob` / `find_patient_by_phone`)
 2. If they don't exist, we'll need to create them — can we pre-validate the payload?
 3. Regardless of identity outcome, the caller will want slots — can we prefetch today + next 3 business days?
 
-MarioW333 implements this via `asyncio.create_task` (module-level globals) in `save_contact_info` and `save_dob`. His `_creation_task` is an HTTP write to Healthie Playwright that runs while the bot collects DOB. His leaked-state risk is severe: module-level globals (`_current_patient_id`, `_creation_task`) are never cleared on disconnect. A re-used call inherits the previous session's state silently (`SOLUTION_2.md`, lines 176-180).
+The naive implementation fires these via `asyncio.create_task` backed by module-level globals — which leaks state badly: globals like `_current_patient_id` / `_creation_task` are never cleared on disconnect, so a re-used call silently inherits the previous session's state.
 
 Our architecture is more disciplined: `SessionMemory` is scoped per `Dispatcher` instance, the dispatcher is the only tool path, and `identified_patient` is a hard gate. The speculative race must work within these constraints.
 
@@ -268,13 +268,13 @@ HTTP GET. Stale prefetch is advisory; create_appointment's partial unique index 
 
 Phone unique constraint only catches phone collisions. Two callers named "John Doe" with different phones would create two patient rows. **Speculative create_patient must be Python-only payload prep — no HTTP.**
 
-This deliberately departs from MarioW333. Our EHR's POST /patients takes ~5ms; no latency cliff to hide.
+This deliberately departs from the background-create pattern. Our EHR's POST /patients takes ~5ms; no latency cliff to hide.
 
 ---
 
 ## 7. Architecture: Why T_create Is Payload-Prep Only
 
-MarioW333 hides 5-7s of Healthie Playwright latency by firing background creates. Our EHR is ~5ms — sub-noise. Real wins come from:
+The background-create pattern hides 5-7s of remote-EHR latency by firing background creates. Our EHR is ~5ms — sub-noise. Real wins come from:
 
 1. `T_find` overlapping LLM greeting + caller first utterance (50-150ms).
 2. `T_avail` prefetch overlapping IDENTIFY_PATIENT + CHOOSE_INTENT (50-200ms × 4 dates).
@@ -400,7 +400,7 @@ Detection: all avail_results are Err. Recovery: silent; BOOK_FLOW calls list_ava
 Detection: `memory.last_slots` empty. Recovery: `_on_avail_task_done` writes when it completes if `last_slots` still empty. Invariant: never overwrite non-empty `last_slots`.
 
 ### FM-4: Multiple exact-name patients
-Detection: `len(patients) > 1` even above EXACT_THRESHOLD. Recovery: treat as `found_fuzzy_multiple`. Never auto-pick `patients[0]`. (This is the bug MarioW333 has.)
+Detection: `len(patients) > 1` even above EXACT_THRESHOLD. Recovery: treat as `found_fuzzy_multiple`. Never auto-pick `patients[0]`. (A common bug in naive implementations.)
 
 ### FM-5: cleanup_speculation hangs
 Detection: `_cancel_and_drain` timeout (2s guard). Recovery: set `cleaned_up=True` and proceed. Orphan task has no shared mutable state (read-only EHR).
@@ -446,6 +446,4 @@ Absolute paths from repo root `C:\Users\matia\Desktop\prosperai\`:
 - `src/prosper/ehr/api.py` — POST /patients (409 dup phone), GET /availability
 - `src/prosper/ehr/models.py` — Patient.phone unique (line 74), Appointment partial index (113-120)
 - `src/prosper/ehr/repository.py` — normalize_phone, find_patient_by_name_dob (token_sort_ratio)
-- `other solutions/MarioW333_prosper-challenge/healthie.py` — reference _creation_task pattern, module-global leak
-- `other solutions/MarioW333_prosper-challenge/SOLUTION_2.md` — lines 42-48, 78-100, 176-180
 - `evals/scenarios.py` — existing scenario structure

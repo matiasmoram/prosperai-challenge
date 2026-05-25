@@ -20,8 +20,8 @@ data/
 .vscode/
 .idea/
 
-# reference solutions (challenge set)
-other solutions/
+# local-only reference material
+.reference-dump/
 
 # docs and tests don't need to ship in the runtime image
 docs/

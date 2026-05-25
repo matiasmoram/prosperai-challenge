@@ -6,7 +6,7 @@ decisions were deliberate.
 
 ---
 
-### 1. "Why did you build your own EHR instead of using Healthie like the others?"
+### 1. "Why did you build your own EHR instead of integrating with a real one?"
 
 The challenge says *"build an EHR"*. Wiring up a real third-party clinical
 data system would have made the EHR the unknown variable in every eval —

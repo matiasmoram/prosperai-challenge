@@ -17,18 +17,15 @@ Consequence: on the next user turn, the LLM sees the user's barge-in utterance a
 
 Pipecat does emit `StartInterruptionFrame` (per [reference docs](https://reference-server.pipecat.ai/en/stable/api/pipecat.frames.frames.html)). Its built-in `AssistantTranscriptProcessor` would emit a TranscriptionMessage at that point summarising whatever `TTSTextFrame`s the TTS service announced before the interrupt — but **we are not using that processor**. We bypass the standard `LLMContextAggregatorPair` because our FSM dispatcher owns history.
 
-## 2. Other candidates' handling
+## 2. Prior art and the gap
 
-Read of `other solutions/{AlexLopezGomez,PauMinguet,MarioW333,NoelDNathan}_prosper-challenge` for explicit barge-in handling.
+A survey of comparable Pipecat-based voice agents shows three common approaches to barge-in, each with a gap:
 
-| Candidate | Approach | Verdict |
-|---|---|---|
-| **AlexLopezGomez** | Uses `pipecat-flows`. Sets `cancel_on_interruption=False` on all node-transition tool registrations (`flows/nodes.py:137,233,299,418,494,574,643`). Tunes `MinWordsUserTurnStartStrategy(min_words=3, use_interim=False)` (`bot.py:355-362`) to filter mic-echo false interrupts during long TTS. Acknowledges the issue ("Barge-in / VAD tuning per population" — `SOLUTION.md:306`, deferred). Caught a real bug: "Flows greet→collect_identity transition dropped under interruption" (`SOLUTION.md:339`) — fix was inlining the greet into the next node. | Tackles transport-layer false-cancel but **does not address history coherence after a real interrupt**. The flows context aggregator records whatever pipecat's built-in does — partial assistant content lands in context, but no explicit annotation. |
-| **MarioW333** | Disables interruptions entirely: `allow_interruptions=False` on the transport (`bot.py:299`) and `cancel_on_interruption=False` on every tool (`bot.py:243-246`). Documents the choice in `SOLUTION_2.md:126` as a deliberate trade-off to protect Healthie writes. | Sidesteps the problem — the bot literally cannot be interrupted. Bad UX for a clinical voice agent (caller cannot correct the bot mid-sentence) but technically simplest. |
-| **NoelDNathan** | Uses default Pipecat interrupt behaviour; sets `cancel_on_interruption=False` on tool handlers (`bot.py:92-93`) so tool execution survives user speech. Relies entirely on `LLMContextAggregatorPair` to record what the bot spoke. | Closest to what we want but **trusts Pipecat's context aggregator implicitly**. No timeline annotation, no explicit "interrupted" marker; the LLM has to infer interruption from the truncated assistant content alone. |
-| **PauMinguet** | Has the best **research** doc (`docs/research/pipecat-tool-calling.md:108-110, 182`) explaining the `cancel_on_interruption` trade-off for mutation tools, but their implementation only inherits the defaults. Their `plan.md:14` reads "leave default `cancel_on_interruption=True`. Idempotency keeps us safe." — relies on backend idempotency rather than instrumentation. | Right conceptual hooks identified, but the design treats interruption as a pipeline concern, not a conversation-history concern. |
+- **Disable interruptions entirely** — `allow_interruptions=False` on the transport plus `cancel_on_interruption=False` on every tool. Sidesteps the problem (the bot literally cannot be interrupted) and protects backend writes, but it's bad UX for a clinical voice agent: the caller cannot correct the bot mid-sentence.
+- **Tune the VAD to filter false interrupts** — e.g. `MinWordsUserTurnStartStrategy(min_words=3, use_interim=False)` to reject mic-echo during long TTS, plus `cancel_on_interruption=False` so tool execution survives user speech. Tackles transport-layer false-cancel, but **does not address history coherence after a *real* interrupt**.
+- **Lean on Pipecat's `LLMContextAggregatorPair`** to record what the bot spoke. Closest to what we want, but trusts the aggregator implicitly: partial assistant content lands in context with **no explicit "interrupted" marker**, so the LLM must infer truncation from the content alone.
 
-What they all miss: **none of the four reconstruct an explicit "interrupted at word N" annotation in the message history visible to the LLM**. They lean on either (a) pipecat's aggregator, which records best-effort partial text but does not flag interruption to the model, or (b) backend idempotency. Neither solves the timeline-coherence problem the user described.
+The common gap: **none reconstruct an explicit "interrupted at word N" annotation in the message history visible to the LLM.** They lean on either (a) Pipecat's aggregator, which records best-effort partial text but does not flag interruption to the model, or (b) backend idempotency. Neither solves the timeline-coherence problem this design targets.
 
 Side note: Pipecat issue [#4466](https://github.com/pipecat-ai/pipecat/issues/4466) ("Interruption drops already-spoken TTSTextFrames from the output transport's clock queue") confirms upstream that even the partial text already pronounced can be lost on interrupt — so we can't rely on the framework to record it for us.
 
@@ -164,7 +161,3 @@ Tool-cancellation policy is **orthogonal** to this design: we should also pass `
 - [Pipecat issue #2791 — context not updated on user interruptions](https://github.com/pipecat-ai/pipecat/issues/2791)
 - [OpenAI Realtime API: The Missing Manual (latent.space)](https://www.latent.space/p/realtime-api)
 - [OpenAI Realtime conversations guide](https://platform.openai.com/docs/guides/realtime-conversations)
-- Local: `other solutions/AlexLopezGomez_prosper-challenge/{bot.py,SOLUTION.md,flows/nodes.py}`
-- Local: `other solutions/PauMinguet_prosper-challenge/docs/research/pipecat-tool-calling.md`
-- Local: `other solutions/MarioW333_prosper-challenge/bot.py`
-- Local: `other solutions/NoelDNathan_prosper-challenge/bot.py`

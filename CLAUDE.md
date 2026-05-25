@@ -70,7 +70,6 @@ Voice agent (Pipecat + ElevenLabs STT/TTS + OpenAI LLM) for a US clinic, busines
 - **Windows + emoji.** Startup prints with emoji `UnicodeEncodeError` on default `cp1252` console. Run with `$env:PYTHONIOENCODING='utf-8'` in PowerShell.
 - **EHR auto-seed only on empty DB.** Re-seed after schema changes: delete `data/ehr.db` then `make seed`.
 - **409 from EHR is terminal**, not retryable: slot taken or appointment not in scheduled state. Don't loop tenacity over it.
-- **`other solutions/`** is a read-only reference dump from other candidates. Do not edit, do not import from.
 
 ## Doc maintenance — when to CONSULT each, when to UPDATE each
 

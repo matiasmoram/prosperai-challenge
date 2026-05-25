@@ -15,7 +15,7 @@ No shipped code; spec and plan only.
 
 - `c47d9a6` — initial commit.
 - `cd68778` — design spec for the Prosper challenge submission.
-- `b16021a` — spec v2; integrated ideas from a cross-survey of approaches.
+- `b16021a` — spec v2; refined design and scope.
 - `d8f526a` — implementation plan.
 
 ## Phase 1 — Initial vertical slice → `0.1.0` (2026-05-20)

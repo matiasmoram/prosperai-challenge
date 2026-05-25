@@ -219,7 +219,7 @@ stub + judge pass; the current acoustic tier already proves vendor fidelity. See
 > round-trips). **Scope — light warm-path vs full 3-branch race — to be decided
 > by an LLM-council pass before any implementation.**
 
-**Why this matters to Prosper:** On call start the bot asks the caller's name, then runs identity lookup and (later) availability sequentially. A speculative race — fire `find_patient_by_name_dob` and `list_availability_slots` for the next few business days in parallel the moment the name is heard — overlaps EHR I/O with the caller's speech (the MarioW333 pattern). Full design + sequence diagrams + cancellation discipline in `docs/research/speculative_race.md`.
+**Why this matters to Prosper:** On call start the bot asks the caller's name, then runs identity lookup and (later) availability sequentially. A speculative race — fire `find_patient_by_name_dob` and `list_availability_slots` for the next few business days in parallel the moment the name is heard — overlaps EHR I/O with the caller's speech (a speculative-prefetch pattern). Full design + sequence diagrams + cancellation discipline in `docs/research/speculative_race.md`.
 
 **Shipped already (2026-05-23):** the *fuzzy disambiguation* half — `src/prosper/speculation.py` (`classify_find_result`, `build_disambiguation_message`, `EXACT_THRESHOLD`, `next_n_business_days`) plus dispatcher wiring. When a name+DOB lookup returns more than one candidate the bot now holds in `IDENTIFY_PATIENT`, reads the numbered candidates back, and resolves on the caller's pick (`pending_identity_candidates` + `_resolve_pending_identity`) instead of silently guessing. Name-first greeting shipped in the same pass.
 

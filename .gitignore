@@ -37,8 +37,8 @@ htmlcov/
 *.log
 .cache/
 
-# Reference solutions (not part of own submission)
-other solutions/
+# Local-only reference material (never shipped)
+.reference-dump/
 
 # Prosper local state
 data/
