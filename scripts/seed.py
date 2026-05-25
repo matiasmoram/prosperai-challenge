@@ -190,10 +190,12 @@ def _seed_ada_appointments(session: Session, ada_id: str, base: date) -> None:
         ).scalar_one_or_none()
         if existing is not None:
             continue
+        # Make Ada's first visit a 60-min therapy intake so the calendar has a
+        # longer (two-slot) appointment to render; the rest stay 30 min.
         appt = Appointment(
             patient_id=ada_id,
             slot_id=slot.id,
-            duration_minutes=30,
+            duration_minutes=60 if i == 0 else 30,
             status="scheduled",
         )
         session.add(appt)

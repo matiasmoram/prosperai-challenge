@@ -94,11 +94,13 @@
     .cal-nav button:active { background: var(--sel); }
     .cal-empty { padding: 32px; color: var(--muted); }
     .cal-grid { flex: 1; overflow: auto; }
-    /* Time-axis week view: an hours gutter + 7 day columns. Events are
-       absolutely positioned by start time, with height = duration, so you can
-       see when each appointment starts AND ends. --hour-px is set in JS. */
+    /* Week view as a grid of 30-min rows: hours gutter + 7 day columns. Each
+       cell holds the appointments starting in that half-hour, STACKED vertically
+       at full width — so two overlapping visits make that slot taller instead of
+       being squeezed side-by-side. A longer visit (e.g. 60 min) is a taller
+       block (min-height scales with duration) labelled with its full range. */
     .cal-matrix { display: grid; grid-template-columns: 60px repeat(7, minmax(150px, 1fr));
-                  min-width: 1040px; }
+                  min-width: 1040px; align-content: start; }
     .cal-corner { position: sticky; top: 0; left: 0; z-index: 4; background: var(--panel);
                   border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); }
     .cal-dayhead { position: sticky; top: 0; z-index: 3; background: var(--panel);
@@ -109,17 +111,15 @@
                         color: var(--muted); }
     .cal-dayhead.today .dow, .cal-dayhead.today .dnum { color: var(--accent); }
     .cal-dayhead .dnum { font-size: 18px; font-weight: 600; }
-    .cal-hours { position: relative; background: var(--panel);
-                 border-right: 1px solid var(--line); }
-    .cal-hours .hr { position: absolute; right: 7px; transform: translateY(-50%);
-                     font-size: 11px; color: var(--muted); white-space: nowrap; }
-    .cal-daycol { position: relative; border-left: 1px solid var(--line); background: var(--bg);
-                  /* faint hour gridlines, one per --hour-px */
-                  background-image: repeating-linear-gradient(
-                    to bottom, transparent 0, transparent calc(var(--hour-px) - 1px),
-                    var(--line) calc(var(--hour-px) - 1px), var(--line) var(--hour-px)); }
-    .cal-daycol.today { background-color: #f5f9ff; }
-    .cal-event { position: absolute; border-radius: 5px; padding: 3px 7px; overflow: hidden;
+    .cal-hourcell { background: var(--panel); border-right: 1px solid var(--line);
+                    border-top: 1px solid var(--line); padding: 3px 7px 0 0;
+                    font-size: 11px; color: var(--muted); text-align: right; white-space: nowrap; }
+    .cal-hourcell.half { border-top-color: transparent; }
+    .cal-slot { border-left: 1px solid var(--line); border-top: 1px solid #eef1f4;
+                min-height: 46px; padding: 3px; display: flex; flex-direction: column; gap: 3px; }
+    .cal-slot.hour { border-top-color: var(--line); }
+    .cal-slot.today { background: #f5f9ff; }
+    .cal-event { border-radius: 5px; padding: 3px 7px; overflow: hidden;
                  border-left: 3px solid var(--ev-accent, #94a3b8);
                  background: var(--ev-bg, #eef1f4); color: var(--ink);
                  box-shadow: 0 1px 2px rgba(0,0,0,.06); line-height: 1.3; }
