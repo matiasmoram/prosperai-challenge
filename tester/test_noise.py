@@ -37,12 +37,14 @@ def test_available_profiles_lists_known() -> None:
     assert "intent_reversal" in profiles
 
 
-def test_intent_flip_always_fires_and_is_dangerous() -> None:
-    # The intent flip must always fire (it is the targeted dangerous case).
-    rng = random.Random(0)
-    out = inject_asr_errors("I want to cancel my appointment", rng=rng, modes={"intent_flip"})
-    assert "schedule" in out
-    assert "cancel" not in out
+def test_intent_flip_can_fire_and_is_dangerous() -> None:
+    # The intent flip fires intermittently (≈0.7); across many seeds it must
+    # turn "cancel" into "schedule" on at least some turns (the dangerous case)
+    # while leaving it intact on others (so recovery is reachable).
+    text = "I want to cancel my appointment"
+    outs = [inject_asr_errors(text, rng=random.Random(s), modes={"intent_flip"}) for s in range(20)]
+    assert any("schedule" in o and "cancel" not in o for o in outs), "flip never fired"
+    assert any("cancel" in o for o in outs), "flip fired every time — recovery impossible"
 
 
 def test_number_drop_removes_day() -> None:

@@ -175,9 +175,12 @@ def inject_asr_errors(text: str, *, rng: random.Random, modes: set[str]) -> str:
         word = match.group(0)
         for table in word_tables:
             swapped = _swap_word(word, table)
-            # intent_flip always fires (it is the targeted dangerous case);
-            # benign swaps fire probabilistically so output stays varied.
-            if swapped is not None and (table is _INTENT_FLIPS or rng.random() < 0.7):
+            # All swaps (incl. the dangerous intent flip) fire probabilistically.
+            # Intermittence is deliberate: real ASR is not 100% wrong, and a
+            # caller whose "cancel" is *always* flipped can never recover — so an
+            # intermittent flip tests both safety (don't act on a flipped turn)
+            # AND recovery (converge when a clean turn lands), seeded per turn.
+            if swapped is not None and rng.random() < 0.7:
                 return swapped
         return word
 
