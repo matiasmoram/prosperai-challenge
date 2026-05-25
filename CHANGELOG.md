@@ -177,6 +177,10 @@ mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 1
 - `7a285e3` — **AvailabilityCache adjudicated spec** (FUTURE 1.3, council-decided): full 4-tuple
   key, repo-layer placement, evict-on-commit (reschedule=2 dates, multi-slot=all chained dates),
   TTL 10s default-off, DB-409 stays the guard. Documented, not built (remote-EHR-only payoff).
+- `f769584` — **barge-in stress suite** (`tests/test_barge_in_stress.py`, 26 cases): interrupt at
+  every point of a reply, 10 consecutive interrupted turns, rapid repeats, spurious bursts, interrupt
+  +choppy barge-in (words not lost), interrupt+silence. + `47c78fc` docs: SOLUTION (plain) +
+  ARCHITECTURE §14 (technical) explanation of how interruption handling works.
 - `fed4919` — **acoustic audio smoke** (`evals/audio_smoke/test_audio_smoke.py`): real ElevenLabs
   TTS→STT round-trip (bot's voice + `eleven_flash_v2_5` → `scribe_v1`) — intent survives, time-of-day
   not flipped, bot reply intelligible. Live-verified green. Double-gated (`ELEVENLABS_API_KEY` +
