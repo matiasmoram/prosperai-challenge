@@ -136,6 +136,22 @@ _AFFIRM = re.compile(
     r"\b(yes|yeah|yep|yup|sure|correct|that'?s right|please do|go ahead|sounds good)\b", re.I
 )
 _DENY = re.compile(r"\b(no|nope|nah|cancel that|stop|wrong)\b", re.I)
+# A caller turn that is ASKING (for information / more options) rather than
+# confirming. The consent gate (`_llm_turn`) refuses an irreversible write on a
+# turn like this even though the FSM sits in a CONFIRM_* state. Live bug it
+# fixes (session 7c9d55a5): caller said "tell me which ones are not taken" — a
+# question — and the model booked an un-offered slot, ending the call. Kept
+# ASYMMETRIC on purpose: we block only the obviously-non-consent turns. Genuine
+# picks ("the 2:30", "the first one", "go ahead", "Aisha works") match neither
+# this nor `_DENY`, so they fall straight through and commit normally — no
+# legitimate booking is ever delayed. A turn that BOTH asks and affirms
+# ("yeah, what time was it — go ahead") is rescued by the `not _AFFIRM` guard.
+_INFO_SEEKING = re.compile(
+    r"\b(?:which|what|when|where|how|who|tell me|list them|are there|is there|"
+    r"do you have|what about|how about|any other|anything else|"
+    r"other (?:times|options|slots)|not taken|still (?:free|open|available))\b",
+    re.I,
+)
 # Cancel/reschedule intent — broadened so phrasings like "take my appointment
 # off the schedule", "drop my appointment", "remove the booking", "get rid of
 # my visit", "delete my appointment" route correctly. Originally only matched
@@ -502,6 +518,10 @@ class Dispatcher:
         # First terminal outcome wins — guards against emitting two `outcome`
         # events (e.g. a `handed_off` followed by a `goodbye`-triggered END).
         self._outcome_published: bool = False
+        # Latest caller utterance, refreshed each `handle_user_turn`. The consent
+        # gate reads it to decide whether an irreversible write may commit this
+        # turn (see `_INFO_SEEKING` and the gate in `_llm_turn`).
+        self._last_user_text: str = ""
 
     def _publish(self, type_: EventType, payload: dict[str, Any]) -> None:
         """Fire-and-forget publish of a `ConsoleEvent` to the operator bus.
@@ -575,6 +595,7 @@ class Dispatcher:
         # X-Request-Id header on every tool's HTTP call is greppable
         # alongside the dispatcher's span logs.
         self._ehr.set_turn_id(self.turn_id)
+        self._last_user_text = user_text
         self.history.append({"role": "user", "content": user_text})
         self.transcript.append({"kind": "user", "text": user_text})
         self._publish(
@@ -788,6 +809,47 @@ class Dispatcher:
                                 "you looked up availability/appointments. Read the "
                                 "options back to the caller and wait for them to choose "
                                 "a specific one on their next turn before committing."
+                            ),
+                        }
+                    )
+                    continue
+                # CONSENT GATE (architecture, not prompt). The offer-then-confirm
+                # guard above blocks list+book in ONE turn; this blocks the
+                # complementary hole — committing an irreversible write on a
+                # caller turn that is a QUESTION / request for options rather
+                # than a confirmation. A CONFIRM_* state persists across many
+                # turns, so without this the model can fire the write whenever it
+                # likes regardless of what the caller just said (live bug
+                # 7c9d55a5: caller asked "tell me which ones are not taken" and
+                # the model booked an un-offered slot, ending the call). We gate
+                # on the LAST CALLER TURN, not the model's claimed intent: if it
+                # is clearly info-seeking and NOT also an affirmation, refuse and
+                # steer the model back to offering. Asymmetric — genuine picks
+                # ("the 2:30", "go ahead") are not info-seeking and pass through,
+                # so a real booking is never delayed. Prompt compliance is not a
+                # safety boundary for an irreversible action; this is.
+                if (
+                    call.name in _READ_BEFORE_WRITE
+                    and _INFO_SEEKING.search(self._last_user_text)
+                    and not _AFFIRM.search(self._last_user_text)
+                ):
+                    self.transcript.append(
+                        {
+                            "kind": "write_without_consent_blocked",
+                            "name": call.name,
+                            "state": self.state.value,
+                        }
+                    )
+                    self.history.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": (
+                                f"BLOCKED: the caller's last turn was a question / "
+                                f"request for options, not a confirmation — do NOT "
+                                f"call '{call.name}'. Answer them or re-offer specific "
+                                "times, then wait for an explicit pick (e.g. 'the "
+                                "2:30', 'go ahead') on a later turn before committing."
                             ),
                         }
                     )

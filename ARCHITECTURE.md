@@ -339,6 +339,24 @@ does beyond the FSM:
    not just the earliest 6 — otherwise the afternoon was invisible and the bot
    wrongly reported "only morning slots".
 
+7. **Consent gate (`_INFO_SEEKING` + `_AFFIRM`).** Complements item 6's
+   *temporal* guard with a *consent* one: a write
+   (`create_appointment` / `cancel_appointment` / `reschedule_appointment`) is
+   **blocked when the caller's latest turn is a question / request for options
+   and not also an affirmation** — even though a `CONFIRM_*` state persists
+   across many turns and keeps the write tool whitelisted. Without it the model
+   could fire the write on any turn it liked: live (session `7c9d55a5`) the
+   caller said *"tell me which ones are not taken"* — a question — and the model
+   booked an un-offered slot, ending the call, after which it could no longer
+   re-query and hallucinated "no slots". The check is **asymmetric on purpose**:
+   it only blocks obviously-non-consent turns. Genuine picks ("the 2:30", "the
+   first one", "go ahead") match neither `_INFO_SEEKING` nor `_DENY`, so they
+   commit with no extra turn; a turn that both asks and affirms is rescued by the
+   `not _AFFIRM` guard. Prompt compliance is not a safety boundary for an
+   irreversible action — this is. (The *fully* robust invariant — write only a
+   slot actually verbalized to the caller — needs the dispatcher to own slot
+   selection rather than handing the LLM the whole day's handles; see §14.)
+
 `bot.py` wires the dispatcher into Pipecat via `DispatcherProcessor`,
 which consumes `TranscriptionFrame` directly (the default
 `LLMUserAggregator` adds a 1 s aggregation tax we don't want; see the
@@ -848,6 +866,17 @@ Active work the main branch does not yet reflect:
   reaches the LLM, handle round-trip, no double-book,
   confirm-only-after-successful-write. Finds whole bug *classes* via
   shrinking rather than one hand-written scenario at a time.
+- **Dispatcher-owned slot offering (proposed, not started).** Today
+  `list_availability_slots` returns the *whole day* (often >100 slots) and the
+  redaction hands the LLM bracketed handles for a sample spanning the day; the
+  LLM is then free to book any of them — including times it never voiced (live
+  bug `7c9d55a5`: booked a 4:30 slot it only ever offered 1:00 / 2:30 for). The
+  consent gate (§13 item 7) is the current safety net but keys on the *caller's*
+  turn, not on *which slots were offered*. The robust invariant — **a write may
+  only target a slot the dispatcher recorded as offered** — needs the dispatcher
+  (not the LLM) to pick/cap the 2-3 offered slots and expose only those handles.
+  That also enforces rule 6 ("never dump full lists") structurally. Bigger change
+  (touches `_redact_for_llm`, `SessionMemory`, tool args, several scenarios).
 
 The eval suite pins both the plain specialty-filter behaviour
 (`specialty_filter_therapist`, `specialty_unknown_falls_back`,

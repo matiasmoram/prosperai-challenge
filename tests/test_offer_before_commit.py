@@ -180,3 +180,99 @@ async def test_confirm_book_can_relist_instead_of_being_trapped(
             e.get("kind") in ("tool_ok", "tool_err") and e.get("name") == "create_appointment"
             for e in d.transcript
         )
+
+
+async def test_create_blocked_when_caller_turn_is_a_question(
+    seeded_ehr_client: EHRClient,
+) -> None:
+    """Consent gate: in CONFIRM_BOOK a model that fires create_appointment while
+    the caller's last turn was a QUESTION ("tell me which ones are not taken")
+    is blocked — no booking, the bot re-offers. Live bug 7c9d55a5: the model
+    booked an un-offered slot on exactly this turn and ended the call.
+
+    The slots were offered on a PRIOR turn (no list this turn), so the
+    same-turn offer-then-confirm guard does NOT fire — only the consent gate
+    can catch this."""
+
+    class _BookOnQuestionLLM(LLMClientProtocol):
+        calls = 0
+
+        async def generate(
+            self, *, state: str, history: list[dict[str, Any]], tools: list[dict[str, Any]]
+        ) -> LLMReply:
+            type(self).calls += 1
+            if type(self).calls == 1:
+                return LLMReply(
+                    text="",
+                    tool_calls=[
+                        ToolCall(name="create_appointment", arguments={"slot_id": "1"}, id="c1")
+                    ],
+                )
+            return LLMReply(text="Here are the open afternoon times — which would you like?")
+
+    async with seeded_ehr_client:
+        d = Dispatcher(llm=_BookOnQuestionLLM(), ehr_client=seeded_ehr_client)
+        d.state = State.CONFIRM_BOOK
+        d.memory.identified_patient = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "phone": "2025550100",
+        }
+        raw = await seeded_ehr_client.list_availability(date_=_tomorrow())
+        d.memory.last_slots = [{**s, "slot_id": s["id"]} for s in raw]
+        reply = await d.handle_user_turn("well, tell me which ones are not taken")
+
+        # The consent gate fired and the booking did NOT execute.
+        kinds = [e.get("kind") for e in d.transcript]
+        assert "write_without_consent_blocked" in kinds
+        assert not any(
+            e.get("kind") in ("tool_ok", "tool_err") and e.get("name") == "create_appointment"
+            for e in d.transcript
+        ), "create_appointment must NOT execute on a question turn"
+        # The bot still speaks (re-offers) — never silent, never a hallucinated
+        # confirmation.
+        assert reply
+
+
+async def test_create_allowed_on_a_natural_pick_not_a_yes(
+    seeded_ehr_client: EHRClient,
+) -> None:
+    """The consent gate is asymmetric: a natural selection that is NOT the word
+    'yes' ("the first one please") is neither info-seeking nor a denial, so the
+    write proceeds. Guards against the gate over-blocking real confirmations."""
+
+    class _BookOnlyLLM(LLMClientProtocol):
+        async def generate(
+            self, *, state: str, history: list[dict[str, Any]], tools: list[dict[str, Any]]
+        ) -> LLMReply:
+            return LLMReply(
+                text="",
+                tool_calls=[
+                    ToolCall(name="create_appointment", arguments={"slot_id": "1"}, id="c1")
+                ],
+            )
+
+    async with seeded_ehr_client:
+        d = Dispatcher(llm=_BookOnlyLLM(), ehr_client=seeded_ehr_client)
+        d.state = State.CONFIRM_BOOK
+        d.memory.identified_patient = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "phone": "2025550100",
+        }
+        raw = await seeded_ehr_client.list_availability(date_=_tomorrow())
+        d.memory.last_slots = [{**s, "slot_id": s["id"]} for s in raw]
+        await d.handle_user_turn("the first one please")
+
+        # Neither guard fired — the natural pick reached execution (the booking's
+        # own success/failure depends on seed data; what matters here is that the
+        # consent gate did NOT intercept a legitimate selection).
+        kinds = [e.get("kind") for e in d.transcript]
+        assert "write_without_consent_blocked" not in kinds
+        assert "write_before_offer_blocked" not in kinds
+        assert any(
+            e.get("kind") in ("tool_ok", "tool_err") and e.get("name") == "create_appointment"
+            for e in d.transcript
+        ), "create_appointment must reach execution on a natural pick"
