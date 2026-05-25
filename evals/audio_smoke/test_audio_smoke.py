@@ -24,8 +24,11 @@ pytestmark = pytest.mark.audio
 def test_smoke_dispatcher_module_imports() -> None:
     """v1: assert the bot module imports and the dispatcher initialises.
 
-    A real audio loop (synth caller → bot STT → bot logic → bot TTS →
-    caller STT → judge) is a future-work item documented in ARCHITECTURE.md.
+    The full acoustic loop (synth caller → bot STT → bot logic → bot TTS →
+    caller STT → judge) is a future-work item documented in ARCHITECTURE.md
+    §17 / FUTURE.md §2.4. The interruption / call-cutoff behaviour (the
+    high-value, most-noticeable audio-path bugs) is already covered offline by
+    `tests/test_barge_in_pipeline.py` — no credits, runs in `make verify`.
     """
     from prosper.bot import _build_dispatcher
 

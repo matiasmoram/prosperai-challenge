@@ -778,8 +778,12 @@ Active work the main branch does not yet reflect:
   for barge-in (`confidence=0.35`, `min_volume=0.15`, `start_secs=0.1`).
   Unit tests in `tests/test_barge_in.py` cover partial-text truncation,
   empty-buffer `[NOT HEARD]` prefix, idempotency, empty-history no-op, and
-  non-assistant-last-turn no-op (N-002). Real-time pipeline behaviour
-  (live audio InterruptionFrame) requires staging verification.
+  non-assistant-last-turn no-op (N-002). The **pipeline propagation** —
+  `TTSAudibleObserver` → real dispatcher, plus aggregation under interruption
+  and `EndFrame` hang-up — is now covered offline ($0, in `make verify`) by
+  `tests/test_barge_in_pipeline.py` (frame injection, no live audio). Only the
+  *acoustic* TTS→STT round-trip (catching STT mis-transcription) and live VAD
+  behaviour still need staging / the deferred audio tier (`FUTURE.md` §2.4).
 - **Speculative race.** `docs/research/speculative_race.md` — research
   notes on overlapping STT partials with speculative LLM kickoff to
   reduce TTFT. Not yet wired.
