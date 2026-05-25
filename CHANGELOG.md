@@ -128,6 +128,37 @@ gated by `make verify` + `make mock-eval` and committed independently.
 - `985b440` — (F5 console) mtime-sorted session picker + connection-state UX; new back-compat `list_sessions_with_meta()`; no bus-shape change.
 - `docs` — console event count 8→9 (`turn_interrupted`) in SOLUTION §8 + CLAUDE.md; this Phase 10 entry.
 
+## Phase 11 — Feature waves: triage duration, intent UX, F6 mail+calendar, reliability (2026-05-24/25)
+
+Team-orchestrated wave program: an LLM-council decided the duration rule, an
+auditor caught generalization hazards, a continuous adversarial-gen loop grew the
+mock suite, and the F6 mail+calendar+handoff feature shipped. mock-eval 56 → 105.
+
+- `9910e49` — EHR query-param max_length caps (by-phone/by-name-dob).
+- `1c63b3a` — **duration soft-override** (LLM-council): caller may extend freely / go
+  shorter than recommended after one nudge; triage gains minimum_safe_minutes + rationale.
+- `8728199` — EHR `GET /appointments` clinic-calendar read (F6 Task 1).
+- `06b01da` — context-aware CHOOSE_INTENT: no cancel/reschedule offer with 0 upcoming appts
+  (one ~10ms prefetch on entry).
+- `579a630`,`33796df` — tester hardening: reject generated personas with unfilled
+  placeholders + flag corrupt sim runs.
+- `d0fe150` — richer seed: 2 providers/specialty, varied patients, weekday-only slots.
+- `f149c80` — **clinical-floor guard** (audit F-002): below-minimum_safe_minutes booking →
+  Err(below_minimum_safe_duration), a code contract not a prompt wish. +unit tests.
+- `df954b4`,`c2c12f3`,`e284367`,`291db01` — continuous adversarial/contradiction scenarios
+  + fuzzy-band + deterministic past-slots test (mock-eval → 105).
+- `e4e2b57`,`c60b3a0` — **F6 Mail + Calendar**: full-PII MailStore, `/frontdesk` router+SPA,
+  `leave_message_for_front_desk` tool + `HANDOFF` state + `handed_off` outcome + stuck-detector
+  safety-net + booking-confirmation mail, wired live. ADR 006.
+- `ff962dc` — identity-not-found → front-desk handoff (req 1): insists-existing-but-unmatched
+  → leave message, never duplicate-register.
+- `740880c` — LLM-total-failure path (req 4): canned line + reception mail, never dead air.
+- `18cfde1` — barge-in: unit-cover interruption truncation; infra was already wired (§14 was stale).
+- `ad802d4` — doctor choice when a specialty has 2+ providers (prompt-only).
+
+Open items for the human: `OPEN_QUESTIONS.md` (barge-in live verification, FUTURE 4.1
+cross-call provider memory, route_intent reschedule-vs-cancel ambiguity).
+
 ---
 
 ## Trajectory at a glance
@@ -145,6 +176,7 @@ gated by `make verify` + `make mock-eval` and committed independently.
 | 8 | Eval coverage | mock 18→55 | — |
 | 9 | FUTURE roadmap | mock 55/55 | — |
 | 10 | Parallel guardian fronts | 564 tests, mock 56/56 | — |
+| 11 | Feature waves (triage/UX/F6/reliability) | 685 tests, mock 105/0 | — |
 
 **Recurring discipline across phases:** every change gated by `make verify`
 (ruff + format + mypy `--strict` + pytest); `make mock-eval` after any
