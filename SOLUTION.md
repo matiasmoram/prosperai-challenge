@@ -288,8 +288,12 @@ telemetry for an operator screen.
 
 ### MailStore
 
-`integrations/mail.py` (`MailStore`) appends `MailMessage` JSON records to
-`data/mail/<session>.jsonl` (one file per session). Three mail kinds:
+`integrations/mail.py` (`MailStore`) persists `MailMessage` rows to a single
+unified SQLite store at `data/mail/mail.db` (one `mail` table) — one coherent
+inbox across every call, durable across restarts, **not** per-session files. It
+is deliberately a separate database from the EHR (distinct full-PII trust tier).
+`write` offloads the blocking insert via `asyncio.to_thread` so it never stalls
+the bot's event loop. Three mail kinds:
 
 | Kind | Trigger | Source of identity | Addressed to (`to_label`) |
 |---|---|---|---|

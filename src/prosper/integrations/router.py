@@ -32,6 +32,26 @@ def build_frontdesk_router(store: MailStore, calendar_fetch: CalendarFetch) -> A
     """Return the ``/frontdesk`` router wired to a mail store + calendar fetcher."""
     router = APIRouter(prefix="/frontdesk", tags=["frontdesk"])
 
+    @router.get("/health")
+    async def health() -> JSONResponse:
+        """Wiring probe: mail count + whether the EHR calendar is reachable.
+
+        ``ehr_reachable`` attempts a today..today calendar fetch and reports
+        ``False`` (rather than raising) when the EHR is down, so a staffer can
+        confirm at a glance whether the front-desk is fully wired without
+        reading server logs.
+        """
+        today = date.today()
+        try:
+            await calendar_fetch(today, today)
+            ehr_reachable = True
+        except Exception as exc:  # degrade to a False health flag, never raise
+            logger.warning("frontdesk health: calendar unreachable: {}", exc)
+            ehr_reachable = False
+        return JSONResponse(
+            {"mail_count": len(store.list_messages()), "ehr_reachable": ehr_reachable}
+        )
+
     @router.get("/mail")
     async def mail_list() -> JSONResponse:
         """Newest-first outbound mail (full PII — staff tier only)."""

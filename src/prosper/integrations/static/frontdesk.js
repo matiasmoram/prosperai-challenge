@@ -152,6 +152,11 @@ function weekDays() {
 }
 
 function renderCalendar(entries) {
+  // The 5s poll rebuilds the grid; remember scroll so it doesn't jump under
+  // a receptionist mid-scroll.
+  const scrollTop = calGrid.scrollTop;
+  const scrollLeft = calGrid.scrollLeft;
+
   const days = weekDays();
   calRange.textContent =
     days[0].toLocaleDateString("en-US", { month: "short", day: "numeric" }) +
@@ -201,12 +206,16 @@ function renderCalendar(entries) {
         ev.appendChild(el("div", "epat", e.patient_name));
         ev.appendChild(el("div", "eprov", e.provider_name));
         ev.appendChild(el("div", "espec", e.specialty));
+        if (e.notes) ev.appendChild(el("div", "enote", e.notes));
         body.appendChild(ev);
       });
     }
     col.appendChild(body);
     calGrid.appendChild(col);
   });
+
+  calGrid.scrollTop = scrollTop;
+  calGrid.scrollLeft = scrollLeft;
 }
 
 async function loadCalendar() {
@@ -225,22 +234,37 @@ async function loadCalendar() {
 
 // ---- tabs -------------------------------------------------------------------
 
-tabMail.addEventListener("click", () => {
+// Which pane is visible. The calendar poll runs only while "cal" is active, so
+// switching to mail stops the wasted /frontdesk/appointments calls.
+let activeTab = "mail";
+
+function showMail() {
+  activeTab = "mail";
   tabMail.classList.add("active");
   tabCal.classList.remove("active");
   mailView.classList.remove("hidden");
   calView.classList.add("hidden");
-});
+}
 
-tabCal.addEventListener("click", () => {
+function showCalendar() {
+  activeTab = "cal";
   tabCal.classList.add("active");
   tabMail.classList.remove("active");
   mailView.classList.add("hidden");
   calView.classList.remove("hidden");
-  loadCalendar();
-});
+  loadCalendar(); // immediate paint; the interval keeps it live thereafter
+}
+
+tabMail.addEventListener("click", showMail);
+tabCal.addEventListener("click", showCalendar);
 
 // ---- boot -------------------------------------------------------------------
 
 pollMail();
 setInterval(pollMail, 2000);
+
+// Refresh the calendar only while its tab is showing, so a booking made
+// mid-call appears within ~5s without a manual re-click.
+setInterval(() => {
+  if (activeTab === "cal") loadCalendar();
+}, 5000);

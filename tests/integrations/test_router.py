@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Any
 
@@ -79,6 +80,57 @@ def test_calendar_endpoint_degrades_to_503_when_ehr_unreachable(tmp_path) -> Non
     )
     assert resp.status_code == 503
     assert resp.json()["error"] == "calendar_unavailable"
+
+
+def test_health_reports_mail_count_and_ehr_reachable(tmp_path) -> None:
+    """/frontdesk/health surfaces the mail count and a True reachable flag
+    when the calendar fetch succeeds — a one-glance wiring probe."""
+    store = MailStore(root=tmp_path)
+    resp = TestClient(_app(store)).get("/frontdesk/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mail_count"] == 0
+    assert body["ehr_reachable"] is True
+
+
+def test_health_reports_mail_count_after_write(tmp_path) -> None:
+    """mail_count tracks the store: a written message bumps it."""
+    store = MailStore(root=tmp_path)
+
+    async def _write() -> None:
+        await store.write(
+            make_message(
+                session_id="s1",
+                kind="handoff",
+                to_label="reception@prosper.health",
+                subject="Callback — Jane Doe",
+                body="refill",
+                patient_name="Jane Doe",
+                patient_phone="2025550142",
+                category="prescription",
+                ts=1.0,
+            )
+        )
+
+    asyncio.run(_write())
+    resp = TestClient(_app(store)).get("/frontdesk/health")
+    assert resp.json()["mail_count"] == 1
+
+
+def test_health_reports_ehr_unreachable_without_raising(tmp_path) -> None:
+    """When the EHR is down, health degrades to ehr_reachable=False (still 200)
+    rather than letting the calendar fetch failure escape."""
+
+    async def _failing_calendar(from_date: date, to_date: date) -> list[dict[str, Any]]:
+        raise RuntimeError("EHR unreachable")
+
+    app = FastAPI()
+    app.include_router(build_frontdesk_router(MailStore(root=tmp_path), _failing_calendar))
+    resp = TestClient(app, raise_server_exceptions=False).get("/frontdesk/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ehr_reachable"] is False
+    assert body["mail_count"] == 0
 
 
 def test_root_serves_spa(tmp_path) -> None:

@@ -19,6 +19,17 @@ Two modes:
 Usage:
     uv run python scripts/frontdesk_server.py            # real, port 7902
     uv run python scripts/frontdesk_server.py --demo     # isolated preview
+
+Run topology (real mode — three processes, one shared DB + one shared mail store):
+
+    make seed && make ehr                       # EHR  :8000  (clinical DB)
+    make bot                                    # bot  :7860  (place calls via /call)
+    uv run python scripts/frontdesk_server.py   # front-desk :7902
+
+Then call via ``/call``: a booking-confirmation / handoff mail written mid-call
+lands in ``data/mail/mail.db`` and surfaces here within the SPA's ~2s poll, and
+the calendar reflects the live EHR booking. ``GET /frontdesk/health`` returns
+``{mail_count, ehr_reachable}`` to confirm both legs are wired.
 """
 
 from __future__ import annotations

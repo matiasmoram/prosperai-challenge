@@ -1,47 +1,56 @@
 """Durable, full-PII outbound-mail records for the front-desk surface.
 
-One JSONL file per session at ``<root>/<session_id>.jsonl``. Unlike the
-operator console, records carry the patient's real name + phone — a callback
-or a confirmation is useless masked. Deliberately a different trust tier: the
-``/frontdesk`` surface that reads it is staff-only (behind auth in prod,
-loopback in the demo). Two channels share one record via ``kind``. See spec §7.
+A single unified SQLite store at ``<root>/mail.db`` (one ``mail`` table) — NOT
+one file per session. It reads as one coherent inbox across every call and
+survives process restarts, "like part of the DB". Unlike the operator console,
+records carry the patient's real name + phone — a callback or a confirmation is
+useless masked. Deliberately a different trust tier: the ``/frontdesk`` surface
+that reads it is staff-only (behind auth in prod, loopback in the demo). Two
+channels share one record via ``kind``. See spec §7.
+
+This store is intentionally SEPARATE from the EHR database (its own file, its
+own connection, no shared models/engine): mail is a distinct full-PII trust
+tier and must not be coupled to clinical data.
+
+Because rows are keyed by an autoincrement id (not a filename derived from the
+session id), the old per-session-file path-traversal concern is gone entirely —
+``session_id`` is just an ordinary text column and can hold any value safely.
 """
 
 from __future__ import annotations
 
-import contextlib
+import asyncio
 import json
 import os
-import re
+import sqlite3
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Final
 
-import aiofiles
-
 _DEFAULT_ROOT_NAME: Final[str] = "data/mail"
-# Filename-safe charset for a session id used as a file stem. Real ids are
-# UUIDs (unaffected); anything else is reduced to this set so a malformed id
-# with path separators or ".." can never address a path outside the mail root.
-_UNSAFE_STEM_CHARS: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9_-]")
+_DB_FILENAME: Final[str] = "mail.db"
+
+_CREATE_TABLE: Final[str] = """
+CREATE TABLE IF NOT EXISTS mail (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            REAL    NOT NULL,
+    session_id    TEXT    NOT NULL,
+    kind          TEXT    NOT NULL,
+    to_label      TEXT    NOT NULL,
+    subject       TEXT    NOT NULL,
+    body          TEXT    NOT NULL,
+    patient_name  TEXT    NOT NULL,
+    patient_phone TEXT    NOT NULL,
+    category      TEXT    NOT NULL DEFAULT ''
+)
+"""
 
 
 def _resolve_default_root() -> Path:
     """Compute the default mail root, honouring ``PROSPER_MAIL_ROOT``."""
     override = os.environ.get("PROSPER_MAIL_ROOT")
     return Path(override) if override else Path(_DEFAULT_ROOT_NAME)
-
-
-def _safe_session_stem(session_id: str) -> str:
-    """Sanitise a session id into a traversal-safe filename stem.
-
-    Mail files carry real PII; a session id containing ``/`` or ``..`` would let
-    an append escape the mail root. The canonical id is preserved inside each
-    JSON record, so reducing the *filename* to a safe charset loses nothing.
-    """
-    stem = _UNSAFE_STEM_CHARS.sub("_", session_id)
-    return stem or "_unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +68,7 @@ class MailMessage:
     category: str = ""  # handoff / bot_failed only; "" for booking_confirmation
 
     def to_json(self) -> str:
-        """Serialise to one JSONL line."""
+        """Serialise to one JSON line."""
         return json.dumps(asdict(self), separators=(",", ":"), sort_keys=True)
 
     @classmethod
@@ -106,45 +115,88 @@ def make_message(
 
 
 class MailStore:
-    """Append-only JSONL store of outbound mail, one file per session.
+    """Unified, durable SQLite store of outbound mail (one ``mail`` table).
 
-    Files live under ``<root>/<session_id>.jsonl``; each line is one
-    serialised ``MailMessage``. Writes are async (aiofiles). Reads are
-    synchronous — directory scans and file reads are small and infrequent
-    (2-second poll from the SPA), so the async overhead is not worth it.
+    All mail across all sessions lives in a single ``<root>/mail.db`` so the
+    front desk reads one coherent inbox. ``write`` is async (the blocking
+    sqlite3 call is offloaded to a thread so it never stalls the bot's event
+    loop); a fresh connection per write keeps concurrent fire-and-forget writes
+    from different async tasks safe and committed durably. Reads are synchronous
+    — the SPA's 2-second poll is small and infrequent, so async overhead isn't
+    worth it.
     """
 
     def __init__(self, root: Path | None = None) -> None:
-        """Initialise with a target root dir (default ``data/mail/``)."""
+        """Initialise with a target root dir holding ``mail.db`` (default ``data/mail/``)."""
         self._root: Path = root if root is not None else _resolve_default_root()
 
     @property
     def root(self) -> Path:
-        """Mail root directory (read-only outside tests)."""
+        """Mail root directory holding ``mail.db`` (read-only outside tests)."""
         return self._root
 
-    async def write(self, message: MailMessage) -> None:
-        """Append ``message`` as one JSON line to its session file."""
+    @property
+    def _db_path(self) -> Path:
+        """Absolute path to the unified mail database file."""
+        return self._root / _DB_FILENAME
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open a connection to ``mail.db``, creating the dir + table on demand."""
         self._root.mkdir(parents=True, exist_ok=True)
-        path = self._root / f"{_safe_session_stem(message.session_id)}.jsonl"
-        async with aiofiles.open(path, mode="a", encoding="utf-8") as handle:
-            await handle.write(message.to_json() + "\n")
-            await handle.flush()
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(_CREATE_TABLE)
+        return conn
+
+    def _write_sync(self, message: MailMessage) -> None:
+        """Blocking insert of one row, committed before returning."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO mail (ts, session_id, kind, to_label, subject, body, "
+                "patient_name, patient_phone, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    message.ts,
+                    message.session_id,
+                    message.kind,
+                    message.to_label,
+                    message.subject,
+                    message.body,
+                    message.patient_name,
+                    message.patient_phone,
+                    message.category,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def write(self, message: MailMessage) -> None:
+        """Insert ``message`` as one durable row in the unified mail table."""
+        await asyncio.to_thread(self._write_sync, message)
 
     def list_messages(self) -> list[MailMessage]:
-        """All messages across all sessions, newest-first (by ``ts``).
-
-        Bad lines are skipped silently so a partially-truncated file
-        does not poison the entire list.
-        """
-        if not self._root.exists():
+        """All messages across all sessions, newest-first (by ``ts``)."""
+        if not self._db_path.exists():
             return []
-        out: list[MailMessage] = []
-        for path in self._root.glob("*.jsonl"):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if stripped:
-                    with contextlib.suppress(KeyError, ValueError):
-                        out.append(MailMessage.from_json(stripped))
-        out.sort(key=lambda m: m.ts, reverse=True)
-        return out
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT ts, session_id, kind, to_label, subject, body, "
+                "patient_name, patient_phone, category FROM mail ORDER BY ts DESC, id DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            MailMessage(
+                ts=float(r[0]),
+                session_id=str(r[1]),
+                kind=str(r[2]),
+                to_label=str(r[3]),
+                subject=str(r[4]),
+                body=str(r[5]),
+                patient_name=str(r[6]),
+                patient_phone=str(r[7]),
+                category=str(r[8]),
+            )
+            for r in rows
+        ]
