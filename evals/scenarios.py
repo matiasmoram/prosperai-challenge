@@ -434,6 +434,30 @@ def _setup_multi_specialty_no_target_existing_patient(session: Session) -> None:
     _seed_existing_patient(session)
 
 
+def _setup_two_providers_same_specialty(session: Session) -> None:
+    """Two Therapist providers (Dr. Patel and Dr. Sharma) each with 2 morning
+    slots tomorrow. Slots from both providers appear in list_availability_slots,
+    letting the bot surface two doctors and ask for a preference."""
+    prov_a = Provider(name="Dr. Patel", timezone="UTC", specialty="Therapist")
+    prov_b = Provider(name="Dr. Sharma", timezone="UTC", specialty="Therapist")
+    session.add_all([prov_a, prov_b])
+    session.commit()
+    start = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
+    for prov in (prov_a, prov_b):
+        for i in range(2):
+            session.add(
+                Slot(
+                    provider_id=prov.id,
+                    start_at=start + timedelta(minutes=30 * i),
+                    end_at=start + timedelta(minutes=30 * (i + 1)),
+                )
+            )
+    session.commit()
+    _seed_existing_patient(session)
+
+
 SCENARIOS: list[Scenario] = [
     Scenario(
         name="new_patient_books",
@@ -3836,5 +3860,40 @@ SCENARIOS: list[Scenario] = [
             "the bot did not falsely confirm that the appointment was cancelled",
         ],
         max_turns=12,
+    ),
+    # Wave 8 — provider / doctor choice
+    Scenario(
+        name="provider_choice_offered",
+        tags=frozenset({"happy", "provider_choice", "f8"}),
+        persona=(
+            "You are Ada Lovelace, DOB December 10 1990, phone 202-555-0100. "
+            "Open VERBATIM: 'Hi, I'd like to see a therapist.' "
+            "Provide phone when asked: '202-555-0100'. "
+            "When the bot asks what you need, say VERBATIM: "
+            "'I'd like to book an appointment with a therapist tomorrow.' "
+            "When the bot names two doctors and asks for a preference, "
+            "say VERBATIM: 'Dr. Sharma please.' "
+            "When the bot reads back a slot with Dr. Sharma, confirm VERBATIM "
+            "'yes that\\'s right'. "
+            "After the bot confirms the booking, end VERBATIM: 'thanks, goodbye.'"
+        ),
+        setup=_setup_two_providers_same_specialty,
+        expected_state=StateExpectation(
+            patient_count_delta=0,
+            active_appointment_count_delta=1,
+            expected_terminal_state="END",
+            expected_tool_call_codes=[
+                "find_patient_by_phone",
+                "list_availability_slots",
+                "create_appointment",
+            ],
+            forbidden_tool_calls=["create_patient"],
+        ),
+        judge_criteria=[
+            "the bot named at least two doctor options when presenting availability",
+            "the bot honored the caller's preference for Dr. Sharma",
+            "the appointment was booked and the bot confirmed it",
+        ],
+        max_turns=14,
     ),
 ]

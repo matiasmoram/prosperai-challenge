@@ -2734,6 +2734,46 @@ def _script_bot_stuck_triggers_handoff() -> list[LLMReply]:
     ]
 
 
+def _script_provider_choice_offered() -> list[LLMReply]:
+    # Ada is identified. Two Therapist providers (Dr. Patel, Dr. Sharma) each
+    # have slots tomorrow. list_availability_slots returns slots from both.
+    # The bot names both doctors and asks for a preference; Ada picks Dr. Sharma.
+    #
+    # Navigation: the LLM calls route_intent(intent="book") in CHOOSE_INTENT
+    # (hybrid path) → BOOK_FLOW, then list_availability_slots. The resulting
+    # slot summary shows both provider names ([1] 09:00 with Dr. Patel;
+    # [2] 09:00 with Dr. Sharma…); the bot names them and asks preference.
+    #
+    # The mock books with __use_first_slot__ for the state/receipt check.
+    # The live judge verifies the transcript named both doctors and honored
+    # the caller's preference.
+    return [
+        # GREETING: bot speaks first
+        _t("Hi, you've reached Prosper Health — what's your name, and how can I help you today?"),
+        # IDENTIFY_PATIENT: ask for phone
+        _t("Of course — what's the best phone number to find you under?"),
+        # IDENTIFY_PATIENT: phone search → found → CHOOSE_INTENT
+        _tool("find_patient_by_phone", phone="202-555-0100"),
+        # CHOOSE_INTENT: bot greets Ada and asks what she needs
+        _t("Got it, Ada — what can I help you with today?"),
+        # CHOOSE_INTENT: LLM classifies "therapist" intent via route_intent → BOOK_FLOW
+        _tool("route_intent", intent="book"),
+        # BOOK_FLOW: list slots for tomorrow with Therapist specialty
+        _tool("list_availability_slots", date=_tomorrow_iso(), specialty="Therapist"),
+        # Bot names both doctors and asks preference
+        _t(
+            "I have openings tomorrow morning with two therapists — "
+            "Dr. Patel or Dr. Sharma. Do you have a preference?"
+        ),
+        # Caller says "Dr. Sharma please" → bot re-offers Sharma's slot and confirms
+        _t("Great — Dr. Sharma has nine o'clock tomorrow. Shall I go ahead and book that?"),
+        # CONFIRM_BOOK: book → END
+        _tool("create_appointment", __use_first_slot__=True),
+        # END
+        _t("You're all set for tomorrow at nine with Dr. Sharma — have a great day."),
+    ]
+
+
 _BOT_SCRIPTS: dict[str, callable] = {
     "new_patient_books": _script_new_patient_books,
     "existing_patient_cancels": _script_existing_patient_cancels,
@@ -2872,6 +2912,8 @@ _BOT_SCRIPTS: dict[str, callable] = {
     # F6 handoff scenarios
     "caller_requests_human": _script_caller_requests_human,
     "bot_stuck_triggers_handoff": _script_bot_stuck_triggers_handoff,
+    # Wave 8: provider / doctor choice
+    "provider_choice_offered": _script_provider_choice_offered,
 }
 
 
@@ -3784,6 +3826,17 @@ _USER_SCRIPTS: dict[str, list[str]] = {
         # Bot loops and gets stuck — persona keeps prompting
         "Please just cancel my appointment.",
         "okay, goodbye.",
+    ],
+    # Wave 8: provider / doctor choice
+    "provider_choice_offered": [
+        "Hi, I'd like to see a therapist.",
+        "202-555-0100.",
+        # CHOOSE_INTENT: bot asks what Ada needs; she repeats intent
+        "I'd like to book an appointment with a therapist tomorrow.",
+        # BOOK_FLOW: bot names two doctors and asks preference
+        "Dr. Sharma please.",
+        # CONFIRM_BOOK: bot reads back Sharma slot; caller confirms
+        "yes that's right.",
     ],
 }
 
