@@ -176,9 +176,20 @@ uv run python -m evals --mock-llm       # same thing, without make
 
 ## What we'd build next (and why it isn't here yet)
 
-A few things were deliberately left for later — not forgotten, decided. Two worth
-naming for a reviewer:
+A few things were deliberately left for later — not forgotten, decided. The
+**single most important one to prioritise is reliable barge-in** (handling the
+caller and the bot talking over each other); the rest are nice-to-haves.
 
+- **Reliable barge-in (talking over the bot) — TOP PRIORITY.** This is the thing
+  that most needs finishing. The interruption *handling* is built and we have
+  tried it — several tests exercise the wiring — but it doesn't fully work yet in
+  a live call: the voice detector struggles to register the caller speaking *over*
+  the bot's own audio (worse on speakers without echo cancellation), so the bot
+  frequently keeps talking instead of stopping. Once an interrupt *does* fire the
+  memory-trim logic is correct; the unreliable part is the *detection*. Closing it
+  means tuning the voice-activity detection (and/or driving the interrupt from the
+  speech-to-text stream) and verifying on a real headset — the structural wiring
+  is already in place.
 - **Caching the "what's free?" lookups.** When the agent checks availability, it
   asks the database every time. A short-lived cache could skip repeat lookups —
   but on the current setup that lookup already takes ~10 ms, so caching would save
@@ -193,15 +204,6 @@ naming for a reviewer:
 - **A real audio test loop.** The conversation logic is tested exhaustively in
   text; testing the *spoken* round-trip (synthesised voice → agent → voice back)
   is the natural next layer — see the testing notes below.
-- **Reliable barge-in (cutting the bot off).** The interruption *handling* is
-  built — when the bot is interrupted it correctly trims its memory to only what
-  the caller actually heard — but the trigger isn't reliable yet: the voice
-  detector struggles to register the caller speaking *over* the bot's own audio
-  (worse on speakers without echo cancellation), so the bot frequently keeps
-  talking. Closing this means tuning the voice-activity detection (and/or
-  driving the interrupt from the speech-to-text stream) and verifying on a real
-  headset — the structural wiring is already in place.
-
 The complete, honest "what's deferred and why" list lives in `ARCHITECTURE.md`
 §16 / §16.1 and the ranked roadmap in `FUTURE.md`.
 

@@ -160,8 +160,8 @@ _INFO_SEEKING = re.compile(
 # Cancel/reschedule intent — broadened so phrasings like "take my appointment
 # off the schedule", "drop my appointment", "remove the booking", "get rid of
 # my visit", "delete my appointment" route correctly. Originally only matched
-# `cancel|reschedule|move`, which missed real-eval personas (see ERRORS.md /
-# `cancel_when_nothing_to_cancel`).
+# `cancel|reschedule|move`, which missed real-eval personas (the
+# `cancel_when_nothing_to_cancel` case).
 _CANCEL_INTENT = re.compile(
     r"\b(?:cancel\w*|reschedul\w*|move\w*|take[^.]*off|drop\w*|"
     r"remove\w*|delete\w*|get rid of|won'?t make it|can'?t make it|"
@@ -1244,7 +1244,7 @@ class Dispatcher:
     def _emit_booking_confirmation(self, appt: dict[str, Any]) -> None:
         """Fire-and-forget caller booking-confirmation 'email' after Ok.
 
-        Off-spine side-effect (no tool, no FSM edit): mirrors FRONTS.md §F6.
+        Off-spine side-effect (no tool, no FSM edit).
         A write failure is swallowed — the EHR booking is the source of truth,
         the confirmation is best-effort and must never break the call path.
         """
@@ -2049,7 +2049,7 @@ class Dispatcher:
         a later turn whose window boundary lifted the orphan to the front
         would then crash with OpenAI's
         ``messages with role tool must be a response to a preceeding
-        message with tool_calls`` 400 (ERRORS.md E1).
+        message with tool_calls`` 400.
         """
         self.history = self._prune_orphan_tool_messages(self.history)
         hist = self.history

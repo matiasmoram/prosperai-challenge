@@ -40,6 +40,9 @@ htmlcov/
 # Local-only reference material (never shipped)
 .reference-dump/
 
+# Internal agent-orientation notes — kept local, not shipped (any directory level)
+CLAUDE.md
+
 # Prosper local state
 data/
 *.db

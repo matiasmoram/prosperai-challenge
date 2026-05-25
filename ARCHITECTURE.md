@@ -331,7 +331,7 @@ does beyond the FSM:
    parent is pruned in `_prune_orphan_tool_messages`. Without this,
    OpenAI rejects the next turn with
    `messages with role tool must be a response to a preceding message
-   with tool_calls` (see `ERRORS.md` E1).
+   with tool_calls`.
 
 5. **Per-turn tool dedup.** A misbehaving model can fire the same tool
    with identical args repeatedly. After two duplicate calls in one
@@ -532,8 +532,8 @@ ended / error) with accessible labels (`aria-pressed`, `aria-label`); a
 user-actionable mic-permission error ("Allow mic access in your browser
 settings"); and `BOT_ORIGIN` overridable for deployment so it is not hard-pinned
 to localhost. Ownership boundary: F4 edits **static assets only** — a new mount
-path or route is an F5 change to `server.py`/`sse.py` (seam S2 in `FRONTS.md`),
-and the `:7860` signaling pipeline is F2 (`bot.py`, seam S3).
+path or route is an F5 change to `server.py`/`sse.py` (the console-bus seam),
+and the `:7860` signaling pipeline is F2 (`bot.py`).
 
 ## 9. EHR
 
@@ -1126,6 +1126,6 @@ handling (TTSAudibleObserver + mark_last_assistant_interrupted, Wave 7)**.
   design, speculative race.
 - `docs/superpowers/specs/2026-05-19-prosper-challenge-design.md` —
   full deliberation trail (LLM council verdict per decision).
-- `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, `ERRORS.md`,
+- `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`,
   `FUTURE.md`, `.editorconfig`, `.gitattributes` — repo hygiene +
   contributor surface.

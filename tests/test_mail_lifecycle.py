@@ -1,6 +1,6 @@
 """Front-desk mail is written for the full appointment lifecycle.
 
-Booking already emitted a ``booking_confirmation`` record (FRONTS.md §F6).
+Booking already emitted a ``booking_confirmation`` record.
 These tests pin the two added lifecycle events: a ``cancellation`` notice
 after an Ok cancel and a ``reschedule`` notice after an Ok reschedule, so the
 front-desk inbox reflects freed/moved slots — not just new bookings.
