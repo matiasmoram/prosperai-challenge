@@ -107,8 +107,12 @@ bot hears it).
   only a dishonest confirmation or a plow-ahead-on-garble is. Exit non-zero = a real
   bug caught. Generated personas that emit `[Placeholder]` text are flagged `corrupt`
   and excluded from the tally (data quality, not a bot failure).
-- **Last live messy run**: 4/4 clean, **0 plowed_ahead_on_garble** — the bot fails
-  safe under garble (asks to repeat rather than acting on a misheard value).
+- **Last live runs**: full curated set **12/12 clean, 0 violations** (injection →
+  handed_off, bait → no fake confirm, intent-reversal → handed_off, all messy →
+  fail-safe); messy subset **0 plowed_ahead_on_garble**. The bot fails safe under
+  garble (asks to repeat rather than acting on a misheard value). Note: the live
+  caller LLM is non-deterministic, so the suite is a sampling signal, not a fixed
+  gate — the deterministic layers (1–3) are the regression gate.
 
 Run: `uv run python -m tester.simulate --only messy_intent_reversal` (needs
 `OPENAI_API_KEY`) · `--generate 5` · `--concurrency 4` · `-v` for transcripts.
