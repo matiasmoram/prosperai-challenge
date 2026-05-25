@@ -141,12 +141,18 @@ async def simulate_call(
                         if persona.noise_profile
                         else clean
                     )
+                    # Mark garbled ONLY when noise actually changed the text.
+                    # A confirmation like "yes, book that" has nothing for the
+                    # number/intent profiles to corrupt → garble() is a no-op →
+                    # the turn is effectively clean, and the booking that follows
+                    # a clean confirmation must not be flagged plowed_ahead.
+                    was_garbled = heard != clean
                     turn_log.append(
                         Turn(
                             role="caller",
                             text=heard,
-                            garbled=persona.noise_profile is not None,
-                            original=clean if persona.noise_profile else None,
+                            garbled=was_garbled,
+                            original=clean if was_garbled else None,
                         )
                     )
                     before = len(bus.events)
